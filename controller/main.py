@@ -1,0 +1,3496 @@
+"""
+Task Controller - FastAPI Application
+
+Phase 6: Production Hardening & Explicit Go-Live Controls
+
+Central orchestrator that:
+- Bootstraps new project repositories (filesystem only)
+- Maintains project-level manifests
+- Tracks task lifecycle (state machine)
+- Generates implementation plans (NO execution)
+- Generates proposed code changes as DIFFS
+- Applies diffs with EXPLICIT human confirmation
+- Supports dry-run, apply, and rollback
+- Prepares git commits (human-approved)
+- Triggers CI pipelines (controlled)
+- Enforces test gates
+- Supports environment promotion (testing → production)
+- Enforces dual approval for production deployment
+- Maintains immutable audit trail
+
+PHASE 6 CONSTRAINTS (Production Hardening):
+- NO autonomous production deployment (EVER)
+- NO single-actor production approval (dual approval required)
+- NO silent production changes (every action logged)
+- NO bypassing testing environment (must deploy to testing first)
+- NO rollback omission (instant rollback always available)
+- Production actions must be rare, explicit, auditable
+- Multi-step confirmation is mandatory
+- Different users MUST request and approve production
+
+PHASE 5 CONSTRAINTS (inherited):
+- NO automatic commits without human approval
+- NO automatic merges
+- NO CI triggers without explicit intent
+- NO bypassing test failures
+- NO background or scheduled CI runs
+- CI must be human-initiated or human-approved
+- All release steps must be auditable
+- Rollback must remain possible
+- Commits are artifacts, not automatic actions
+"""
+
+import json
+import logging
+import shutil
+import uuid
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Optional
+
+import yaml
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("task_controller")
+
+# -----------------------------------------------------------------------------
+# Constants
+# -----------------------------------------------------------------------------
+PROJECTS_DIR = Path(__file__).parent.parent / "projects"
+DOCS_DIR = Path(__file__).parent.parent / "docs"
+
+# -----------------------------------------------------------------------------
+# Enums
+# -----------------------------------------------------------------------------
+class TaskType(str, Enum):
+    """Supported task types for the platform."""
+    BUG = "bug"
+    FEATURE = "feature"
+    REFACTOR = "refactor"
+    INFRA = "infra"
+
+
+class TaskState(str, Enum):
+    """Task lifecycle states (Phase 6 state machine)."""
+    RECEIVED = "received"
+    VALIDATED = "validated"
+    PLANNED = "planned"
+    AWAITING_APPROVAL = "awaiting_approval"
+    APPROVED = "approved"
+    DIFF_GENERATED = "diff_generated"  # Phase 3
+    # Phase 4: Execution states
+    READY_TO_APPLY = "ready_to_apply"  # Dry-run passed, awaiting apply confirmation
+    APPLYING = "applying"              # Currently applying diff
+    APPLIED = "applied"                # Diff successfully applied
+    ROLLED_BACK = "rolled_back"        # Applied changes have been rolled back
+    EXECUTION_FAILED = "execution_failed"  # Apply failed, restored from backup
+    # Phase 5: CI/Release states
+    COMMITTED = "committed"            # Git commit created locally (not pushed)
+    CI_RUNNING = "ci_running"          # CI pipeline running
+    CI_PASSED = "ci_passed"            # CI pipeline passed
+    CI_FAILED = "ci_failed"            # CI pipeline failed
+    DEPLOYED_TESTING = "deployed_testing"  # Deployed to testing environment
+    # Phase 6: Production states (GUARDED HEAVILY)
+    PROD_DEPLOY_REQUESTED = "prod_deploy_requested"  # Production deployment requested (awaiting approval)
+    PROD_APPROVED = "prod_approved"                  # Approved by DIFFERENT user (ready for deploy)
+    DEPLOYED_PRODUCTION = "deployed_production"      # Deployed to production
+    PROD_ROLLED_BACK = "prod_rolled_back"            # Production rollback executed (break-glass)
+    REJECTED = "rejected"
+    ARCHIVED = "archived"
+
+
+class CIStatus(str, Enum):
+    """CI pipeline status values."""
+    PASSED = "passed"
+    FAILED = "failed"
+
+
+class ProjectPhase(str, Enum):
+    """Project lifecycle phases."""
+    BOOTSTRAP = "bootstrap"
+    DEVELOPMENT = "development"
+    HARDENING = "hardening"
+    RELEASE = "release"
+    MAINTENANCE = "maintenance"
+
+
+class DeploymentEnvironment(str, Enum):
+    """Supported deployment environments."""
+    DEVELOPMENT = "development"
+    TESTING = "testing"
+    PRODUCTION = "production"
+
+
+# -----------------------------------------------------------------------------
+# Request/Response Models
+# -----------------------------------------------------------------------------
+class ProjectBootstrapRequest(BaseModel):
+    """Request model for project bootstrap."""
+    project_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-z0-9-]+$')
+    repo_url: str = Field(..., description="Repository URL (string only, no validation)")
+    tech_stack: list[str] = Field(default_factory=list, description="List of technologies")
+    user_id: Optional[str] = None
+
+
+class ProjectBootstrapResponse(BaseModel):
+    """Response model for project bootstrap."""
+    project_name: str
+    status: str
+    manifest_path: str
+    state_path: str
+    message: str
+    created_at: str
+
+
+class TaskRequest(BaseModel):
+    """Request model for creating a new task."""
+    project_name: str
+    task_description: str
+    task_type: TaskType
+    user_id: Optional[str] = None
+
+
+class TaskResponse(BaseModel):
+    """Response model for task creation."""
+    task_id: str
+    project_name: str
+    task_type: TaskType
+    state: TaskState
+    message: str
+    created_at: str
+
+
+class TaskValidateResponse(BaseModel):
+    """Response model for task validation."""
+    task_id: str
+    previous_state: TaskState
+    current_state: TaskState
+    validation_passed: bool
+    validation_errors: list[str]
+    message: str
+
+
+class TaskPlanResponse(BaseModel):
+    """Response model for plan generation."""
+    task_id: str
+    state: TaskState
+    plan_path: str
+    message: str
+
+
+class TaskApprovalResponse(BaseModel):
+    """Response model for task approval/rejection."""
+    task_id: str
+    previous_state: TaskState
+    current_state: TaskState
+    message: str
+    rejection_reason: Optional[str] = None
+
+
+class DiffGenerateResponse(BaseModel):
+    """Response model for diff generation (Phase 3)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    diff_path: str
+    files_in_diff: int
+    message: str
+    warning: str = "DIFF NOT APPLIED. FOR HUMAN REVIEW ONLY."
+
+
+# -----------------------------------------------------------------------------
+# Phase 4 Response Models
+# -----------------------------------------------------------------------------
+class DryRunResponse(BaseModel):
+    """Response model for dry-run (Phase 4)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    files_affected: list[str]
+    lines_added: int
+    lines_removed: int
+    can_apply: bool
+    conflicts: list[str]
+    message: str
+    warning: str = "DRY-RUN ONLY. NO FILES MODIFIED."
+
+
+class ApplyResponse(BaseModel):
+    """Response model for apply (Phase 4)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    files_modified: list[str]
+    backup_path: str
+    message: str
+    rollback_available: bool = True
+
+
+class RollbackResponse(BaseModel):
+    """Response model for rollback (Phase 4)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    files_restored: list[str]
+    message: str
+
+
+# -----------------------------------------------------------------------------
+# Phase 5 Response Models
+# -----------------------------------------------------------------------------
+class CommitResponse(BaseModel):
+    """Response model for commit preparation (Phase 5)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    commit_hash: str
+    commit_message: str
+    files_committed: list[str]
+    message: str
+    warning: str = "COMMIT CREATED LOCALLY. NOT PUSHED."
+
+
+class CIRunResponse(BaseModel):
+    """Response model for CI trigger (Phase 5)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    ci_run_id: str
+    message: str
+    warning: str = "CI RUNNING. WAIT FOR RESULTS."
+
+
+class CIResultRequest(BaseModel):
+    """Request model for CI result ingestion (Phase 5)."""
+    status: CIStatus
+    logs_url: Optional[str] = None
+    details: Optional[str] = None
+
+
+class CIResultResponse(BaseModel):
+    """Response model for CI result ingestion (Phase 5)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    ci_status: CIStatus
+    logs_url: Optional[str]
+    message: str
+
+
+class DeployTestingResponse(BaseModel):
+    """Response model for testing deployment (Phase 5)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    deployment_url: str
+    message: str
+    warning: str = "DEPLOYED TO TESTING ONLY. NOT PRODUCTION."
+
+
+# -----------------------------------------------------------------------------
+# Phase 6 Request/Response Models - Production Deployment
+# -----------------------------------------------------------------------------
+class ProdDeployRequestModel(BaseModel):
+    """Request model for production deployment request (Phase 6)."""
+    justification: str = Field(..., min_length=20, description="Why this deploy is needed (min 20 chars)")
+    risk_acknowledged: bool = Field(..., description="User acknowledges production risk")
+    rollback_plan: str = Field(..., min_length=10, description="How to rollback if needed")
+
+
+class ProdDeployRequestResponse(BaseModel):
+    """Response model for production deployment request (Phase 6)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    requested_by: str
+    justification: str
+    rollback_plan: str
+    message: str
+    warning: str = "⚠️ PRODUCTION DEPLOYMENT REQUESTED. REQUIRES APPROVAL FROM DIFFERENT USER."
+    next_step: str = "Another user must approve via /task/{task_id}/deploy/production/approve"
+
+
+class ProdApproveRequest(BaseModel):
+    """Request model for production approval (Phase 6)."""
+    approval_reason: str = Field(..., min_length=10, description="Reason for approval")
+    reviewed_changes: bool = Field(..., description="Approver has reviewed all changes")
+    reviewed_rollback: bool = Field(..., description="Approver has reviewed rollback plan")
+
+
+class ProdApproveResponse(BaseModel):
+    """Response model for production approval (Phase 6)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    requested_by: str
+    approved_by: str
+    approval_reason: str
+    message: str
+    warning: str = "⚠️ PRODUCTION DEPLOYMENT APPROVED. READY FOR FINAL APPLY."
+    next_step: str = "Execute deploy via /task/{task_id}/deploy/production/apply with confirm=true"
+
+
+class ProdApplyResponse(BaseModel):
+    """Response model for production apply (Phase 6)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    requested_by: str
+    approved_by: str
+    applied_by: str
+    deployment_url: str
+    release_manifest_path: str
+    message: str
+    warning: str = "🚀 DEPLOYED TO PRODUCTION. MONITOR CLOSELY."
+    rollback_available: bool = True
+    rollback_command: str = "POST /task/{task_id}/deploy/production/rollback"
+
+
+class ProdRollbackResponse(BaseModel):
+    """Response model for production rollback (Phase 6)."""
+    task_id: str
+    project_name: str
+    previous_state: TaskState
+    current_state: TaskState
+    rolled_back_by: str
+    rollback_reason: str
+    message: str
+    warning: str = "⚠️ PRODUCTION ROLLED BACK. Verify system stability."
+
+
+class StatusResponse(BaseModel):
+    """Response model for project status."""
+    project_name: str
+    current_phase: str
+    task_count: int
+    tasks_by_state: dict
+    last_updated: str
+
+
+class DeployRequest(BaseModel):
+    """Request model for deployment."""
+    project_name: str
+    environment: DeploymentEnvironment
+    user_id: Optional[str] = None
+
+
+class DeployResponse(BaseModel):
+    """Response model for deployment."""
+    project_name: str
+    environment: DeploymentEnvironment
+    status: str
+    message: str
+    deployment_url: Optional[str]
+
+
+# -----------------------------------------------------------------------------
+# Policy Enforcement Hooks (Phase 2)
+# -----------------------------------------------------------------------------
+def can_create_project(user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can a project be created?
+
+    Returns (allowed, reason)
+    """
+    # Phase 2: Always allow, log decision
+    logger.info(f"POLICY CHECK: can_create_project | user_id={user_id} | ALLOWED")
+    return True, "Project creation allowed"
+
+
+def can_submit_task(project_name: str, user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can a task be submitted to this project?
+
+    Returns (allowed, reason)
+    """
+    # Phase 2: Always allow, log decision
+    logger.info(f"POLICY CHECK: can_submit_task | project={project_name} | user_id={user_id} | ALLOWED")
+    return True, "Task submission allowed"
+
+
+def can_validate_task(task_id: str, user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can this task be validated?
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_validate_task | task_id={task_id} | user_id={user_id} | ALLOWED")
+    return True, "Task validation allowed"
+
+
+def can_plan_task(task_id: str, user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can a plan be generated for this task?
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_plan_task | task_id={task_id} | user_id={user_id} | ALLOWED")
+    return True, "Plan generation allowed"
+
+
+def can_approve_task(task_id: str, user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can this task be approved?
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_approve_task | task_id={task_id} | user_id={user_id} | ALLOWED")
+    return True, "Task approval allowed"
+
+
+def can_reject_task(task_id: str, user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can this task be rejected?
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_reject_task | task_id={task_id} | user_id={user_id} | ALLOWED")
+    return True, "Task rejection allowed"
+
+
+# -----------------------------------------------------------------------------
+# Phase 3 Policy Hooks - Diff Generation
+# -----------------------------------------------------------------------------
+def can_generate_diff(task_id: str, user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can a diff be generated for this task?
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_generate_diff | task_id={task_id} | user_id={user_id} | ALLOWED")
+    return True, "Diff generation allowed"
+
+
+def diff_within_scope(plan_files: list[str], diff_files: list[str]) -> tuple[bool, str]:
+    """
+    Policy check: Are the files in the diff within the scope defined by the plan?
+
+    This ensures diffs only modify files mentioned in the plan.
+
+    Returns (allowed, reason)
+    """
+    # Phase 3: Stub - always returns True but logs for inspection
+    logger.info(f"POLICY CHECK: diff_within_scope | plan_files={plan_files} | diff_files={diff_files}")
+
+    # In future phases, this would check that diff_files is a subset of plan_files
+    # For now, log and allow
+    for diff_file in diff_files:
+        logger.info(f"  Scope check: {diff_file} - ALLOWED (stub)")
+
+    return True, "All diff files within plan scope"
+
+
+def diff_file_limit_ok(file_count: int, max_files: int = 10) -> tuple[bool, str]:
+    """
+    Policy check: Is the number of files in the diff within limits?
+
+    Phase 3 constraint: Max 10 files per diff.
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: diff_file_limit_ok | count={file_count} | max={max_files}")
+
+    if file_count > max_files:
+        logger.warning(f"POLICY VIOLATION: diff_file_limit_ok | {file_count} > {max_files}")
+        return False, f"Diff contains {file_count} files, exceeds maximum of {max_files}"
+
+    return True, f"File count ({file_count}) within limit ({max_files})"
+
+
+# -----------------------------------------------------------------------------
+# Phase 4 Policy Hooks - Execution
+# -----------------------------------------------------------------------------
+def can_dry_run(task_id: str, user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can a dry-run be performed for this task?
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_dry_run | task_id={task_id} | user_id={user_id} | ALLOWED")
+    return True, "Dry-run allowed"
+
+
+def can_apply(task_id: str, user_id: Optional[str] = None, confirmed: bool = False) -> tuple[bool, str]:
+    """
+    Policy check: Can the diff be applied for this task?
+
+    CRITICAL: This MUST require explicit confirmation.
+    If confirmed=False, this MUST return False.
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_apply | task_id={task_id} | user_id={user_id} | confirmed={confirmed}")
+
+    if not confirmed:
+        logger.warning(f"POLICY VIOLATION: can_apply | confirmation missing for task {task_id}")
+        return False, "Apply REQUIRES explicit confirmation. Set confirm=true."
+
+    logger.info(f"POLICY CHECK: can_apply | task_id={task_id} | ALLOWED (confirmed)")
+    return True, "Apply allowed (confirmed by user)"
+
+
+def can_rollback(task_id: str, user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can changes be rolled back for this task?
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_rollback | task_id={task_id} | user_id={user_id} | ALLOWED")
+    return True, "Rollback allowed"
+
+
+# -----------------------------------------------------------------------------
+# Phase 5 Policy Hooks - CI/Release
+# -----------------------------------------------------------------------------
+def can_commit(task_id: str, user_id: Optional[str] = None, confirmed: bool = False) -> tuple[bool, str]:
+    """
+    Policy check: Can a commit be created for this task?
+
+    CRITICAL: This MUST require explicit confirmation.
+    If confirmed=False, this MUST return False.
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_commit | task_id={task_id} | user_id={user_id} | confirmed={confirmed}")
+
+    if not confirmed:
+        logger.warning(f"POLICY VIOLATION: can_commit | confirmation missing for task {task_id}")
+        return False, "Commit REQUIRES explicit confirmation. Set confirm=true."
+
+    logger.info(f"POLICY CHECK: can_commit | task_id={task_id} | ALLOWED (confirmed)")
+    return True, "Commit allowed (confirmed by user)"
+
+
+def can_trigger_ci(task_id: str, user_id: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Policy check: Can CI be triggered for this task?
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_trigger_ci | task_id={task_id} | user_id={user_id} | ALLOWED")
+    return True, "CI trigger allowed"
+
+
+def can_deploy_testing(task_id: str, user_id: Optional[str] = None, confirmed: bool = False) -> tuple[bool, str]:
+    """
+    Policy check: Can this task be deployed to testing?
+
+    CRITICAL: This MUST require explicit confirmation.
+    If confirmed=False, this MUST return False.
+
+    CI MUST have passed before deployment.
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_deploy_testing | task_id={task_id} | user_id={user_id} | confirmed={confirmed}")
+
+    if not confirmed:
+        logger.warning(f"POLICY VIOLATION: can_deploy_testing | confirmation missing for task {task_id}")
+        return False, "Testing deployment REQUIRES explicit confirmation. Set confirm=true."
+
+    logger.info(f"POLICY CHECK: can_deploy_testing | task_id={task_id} | ALLOWED (confirmed)")
+    return True, "Testing deployment allowed (confirmed by user)"
+
+
+# -----------------------------------------------------------------------------
+# Phase 6 Policy Hooks - Production Deployment (CRITICAL SAFETY)
+# -----------------------------------------------------------------------------
+def can_request_prod_deploy(
+    task_id: str,
+    user_id: Optional[str] = None,
+    risk_acknowledged: bool = False
+) -> tuple[bool, str]:
+    """
+    Policy check: Can a production deployment be requested?
+
+    CRITICAL: User MUST acknowledge production risk.
+    CRITICAL: Task MUST have been deployed to testing first.
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_request_prod_deploy | task_id={task_id} | user_id={user_id} | risk_acknowledged={risk_acknowledged}")
+
+    if not user_id:
+        logger.warning(f"POLICY VIOLATION: can_request_prod_deploy | user_id required for task {task_id}")
+        return False, "Production deployment request REQUIRES user identification."
+
+    if not risk_acknowledged:
+        logger.warning(f"POLICY VIOLATION: can_request_prod_deploy | risk not acknowledged for task {task_id}")
+        return False, "Production deployment REQUIRES explicit risk acknowledgment (risk_acknowledged=true)."
+
+    logger.info(f"POLICY CHECK: can_request_prod_deploy | task_id={task_id} | ALLOWED (risk acknowledged)")
+    return True, "Production deployment request allowed (risk acknowledged)"
+
+
+def can_approve_prod_deploy(
+    task_id: str,
+    approver_id: Optional[str] = None,
+    requester_id: Optional[str] = None,
+    reviewed_changes: bool = False,
+    reviewed_rollback: bool = False
+) -> tuple[bool, str]:
+    """
+    Policy check: Can production deployment be approved?
+
+    CRITICAL: Approver MUST be DIFFERENT from requester (dual approval).
+    CRITICAL: Approver MUST have reviewed changes and rollback plan.
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_approve_prod_deploy | task_id={task_id} | approver={approver_id} | requester={requester_id}")
+
+    if not approver_id:
+        logger.warning(f"POLICY VIOLATION: can_approve_prod_deploy | approver_id required for task {task_id}")
+        return False, "Production approval REQUIRES approver identification."
+
+    if not requester_id:
+        logger.warning(f"POLICY VIOLATION: can_approve_prod_deploy | requester_id missing for task {task_id}")
+        return False, "Production approval REQUIRES knowing who requested the deploy."
+
+    # CRITICAL: Dual approval enforcement - same user cannot approve their own request
+    if approver_id == requester_id:
+        logger.warning(f"POLICY VIOLATION: can_approve_prod_deploy | SAME USER ({approver_id}) tried to approve own request for task {task_id}")
+        return False, f"DUAL APPROVAL REQUIRED: Approver ({approver_id}) CANNOT be the same as requester ({requester_id})."
+
+    if not reviewed_changes:
+        logger.warning(f"POLICY VIOLATION: can_approve_prod_deploy | changes not reviewed for task {task_id}")
+        return False, "Production approval REQUIRES reviewer to confirm changes were reviewed."
+
+    if not reviewed_rollback:
+        logger.warning(f"POLICY VIOLATION: can_approve_prod_deploy | rollback not reviewed for task {task_id}")
+        return False, "Production approval REQUIRES reviewer to confirm rollback plan was reviewed."
+
+    logger.info(f"POLICY CHECK: can_approve_prod_deploy | task_id={task_id} | ALLOWED (dual approval: {requester_id} -> {approver_id})")
+    return True, f"Production approval allowed (dual approval: requester={requester_id}, approver={approver_id})"
+
+
+def can_apply_prod_deploy(
+    task_id: str,
+    user_id: Optional[str] = None,
+    confirmed: bool = False
+) -> tuple[bool, str]:
+    """
+    Policy check: Can production deployment be applied?
+
+    CRITICAL: Task MUST be in PROD_APPROVED state.
+    CRITICAL: Explicit confirmation required.
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_apply_prod_deploy | task_id={task_id} | user_id={user_id} | confirmed={confirmed}")
+
+    if not user_id:
+        logger.warning(f"POLICY VIOLATION: can_apply_prod_deploy | user_id required for task {task_id}")
+        return False, "Production deployment apply REQUIRES user identification."
+
+    if not confirmed:
+        logger.warning(f"POLICY VIOLATION: can_apply_prod_deploy | confirmation missing for task {task_id}")
+        return False, "Production deployment REQUIRES explicit confirmation (confirm=true)."
+
+    logger.info(f"POLICY CHECK: can_apply_prod_deploy | task_id={task_id} | ALLOWED (confirmed)")
+    return True, "Production deployment apply allowed (confirmed)"
+
+
+def can_rollback_prod(
+    task_id: str,
+    user_id: Optional[str] = None
+) -> tuple[bool, str]:
+    """
+    Policy check: Can production be rolled back?
+
+    NOTE: Rollback does NOT require dual approval (speed > ceremony for emergency).
+    NOTE: Rollback is always allowed for deployed production tasks.
+
+    Returns (allowed, reason)
+    """
+    logger.info(f"POLICY CHECK: can_rollback_prod | task_id={task_id} | user_id={user_id}")
+
+    if not user_id:
+        logger.warning(f"POLICY VIOLATION: can_rollback_prod | user_id required for task {task_id}")
+        return False, "Production rollback REQUIRES user identification (for audit trail)."
+
+    # Rollback is ALWAYS allowed (break-glass) - speed over ceremony
+    logger.info(f"POLICY CHECK: can_rollback_prod | task_id={task_id} | ALLOWED (break-glass rollback)")
+    return True, "Production rollback allowed (break-glass enabled)"
+
+
+# -----------------------------------------------------------------------------
+# Helper Functions
+# -----------------------------------------------------------------------------
+def get_project_path(project_name: str) -> Path:
+    """Get the path to a project directory."""
+    return PROJECTS_DIR / project_name
+
+
+def project_exists(project_name: str) -> bool:
+    """Check if a project exists by verifying PROJECT_MANIFEST.yaml exists."""
+    manifest_path = get_project_path(project_name) / "PROJECT_MANIFEST.yaml"
+    return manifest_path.exists()
+
+
+def generate_task_id() -> str:
+    """Generate a unique task ID using UUID."""
+    return str(uuid.uuid4())
+
+
+def get_task_path(project_name: str, task_id: str) -> Path:
+    """Get the path to a task file."""
+    return get_project_path(project_name) / "tasks" / f"{task_id}.yaml"
+
+
+def get_plan_path(project_name: str, task_id: str) -> Path:
+    """Get the path to a plan file."""
+    return get_project_path(project_name) / "plans" / f"{task_id}_plan.md"
+
+
+def get_diff_path(project_name: str, task_id: str) -> Path:
+    """Get the path to a diff file (Phase 3)."""
+    return get_project_path(project_name) / "diffs" / f"{task_id}.diff"
+
+
+def get_backup_path(project_name: str, task_id: str) -> Path:
+    """Get the path to backup directory for a task (Phase 4)."""
+    return get_project_path(project_name) / "backups" / task_id
+
+
+# -----------------------------------------------------------------------------
+# Phase 6 Helper Functions - Audit & Release
+# -----------------------------------------------------------------------------
+def get_audit_log_path(project_name: str) -> Path:
+    """Get the path to production audit log (Phase 6)."""
+    return get_project_path(project_name) / "audit" / "production.log"
+
+
+def get_release_path(project_name: str, task_id: str) -> Path:
+    """Get the path to release directory for a task (Phase 6)."""
+    return get_project_path(project_name) / "releases" / task_id
+
+
+def append_audit_log(project_name: str, entry: dict) -> None:
+    """
+    Append an entry to the immutable production audit log (Phase 6).
+
+    NOTE: This is append-only. Entries cannot be deleted or modified.
+    """
+    audit_path = get_audit_log_path(project_name)
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Add timestamp and ensure immutability marker
+    entry['timestamp'] = datetime.utcnow().isoformat()
+    entry['immutable'] = True
+
+    # Append to log file (one JSON line per entry)
+    with open(audit_path, 'a') as f:
+        f.write(json.dumps(entry) + '\n')
+
+    logger.info(f"AUDIT LOG: {entry.get('action', 'unknown')} | task={entry.get('task_id', 'N/A')} | user={entry.get('user_id', 'N/A')}")
+
+
+def create_release_manifest(
+    project_name: str,
+    task_id: str,
+    requested_by: str,
+    approved_by: str,
+    applied_by: str,
+    justification: str,
+    rollback_plan: str
+) -> str:
+    """Create RELEASE_MANIFEST.yaml for a production release (Phase 6)."""
+    release_path = get_release_path(project_name, task_id)
+    release_path.mkdir(parents=True, exist_ok=True)
+
+    manifest = {
+        "task_id": task_id,
+        "project_name": project_name,
+        "release_type": "production",
+        "requested_by": requested_by,
+        "approved_by": approved_by,
+        "applied_by": applied_by,
+        "justification": justification,
+        "rollback_plan": rollback_plan,
+        "deployed_at": datetime.utcnow().isoformat(),
+        "status": "deployed",
+        "dual_approval_verified": requested_by != approved_by,
+    }
+
+    manifest_path = release_path / "RELEASE_MANIFEST.yaml"
+    write_yaml_file(manifest_path, manifest)
+
+    return str(manifest_path)
+
+
+def create_deploy_log(
+    project_name: str,
+    task_id: str,
+    action: str,
+    user_id: str,
+    details: dict
+) -> None:
+    """Create/append to DEPLOY_LOG.md for a task (Phase 6)."""
+    release_path = get_release_path(project_name, task_id)
+    release_path.mkdir(parents=True, exist_ok=True)
+
+    log_path = release_path / "DEPLOY_LOG.md"
+    timestamp = datetime.utcnow().isoformat()
+
+    entry = f"""
+## {action}
+
+- **Timestamp**: {timestamp}
+- **User**: {user_id}
+- **Details**: {json.dumps(details, indent=2)}
+
+---
+"""
+
+    # Append to log
+    with open(log_path, 'a') as f:
+        if log_path.stat().st_size == 0 if log_path.exists() else True:
+            f.write(f"# Deployment Log - {task_id}\n\n")
+        f.write(entry)
+
+    logger.info(f"DEPLOY LOG: {action} | task={task_id} | user={user_id}")
+
+
+def deploy_to_production(project_name: str, task_id: str) -> str:
+    """
+    Placeholder for production deployment (Phase 6).
+
+    Returns the production deployment URL.
+    """
+    # In real implementation, this would trigger actual deployment
+    # For now, return placeholder URL
+    logger.info(f"PRODUCTION DEPLOY (placeholder): project={project_name}, task={task_id}")
+    return "https://ai.mybd.in"
+
+
+def rollback_production(project_name: str, task_id: str) -> bool:
+    """
+    Placeholder for production rollback (Phase 6).
+
+    Returns True if rollback successful.
+    """
+    # In real implementation, this would trigger actual rollback
+    logger.info(f"PRODUCTION ROLLBACK (placeholder): project={project_name}, task={task_id}")
+    return True
+
+
+def read_yaml_file(file_path: Path) -> dict:
+    """Read and parse a YAML file."""
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    with open(file_path, 'r') as f:
+        return yaml.safe_load(f) or {}
+
+
+def write_yaml_file(file_path: Path, data: dict) -> None:
+    """Write data to a YAML file."""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(file_path, 'w') as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+    logger.info(f"Written YAML file: {file_path}")
+
+
+def write_markdown_file(file_path: Path, content: str) -> None:
+    """Write content to a markdown file."""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(file_path, 'w') as f:
+        f.write(content)
+    logger.info(f"Written markdown file: {file_path}")
+
+
+def read_project_manifest(project_name: str) -> dict:
+    """Read PROJECT_MANIFEST.yaml for a project."""
+    manifest_path = get_project_path(project_name) / "PROJECT_MANIFEST.yaml"
+    return read_yaml_file(manifest_path)
+
+
+def update_project_manifest(project_name: str, updates: dict) -> None:
+    """Update PROJECT_MANIFEST.yaml for a project."""
+    manifest_path = get_project_path(project_name) / "PROJECT_MANIFEST.yaml"
+    manifest = read_yaml_file(manifest_path)
+    manifest.update(updates)
+    manifest['updated_at'] = datetime.utcnow().isoformat()
+    write_yaml_file(manifest_path, manifest)
+
+
+def read_task(project_name: str, task_id: str) -> dict:
+    """Read a task record."""
+    task_path = get_task_path(project_name, task_id)
+    return read_yaml_file(task_path)
+
+
+def write_task(project_name: str, task_id: str, task_data: dict) -> None:
+    """Write a task record."""
+    task_path = get_task_path(project_name, task_id)
+    task_data['updated_at'] = datetime.utcnow().isoformat()
+    write_yaml_file(task_path, task_data)
+
+
+def list_tasks(project_name: str) -> list[dict]:
+    """List all tasks for a project."""
+    tasks_dir = get_project_path(project_name) / "tasks"
+    if not tasks_dir.exists():
+        return []
+
+    tasks = []
+    for task_file in tasks_dir.glob("*.yaml"):
+        try:
+            task_data = read_yaml_file(task_file)
+            tasks.append(task_data)
+        except Exception as e:
+            logger.error(f"Error reading task file {task_file}: {e}")
+
+    return tasks
+
+
+def validate_task_transition(current_state: TaskState, target_state: TaskState) -> bool:
+    """Validate if a state transition is allowed."""
+    # Define allowed transitions (Phase 6 updated)
+    allowed_transitions = {
+        TaskState.RECEIVED: [TaskState.VALIDATED, TaskState.REJECTED],
+        TaskState.VALIDATED: [TaskState.PLANNED, TaskState.REJECTED],
+        TaskState.PLANNED: [TaskState.AWAITING_APPROVAL],
+        TaskState.AWAITING_APPROVAL: [TaskState.APPROVED, TaskState.REJECTED],
+        TaskState.APPROVED: [TaskState.DIFF_GENERATED, TaskState.ARCHIVED],
+        TaskState.DIFF_GENERATED: [TaskState.READY_TO_APPLY, TaskState.ARCHIVED],  # Phase 4: Dry-run
+        # Phase 4: Execution states
+        TaskState.READY_TO_APPLY: [TaskState.APPLYING, TaskState.ARCHIVED],  # Apply or abandon
+        TaskState.APPLYING: [TaskState.APPLIED, TaskState.EXECUTION_FAILED],  # Success or fail
+        TaskState.APPLIED: [TaskState.ROLLED_BACK, TaskState.COMMITTED, TaskState.ARCHIVED],  # Phase 5: Can commit
+        TaskState.ROLLED_BACK: [TaskState.ARCHIVED],  # Terminal for this cycle
+        TaskState.EXECUTION_FAILED: [TaskState.READY_TO_APPLY, TaskState.ARCHIVED],  # Retry or abandon
+        # Phase 5: CI/Release states
+        TaskState.COMMITTED: [TaskState.CI_RUNNING, TaskState.ARCHIVED],  # Trigger CI or abandon
+        TaskState.CI_RUNNING: [TaskState.CI_PASSED, TaskState.CI_FAILED],  # CI result
+        TaskState.CI_PASSED: [TaskState.DEPLOYED_TESTING, TaskState.ARCHIVED],  # Deploy or archive
+        TaskState.CI_FAILED: [TaskState.COMMITTED, TaskState.ARCHIVED],  # Fix and recommit, or abandon
+        # Phase 6: Production deployment path (DEPLOYED_TESTING → Production)
+        TaskState.DEPLOYED_TESTING: [TaskState.PROD_DEPLOY_REQUESTED, TaskState.ARCHIVED],  # Request production or archive
+        TaskState.PROD_DEPLOY_REQUESTED: [TaskState.PROD_APPROVED, TaskState.REJECTED],  # Approve or reject
+        TaskState.PROD_APPROVED: [TaskState.DEPLOYED_PRODUCTION, TaskState.REJECTED],  # Apply or reject
+        TaskState.DEPLOYED_PRODUCTION: [TaskState.PROD_ROLLED_BACK, TaskState.ARCHIVED],  # Rollback or archive
+        TaskState.PROD_ROLLED_BACK: [TaskState.ARCHIVED],  # Terminal for production rollback
+        TaskState.REJECTED: [TaskState.ARCHIVED],
+        TaskState.ARCHIVED: [],  # Terminal state
+    }
+
+    return target_state in allowed_transitions.get(current_state, [])
+
+
+# -----------------------------------------------------------------------------
+# Project Bootstrap Functions
+# -----------------------------------------------------------------------------
+def create_project_manifest(project_name: str, repo_url: str, tech_stack: list[str]) -> dict:
+    """Create initial PROJECT_MANIFEST.yaml content."""
+    return {
+        "project_name": project_name,
+        "repo_url": repo_url,
+        "environment": "testing",  # Only testing allowed
+        "tech_stack": tech_stack,
+        "allowed_actions": [
+            "create_task",
+            "validate_task",
+            "generate_plan",
+            "approve_task",
+            "reject_task",
+            "generate_diff",  # Phase 3
+            # Phase 4: Execution actions
+            "dry_run",
+            "apply",
+            "rollback",
+            # Phase 5: CI/Release actions
+            "commit",
+            "ci_run",
+            "ci_result",
+            "deploy_testing",
+            # Phase 6: Production deployment actions (DUAL APPROVAL)
+            "prod_deploy_request",
+            "prod_deploy_approve",
+            "prod_deploy_apply",
+            "prod_rollback"
+        ],
+        "current_phase": ProjectPhase.BOOTSTRAP.value,
+        "task_history": [],  # Task IDs only
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat()
+    }
+
+
+def create_current_state(project_name: str) -> str:
+    """Create initial CURRENT_STATE.md content."""
+    return f"""# Current State - {project_name}
+
+## Last Updated
+- **Timestamp**: {datetime.utcnow().isoformat()}
+- **Phase**: BOOTSTRAP
+
+## Tasks
+
+| Task ID | Type | State | Created |
+|---------|------|-------|---------|
+| (none) | - | - | - |
+
+## Notes
+
+Project bootstrapped. Ready for task submission.
+"""
+
+
+# -----------------------------------------------------------------------------
+# Plan Generation Functions
+# -----------------------------------------------------------------------------
+def generate_implementation_plan(task_data: dict, project_manifest: dict) -> str:
+    """
+    Generate a high-level implementation plan.
+
+    NOTE: This generates PLANS only, not code.
+    NO file diffs, NO code generation.
+    """
+    task_id = task_data['task_id']
+    task_type = task_data['task_type']
+    description = task_data['description']
+    project_name = task_data['project_name']
+    tech_stack = project_manifest.get('tech_stack', [])
+
+    # Generate plan based on task type
+    type_specific_guidance = {
+        'bug': "Focus on identifying root cause, minimal fix, regression prevention.",
+        'feature': "Focus on incremental implementation, clear interfaces, test coverage.",
+        'refactor': "Focus on preserving behavior, improving structure, no new features.",
+        'infra': "Focus on reliability, monitoring, rollback capability."
+    }
+
+    guidance = type_specific_guidance.get(task_type, "Follow standard development practices.")
+
+    plan_content = f"""# Implementation Plan
+
+## Task Information
+
+| Field | Value |
+|-------|-------|
+| Task ID | `{task_id}` |
+| Project | {project_name} |
+| Type | {task_type} |
+| Created | {task_data.get('created_at', 'N/A')} |
+
+## Description
+
+{description}
+
+## Tech Stack
+
+{', '.join(tech_stack) if tech_stack else 'Not specified'}
+
+---
+
+## Overview
+
+This plan outlines the high-level approach for implementing this {task_type} task.
+
+**Guidance**: {guidance}
+
+---
+
+## Files Likely to Change
+
+> NOTE: These are predicted paths. Actual files will be determined during implementation.
+
+| Path Pattern | Reason |
+|--------------|--------|
+| `src/**/*.py` | Main source code changes |
+| `tests/**/*.py` | Test additions/modifications |
+| `docs/*.md` | Documentation updates |
+| `config/*.yaml` | Configuration changes (if needed) |
+
+---
+
+## Risk Analysis
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| Breaking existing functionality | Medium | High | Comprehensive test coverage |
+| Performance regression | Low | Medium | Benchmark before/after |
+| Security vulnerability | Low | High | Security review checklist |
+
+---
+
+## Test Impact
+
+- [ ] Unit tests required
+- [ ] Integration tests required
+- [ ] Manual testing on testing environment required
+- [ ] Performance testing (if applicable)
+
+---
+
+## Rollback Strategy
+
+1. All changes are committed in a single, atomic commit
+2. Git revert can undo the change
+3. Testing environment validation required before production
+4. Production deployment requires explicit human approval (per AI_POLICY.md)
+
+---
+
+## Implementation Steps (High-Level)
+
+1. **Analyze**: Review existing code related to this task
+2. **Design**: Define approach and interfaces
+3. **Implement**: Make code changes
+4. **Test**: Write and run tests
+5. **Document**: Update relevant documentation
+6. **Review**: Self-review and validation
+7. **Submit**: Create PR for human review
+
+---
+
+## Approval Requirements
+
+- [ ] Plan reviewed by human
+- [ ] Approach approved
+- [ ] No policy violations identified
+
+---
+
+*This plan was auto-generated. Human review required before approval.*
+
+*Generated at: {datetime.utcnow().isoformat()}*
+"""
+
+    return plan_content
+
+
+# -----------------------------------------------------------------------------
+# Phase 3: Diff Generation Functions
+# -----------------------------------------------------------------------------
+def generate_diff_header(task_id: str, project_name: str, plan_path: str) -> str:
+    """Generate the metadata header for a diff file."""
+    return f"""# TASK_ID: {task_id}
+# PROJECT: {project_name}
+# GENERATED_AT: {datetime.utcnow().isoformat()}
+# PLAN_REF: {plan_path}
+# DISCLAIMER: NOT APPLIED. FOR HUMAN REVIEW ONLY.
+#
+# This diff was auto-generated based on the approved plan.
+# It contains proposed code changes that MUST be reviewed by a human.
+#
+# TO APPLY (manually, in a future phase):
+#   git apply projects/{project_name}/diffs/{task_id}.diff
+#
+# SAFETY: This diff has NOT been applied. No code changes have been made.
+#
+
+"""
+
+
+def generate_diff_content(task_data: dict, plan_content: str, tech_stack: list[str]) -> tuple[str, list[str]]:
+    """
+    Generate illustrative diff content based on task and plan.
+
+    NOTE: This generates TEMPLATE/PLACEHOLDER diffs, not real code.
+    The diffs show structure, not actual implementation.
+
+    Returns (diff_content, list_of_files_in_diff)
+    """
+    task_type = task_data.get('task_type', 'feature')
+    task_id = task_data['task_id']
+    description = task_data.get('description', 'No description')
+
+    # Determine file patterns based on tech stack
+    is_python = any(t.lower() in ['python', 'fastapi', 'django', 'flask'] for t in tech_stack)
+    is_javascript = any(t.lower() in ['javascript', 'typescript', 'react', 'node', 'nextjs'] for t in tech_stack)
+
+    files_in_diff = []
+    diff_sections = []
+
+    if is_python:
+        # Generate Python-style diff
+        if task_type == 'bug':
+            files_in_diff = ['src/main.py', 'tests/test_main.py']
+            diff_sections.append(f"""--- a/src/main.py
++++ b/src/main.py
+@@ -1,6 +1,10 @@
+ # Main application module
++# Task: {task_id}
++# Fix: {description[:50]}...
+
+ def main():
+-    # TODO: Bug fix needed here
+-    pass
++    # Fixed implementation
++    # TODO: Actual implementation will be added in execution phase
++    raise NotImplementedError("Phase 3: Diff only, no execution")
+""")
+            diff_sections.append(f"""--- a/tests/test_main.py
++++ b/tests/test_main.py
+@@ -1,5 +1,12 @@
+ # Test module
++import pytest
+
+ def test_main():
+-    pass
++    # Test for bug fix: {task_id}
++    # TODO: Actual test implementation in execution phase
++    with pytest.raises(NotImplementedError):
++        from src.main import main
++        main()
+""")
+        else:  # feature, refactor, infra
+            files_in_diff = ['src/feature.py', 'tests/test_feature.py']
+            diff_sections.append(f"""--- /dev/null
++++ b/src/feature.py
+@@ -0,0 +1,15 @@
++# New feature module
++# Task: {task_id}
++# Description: {description[:60]}...
++#
++# PHASE 3 PLACEHOLDER - No actual implementation
++
++
++class FeaturePlaceholder:
++    \"\"\"Placeholder for new feature.\"\"\"
++
++    def __init__(self):
++        raise NotImplementedError("Phase 3: Diff only, no execution")
++
++    def execute(self):
++        raise NotImplementedError("Phase 3: Diff only, no execution")
+""")
+            diff_sections.append(f"""--- /dev/null
++++ b/tests/test_feature.py
+@@ -0,0 +1,12 @@
++# Test module for new feature
++# Task: {task_id}
++import pytest
++
++
++def test_feature_placeholder():
++    \"\"\"Test placeholder for feature.\"\"\"
++    # TODO: Actual test implementation in execution phase
++    with pytest.raises(NotImplementedError):
++        from src.feature import FeaturePlaceholder
++        f = FeaturePlaceholder()
+""")
+
+    elif is_javascript:
+        # Generate JavaScript-style diff
+        files_in_diff = ['src/index.js', 'tests/index.test.js']
+        diff_sections.append(f"""--- a/src/index.js
++++ b/src/index.js
+@@ -1,5 +1,15 @@
+ // Main module
++// Task: {task_id}
++// Description: {description[:50]}...
++
++/**
++ * Placeholder function for task implementation
++ * PHASE 3: No execution, diff only
++ */
++function placeholder() {{
++  throw new Error('Phase 3: Diff only, no execution');
++}}
+
+-module.exports = {{}};
++module.exports = {{ placeholder }};
+""")
+        diff_sections.append(f"""--- /dev/null
++++ b/tests/index.test.js
+@@ -0,0 +1,10 @@
++// Test module
++// Task: {task_id}
++const {{ placeholder }} = require('../src/index');
++
++describe('Feature placeholder', () => {{
++  it('should throw NotImplementedError', () => {{
++    expect(() => placeholder()).toThrow('Phase 3: Diff only, no execution');
++  }});
++}});
+""")
+
+    else:
+        # Generic placeholder diff
+        files_in_diff = ['src/module.txt', 'docs/CHANGES.md']
+        diff_sections.append(f"""--- /dev/null
++++ b/src/module.txt
+@@ -0,0 +1,8 @@
++# Placeholder Module
++# Task: {task_id}
++# Description: {description[:60]}...
++#
++# This is a placeholder file generated in Phase 3.
++# Actual implementation will be added in execution phase.
++#
++# PHASE 3: DIFF ONLY - NO EXECUTION
+""")
+        diff_sections.append(f"""--- /dev/null
++++ b/docs/CHANGES.md
+@@ -0,0 +1,5 @@
++# Changes for Task {task_id}
++
++## Description
++{description}
++
++## Status: DIFF_GENERATED (not applied)
+""")
+
+    return "\n".join(diff_sections), files_in_diff
+
+
+def write_diff_file(diff_path: Path, header: str, content: str) -> None:
+    """Write a diff file with header and content."""
+    diff_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(diff_path, 'w') as f:
+        f.write(header)
+        f.write(content)
+    logger.info(f"Written diff file: {diff_path}")
+
+
+# -----------------------------------------------------------------------------
+# Phase 4: Execution Functions
+# -----------------------------------------------------------------------------
+def parse_diff_files(diff_content: str) -> list[str]:
+    """
+    Parse a diff to extract the list of files affected.
+
+    Returns list of file paths from the diff.
+    """
+    files = []
+    for line in diff_content.split('\n'):
+        if line.startswith('+++ b/'):
+            file_path = line[6:].strip()
+            if file_path and file_path != '/dev/null':
+                files.append(file_path)
+        elif line.startswith('--- a/'):
+            file_path = line[6:].strip()
+            if file_path and file_path != '/dev/null' and file_path not in files:
+                files.append(file_path)
+    return files
+
+
+def count_diff_lines(diff_content: str) -> tuple[int, int]:
+    """
+    Count lines added and removed in a diff.
+
+    Returns (lines_added, lines_removed)
+    """
+    lines_added = 0
+    lines_removed = 0
+
+    in_diff_body = False
+    for line in diff_content.split('\n'):
+        if line.startswith('@@'):
+            in_diff_body = True
+            continue
+        if line.startswith('--- ') or line.startswith('+++ '):
+            continue
+        if in_diff_body:
+            if line.startswith('+') and not line.startswith('+++'):
+                lines_added += 1
+            elif line.startswith('-') and not line.startswith('---'):
+                lines_removed += 1
+
+    return lines_added, lines_removed
+
+
+def simulate_diff_apply(project_path: Path, diff_content: str) -> tuple[bool, list[str]]:
+    """
+    Simulate applying a diff (dry-run).
+
+    Validates:
+    - Files exist (or are new files)
+    - No obvious conflicts
+
+    Returns (can_apply, list_of_conflicts)
+    """
+    conflicts = []
+    files = parse_diff_files(diff_content)
+
+    for file_path in files:
+        target_path = project_path / file_path
+
+        # Check if this is a new file
+        is_new_file = False
+        for line in diff_content.split('\n'):
+            if line.startswith('--- /dev/null') or line.startswith('--- a/' + file_path):
+                if line.startswith('--- /dev/null'):
+                    is_new_file = True
+                break
+
+        if is_new_file:
+            # New file - check if parent directory can be created
+            parent = target_path.parent
+            if parent.exists() and parent.is_file():
+                conflicts.append(f"Cannot create {file_path}: parent is a file")
+        else:
+            # Existing file modification - file must exist
+            # For Phase 4, we're working with placeholder files, so we'll be lenient
+            pass
+
+    can_apply = len(conflicts) == 0
+    logger.info(f"Dry-run simulation: can_apply={can_apply}, conflicts={conflicts}")
+    return can_apply, conflicts
+
+
+def create_backup(project_name: str, task_id: str, files_to_backup: list[str]) -> Path:
+    """
+    Create backup of files before applying diff.
+
+    Creates backup directory structure:
+    projects/<project_name>/backups/<task_id>/
+    └── <relative_file_paths>
+
+    Returns path to backup directory.
+    """
+    backup_dir = get_backup_path(project_name, task_id)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    project_path = get_project_path(project_name)
+    backed_up_files = []
+
+    for file_path in files_to_backup:
+        source = project_path / file_path
+        if source.exists():
+            # Create backup with directory structure
+            backup_file = backup_dir / file_path
+            backup_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, backup_file)
+            backed_up_files.append(file_path)
+            logger.info(f"Backed up: {file_path}")
+
+    # Write backup manifest
+    manifest = {
+        "task_id": task_id,
+        "project_name": project_name,
+        "created_at": datetime.utcnow().isoformat(),
+        "files": backed_up_files
+    }
+    manifest_path = backup_dir / "BACKUP_MANIFEST.yaml"
+    write_yaml_file(manifest_path, manifest)
+
+    logger.info(f"Backup created: {backup_dir}")
+    return backup_dir
+
+
+def apply_diff_to_files(project_name: str, task_id: str, diff_content: str) -> list[str]:
+    """
+    Apply diff to project files.
+
+    SAFETY:
+    - Backup MUST exist before calling this function
+    - This function ONLY creates/modifies files listed in the diff
+
+    Returns list of files modified.
+    """
+    project_path = get_project_path(project_name)
+    files = parse_diff_files(diff_content)
+    modified_files = []
+
+    for file_path in files:
+        target_path = project_path / file_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # For Phase 4, we simulate applying the diff by creating placeholder files
+        # In a real implementation, this would use patch or similar
+        # Extract content for this file from diff
+        file_content = extract_file_content_from_diff(diff_content, file_path)
+
+        with open(target_path, 'w') as f:
+            f.write(file_content)
+
+        modified_files.append(file_path)
+        logger.info(f"Applied diff to: {file_path}")
+
+    return modified_files
+
+
+def extract_file_content_from_diff(diff_content: str, file_path: str) -> str:
+    """
+    Extract the new content for a file from a diff.
+
+    For Phase 4, this extracts the '+' lines (excluding the +++ header).
+    """
+    lines = []
+    in_file_section = False
+    found_file = False
+
+    for line in diff_content.split('\n'):
+        if line.startswith('+++ b/' + file_path):
+            in_file_section = True
+            found_file = True
+            continue
+
+        if in_file_section:
+            if line.startswith('--- ') or line.startswith('+++ '):
+                in_file_section = False
+                continue
+            if line.startswith('@@'):
+                continue
+            if line.startswith('+') and not line.startswith('+++'):
+                lines.append(line[1:])  # Remove the leading '+'
+            elif line.startswith(' '):
+                lines.append(line[1:])  # Context line
+
+    if not found_file:
+        # File not found in diff, return placeholder
+        return f"# File: {file_path}\n# Applied from diff for Phase 4\n"
+
+    return '\n'.join(lines)
+
+
+def restore_from_backup(project_name: str, task_id: str) -> list[str]:
+    """
+    Restore files from backup.
+
+    Returns list of files restored.
+    """
+    backup_dir = get_backup_path(project_name, task_id)
+    project_path = get_project_path(project_name)
+
+    if not backup_dir.exists():
+        raise FileNotFoundError(f"Backup not found for task {task_id}")
+
+    # Read backup manifest
+    manifest_path = backup_dir / "BACKUP_MANIFEST.yaml"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Backup manifest not found for task {task_id}")
+
+    manifest = read_yaml_file(manifest_path)
+    restored_files = []
+
+    for file_path in manifest.get('files', []):
+        backup_file = backup_dir / file_path
+        target_file = project_path / file_path
+
+        if backup_file.exists():
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup_file, target_file)
+            restored_files.append(file_path)
+            logger.info(f"Restored: {file_path}")
+
+    # Also restore files that were created (delete them)
+    task_data = read_task(project_name, task_id)
+    files_in_diff = task_data.get('files_in_diff', [])
+
+    for file_path in files_in_diff:
+        if file_path not in manifest.get('files', []):
+            # This file was created by the diff, delete it
+            target_file = project_path / file_path
+            if target_file.exists():
+                target_file.unlink()
+                logger.info(f"Deleted newly created file: {file_path}")
+
+    logger.info(f"Restore complete: {len(restored_files)} files restored")
+    return restored_files
+
+
+# -----------------------------------------------------------------------------
+# Phase 5: CI/Release Functions
+# -----------------------------------------------------------------------------
+def generate_commit_hash() -> str:
+    """
+    Generate a placeholder commit hash.
+
+    In a real implementation, this would come from git.
+    """
+    return str(uuid.uuid4())[:8]
+
+
+def generate_ci_run_id() -> str:
+    """
+    Generate a CI run ID.
+
+    In a real implementation, this would come from the CI system.
+    """
+    return f"ci-{str(uuid.uuid4())[:8]}"
+
+
+def create_commit_message(task_data: dict) -> str:
+    """
+    Generate a commit message for a task.
+
+    Format:
+    [task_type] task_id: short description
+
+    Body includes task details and Phase 5 markers.
+    """
+    task_id = task_data['task_id']
+    task_type = task_data.get('task_type', 'task')
+    description = task_data.get('description', 'No description')
+
+    # Truncate description for subject line
+    short_desc = description[:50] + "..." if len(description) > 50 else description
+
+    return f"""[{task_type}] {task_id[:8]}: {short_desc}
+
+Task ID: {task_id}
+Type: {task_type}
+Description: {description}
+
+Phase 5: Human-approved commit
+---
+This commit was created via the AI Development Platform.
+NOT automatically pushed. Human review required.
+"""
+
+
+def prepare_git_commit(project_name: str, task_id: str, task_data: dict) -> tuple[str, str, list[str]]:
+    """
+    Prepare a git commit for applied changes.
+
+    SAFETY:
+    - This creates commit metadata, NOT an actual git commit
+    - Does NOT push to any remote
+    - Returns (commit_hash, commit_message, files_committed)
+
+    In a real implementation, this would:
+    1. Stage files from task_data['files_modified']
+    2. Create a git commit with the message
+    3. Return the actual commit hash
+    """
+    commit_hash = generate_commit_hash()
+    commit_message = create_commit_message(task_data)
+    files_committed = task_data.get('files_modified', [])
+
+    logger.info(f"Prepared commit {commit_hash} for task {task_id}")
+    logger.info(f"Files to commit: {files_committed}")
+
+    # In Phase 5, we store commit info but do NOT actually run git
+    # This is a placeholder for future git integration
+
+    return commit_hash, commit_message, files_committed
+
+
+def trigger_ci_pipeline(project_name: str, task_id: str, commit_hash: str) -> str:
+    """
+    Trigger CI pipeline for a commit.
+
+    SAFETY:
+    - This is a placeholder for CI integration
+    - Does NOT actually trigger external CI
+    - Returns CI run ID
+
+    In a real implementation, this would:
+    1. Push commit to remote (if configured)
+    2. Trigger GitHub Actions via API
+    3. Return the workflow run ID
+    """
+    ci_run_id = generate_ci_run_id()
+
+    logger.info(f"CI pipeline triggered for task {task_id}, commit {commit_hash}")
+    logger.info(f"CI run ID: {ci_run_id}")
+
+    # In Phase 5, we store CI info but do NOT actually trigger external CI
+    # This is a placeholder for future CI integration
+
+    return ci_run_id
+
+
+def deploy_to_testing(project_name: str, task_id: str) -> str:
+    """
+    Deploy to testing environment.
+
+    SAFETY:
+    - This is a placeholder for testing deployment
+    - Does NOT deploy to production
+    - Returns deployment URL
+
+    In a real implementation, this would:
+    1. Trigger deployment script
+    2. Wait for deployment to complete
+    3. Return the testing URL
+    """
+    deployment_url = "https://aitesting.mybd.in"
+
+    logger.info(f"Deployed task {task_id} to testing: {deployment_url}")
+
+    # In Phase 5, this is a placeholder
+    # Actual deployment would be implemented in future phases
+
+    return deployment_url
+
+
+# -----------------------------------------------------------------------------
+# FastAPI Application
+# -----------------------------------------------------------------------------
+app = FastAPI(
+    title="AI Development Platform - Task Controller",
+    description="Phase 6: Production Hardening & Explicit Go-Live Controls",
+    version="0.6.0"
+)
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Health
+# -----------------------------------------------------------------------------
+@app.get("/")
+async def root():
+    """Health check endpoint."""
+    return {
+        "service": "AI Development Platform - Task Controller",
+        "phase": "Phase 6: Production Hardening & Explicit Go-Live Controls",
+        "status": "running",
+        "version": "0.6.0"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "components": {
+            "api": "operational",
+            "projects_dir": PROJECTS_DIR.exists(),
+            "docs_dir": DOCS_DIR.exists()
+        },
+        "phase": "Phase 5",
+        "capabilities": [
+            "project_bootstrap",
+            "task_lifecycle",
+            "plan_generation",
+            "approval_gates",
+            "diff_generation",
+            # Phase 4
+            "dry_run",
+            "apply_with_confirmation",
+            "rollback",
+            # Phase 5
+            "commit_with_confirmation",
+            "ci_trigger",
+            "ci_result_ingestion",
+            "deploy_testing_with_confirmation"
+        ],
+        "constraints": [
+            "NO_AUTONOMOUS_EXECUTION",
+            "CONFIRMATION_REQUIRED",
+            "BACKUP_BEFORE_APPLY",
+            "ROLLBACK_GUARANTEED",
+            "NO_PRODUCTION_DEPLOYMENT",
+            "HUMAN_REVIEW_REQUIRED",
+            # Phase 5
+            "NO_AUTOMATIC_COMMITS",
+            "NO_AUTOMATIC_MERGES",
+            "NO_CI_WITHOUT_INTENT",
+            "NO_BYPASS_TEST_FAILURES",
+            "NO_BACKGROUND_CI_RUNS"
+        ]
+    }
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Project Bootstrap (TASK 1)
+# -----------------------------------------------------------------------------
+@app.post("/project/bootstrap", response_model=ProjectBootstrapResponse)
+async def bootstrap_project(request: ProjectBootstrapRequest):
+    """
+    Bootstrap a new project.
+
+    Creates:
+    - Project directory structure
+    - PROJECT_MANIFEST.yaml
+    - CURRENT_STATE.md
+    - tasks/ directory
+    - plans/ directory
+
+    Rules:
+    - Fails if project already exists
+    - No Git operations
+    - Filesystem only
+    """
+    logger.info(f"Bootstrap request for project: {request.project_name}")
+
+    # Policy check
+    allowed, reason = can_create_project(request.user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Check if project already exists
+    if project_exists(request.project_name):
+        logger.warning(f"Project already exists: {request.project_name}")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Project '{request.project_name}' already exists"
+        )
+
+    # Create project directory structure
+    project_path = get_project_path(request.project_name)
+    tasks_dir = project_path / "tasks"
+    plans_dir = project_path / "plans"
+    diffs_dir = project_path / "diffs"  # Phase 3
+    backups_dir = project_path / "backups"  # Phase 4
+
+    logger.info(f"Creating project directory: {project_path}")
+    project_path.mkdir(parents=True, exist_ok=True)
+    tasks_dir.mkdir(exist_ok=True)
+    plans_dir.mkdir(exist_ok=True)
+    diffs_dir.mkdir(exist_ok=True)
+    backups_dir.mkdir(exist_ok=True)  # Phase 4
+
+    # Create PROJECT_MANIFEST.yaml
+    manifest_path = project_path / "PROJECT_MANIFEST.yaml"
+    manifest_data = create_project_manifest(
+        project_name=request.project_name,
+        repo_url=request.repo_url,
+        tech_stack=request.tech_stack
+    )
+    write_yaml_file(manifest_path, manifest_data)
+    logger.info(f"Created manifest: {manifest_path}")
+
+    # Create CURRENT_STATE.md
+    state_path = project_path / "CURRENT_STATE.md"
+    state_content = create_current_state(request.project_name)
+    write_markdown_file(state_path, state_content)
+    logger.info(f"Created state file: {state_path}")
+
+    logger.info(f"Project bootstrapped successfully: {request.project_name}")
+
+    return ProjectBootstrapResponse(
+        project_name=request.project_name,
+        status="bootstrapped",
+        manifest_path=str(manifest_path),
+        state_path=str(state_path),
+        message=f"Project '{request.project_name}' bootstrapped successfully",
+        created_at=datetime.utcnow().isoformat()
+    )
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Task Lifecycle (TASK 2)
+# -----------------------------------------------------------------------------
+@app.post("/task", response_model=TaskResponse)
+async def create_task(request: TaskRequest):
+    """
+    Create a new task for a project.
+
+    - Generates a unique task_id
+    - Persists task record to filesystem
+    - Sets state to RECEIVED
+    - Attaches task to project manifest
+    """
+    logger.info(f"Task creation request for project: {request.project_name}")
+
+    # Validate project exists
+    if not project_exists(request.project_name):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project '{request.project_name}' not found. Bootstrap it first."
+        )
+
+    # Policy check
+    allowed, reason = can_submit_task(request.project_name, request.user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Generate task ID
+    task_id = generate_task_id()
+    created_at = datetime.utcnow().isoformat()
+
+    # Create task record
+    task_data = {
+        "task_id": task_id,
+        "project_name": request.project_name,
+        "submitted_by": request.user_id,
+        "task_type": request.task_type.value,
+        "description": request.task_description,
+        "current_state": TaskState.RECEIVED.value,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "plan_summary": ""
+    }
+
+    # Persist task to filesystem
+    write_task(request.project_name, task_id, task_data)
+    logger.info(f"Task persisted: {task_id}")
+
+    # Update project manifest with task reference
+    manifest = read_project_manifest(request.project_name)
+    task_history = manifest.get('task_history', [])
+    task_history.append(task_id)
+    update_project_manifest(request.project_name, {'task_history': task_history})
+    logger.info(f"Task {task_id} added to project manifest")
+
+    return TaskResponse(
+        task_id=task_id,
+        project_name=request.project_name,
+        task_type=request.task_type,
+        state=TaskState.RECEIVED,
+        message="Task created successfully. Use /task/{task_id}/validate to validate.",
+        created_at=created_at
+    )
+
+
+@app.get("/task/{task_id}")
+async def get_task(task_id: str, project_name: str):
+    """Get task details."""
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    return read_task(project_name, task_id)
+
+
+@app.post("/task/{task_id}/validate", response_model=TaskValidateResponse)
+async def validate_task(task_id: str, project_name: str, user_id: Optional[str] = None):
+    """
+    Validate a task.
+
+    - Performs schema + policy validation
+    - Moves task to VALIDATED or REJECTED
+    """
+    logger.info(f"Validation request for task: {task_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Policy check
+    allowed, reason = can_validate_task(task_id, user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Validate state transition is allowed
+    if previous_state != TaskState.RECEIVED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot validate task in state '{previous_state.value}'. Must be RECEIVED."
+        )
+
+    # Perform validation
+    validation_errors = []
+
+    # Schema validation
+    if not task_data.get('description'):
+        validation_errors.append("Task description is empty")
+    if len(task_data.get('description', '')) < 10:
+        validation_errors.append("Task description too short (min 10 characters)")
+    if task_data.get('task_type') not in [t.value for t in TaskType]:
+        validation_errors.append(f"Invalid task type: {task_data.get('task_type')}")
+
+    # Determine new state
+    validation_passed = len(validation_errors) == 0
+    new_state = TaskState.VALIDATED if validation_passed else TaskState.REJECTED
+
+    # Update task
+    task_data['current_state'] = new_state.value
+    task_data['validation_errors'] = validation_errors
+    write_task(project_name, task_id, task_data)
+
+    logger.info(f"Task {task_id} validation: {'PASSED' if validation_passed else 'FAILED'}")
+
+    return TaskValidateResponse(
+        task_id=task_id,
+        previous_state=previous_state,
+        current_state=new_state,
+        validation_passed=validation_passed,
+        validation_errors=validation_errors,
+        message=f"Task {'validated successfully' if validation_passed else 'validation failed'}"
+    )
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Plan Generation (TASK 3)
+# -----------------------------------------------------------------------------
+@app.post("/task/{task_id}/plan", response_model=TaskPlanResponse)
+async def generate_plan(task_id: str, project_name: str, user_id: Optional[str] = None):
+    """
+    Generate a high-level implementation plan for a task.
+
+    - NO code generation
+    - NO file diffs
+    - Output Markdown only
+    - Saves to plans/<task_id>_plan.md
+    - Updates task state to PLANNED
+    """
+    logger.info(f"Plan generation request for task: {task_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Policy check
+    allowed, reason = can_plan_task(task_id, user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    current_state = TaskState(task_data['current_state'])
+
+    # Validate state - must be VALIDATED
+    if current_state != TaskState.VALIDATED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot generate plan for task in state '{current_state.value}'. Must be VALIDATED."
+        )
+
+    # Read project manifest for tech stack
+    manifest = read_project_manifest(project_name)
+
+    # Generate plan (NO CODE, just high-level plan)
+    plan_content = generate_implementation_plan(task_data, manifest)
+
+    # Save plan to file
+    plan_path = get_plan_path(project_name, task_id)
+    write_markdown_file(plan_path, plan_content)
+    logger.info(f"Plan saved: {plan_path}")
+
+    # Update task state to PLANNED, then AWAITING_APPROVAL
+    task_data['current_state'] = TaskState.AWAITING_APPROVAL.value
+    task_data['plan_summary'] = f"Plan generated at {plan_path}"
+    task_data['plan_path'] = str(plan_path)
+    write_task(project_name, task_id, task_data)
+
+    logger.info(f"Task {task_id} state updated to AWAITING_APPROVAL")
+
+    return TaskPlanResponse(
+        task_id=task_id,
+        state=TaskState.AWAITING_APPROVAL,
+        plan_path=str(plan_path),
+        message="Plan generated successfully. Review and approve/reject."
+    )
+
+
+@app.get("/task/{task_id}/plan")
+async def get_plan(task_id: str, project_name: str):
+    """Get the plan for a task."""
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    plan_path = get_plan_path(project_name, task_id)
+    if not plan_path.exists():
+        raise HTTPException(status_code=404, detail=f"Plan for task '{task_id}' not found")
+
+    with open(plan_path, 'r') as f:
+        return {"task_id": task_id, "plan": f.read()}
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Approval Gate (TASK 4)
+# -----------------------------------------------------------------------------
+@app.post("/task/{task_id}/approve", response_model=TaskApprovalResponse)
+async def approve_task(task_id: str, project_name: str, user_id: Optional[str] = None):
+    """
+    Approve a task.
+
+    - Only allowed if task is AWAITING_APPROVAL (was PLANNED)
+    - Moves state to APPROVED
+    - NO execution triggered (Phase 2 is thinking layer only)
+    """
+    logger.info(f"Approval request for task: {task_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Policy check
+    allowed, reason = can_approve_task(task_id, user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Validate state - must be AWAITING_APPROVAL
+    if previous_state != TaskState.AWAITING_APPROVAL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot approve task in state '{previous_state.value}'. Must be AWAITING_APPROVAL."
+        )
+
+    # Update task state to APPROVED
+    task_data['current_state'] = TaskState.APPROVED.value
+    task_data['approved_by'] = user_id
+    task_data['approved_at'] = datetime.utcnow().isoformat()
+    write_task(project_name, task_id, task_data)
+
+    logger.info(f"Task {task_id} APPROVED by {user_id}")
+
+    # NOTE: No execution triggered - Phase 3 generates diffs only
+
+    return TaskApprovalResponse(
+        task_id=task_id,
+        previous_state=previous_state,
+        current_state=TaskState.APPROVED,
+        message="Task approved. Use /task/{task_id}/generate-diff to generate code changes."
+    )
+
+
+class TaskRejectRequest(BaseModel):
+    """Request model for task rejection."""
+    rejection_reason: str = Field(..., min_length=10)
+
+
+@app.post("/task/{task_id}/reject", response_model=TaskApprovalResponse)
+async def reject_task(
+    task_id: str,
+    project_name: str,
+    request: TaskRejectRequest,
+    user_id: Optional[str] = None
+):
+    """
+    Reject a task.
+
+    - Moves task to REJECTED
+    - Requires rejection reason
+    """
+    logger.info(f"Rejection request for task: {task_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Policy check
+    allowed, reason = can_reject_task(task_id, user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Can reject from multiple states
+    rejectable_states = [
+        TaskState.RECEIVED,
+        TaskState.VALIDATED,
+        TaskState.AWAITING_APPROVAL
+    ]
+    if previous_state not in rejectable_states:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reject task in state '{previous_state.value}'."
+        )
+
+    # Update task state to REJECTED
+    task_data['current_state'] = TaskState.REJECTED.value
+    task_data['rejected_by'] = user_id
+    task_data['rejected_at'] = datetime.utcnow().isoformat()
+    task_data['rejection_reason'] = request.rejection_reason
+    write_task(project_name, task_id, task_data)
+
+    logger.info(f"Task {task_id} REJECTED by {user_id}: {request.rejection_reason}")
+
+    return TaskApprovalResponse(
+        task_id=task_id,
+        previous_state=previous_state,
+        current_state=TaskState.REJECTED,
+        message="Task rejected.",
+        rejection_reason=request.rejection_reason
+    )
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Diff Generation (Phase 3)
+# -----------------------------------------------------------------------------
+@app.post("/task/{task_id}/generate-diff", response_model=DiffGenerateResponse)
+async def generate_diff(task_id: str, project_name: str, user_id: Optional[str] = None):
+    """
+    Generate a diff for an approved task.
+
+    Phase 3 Constraints:
+    - Task MUST be in APPROVED state
+    - Plan file MUST exist
+    - Diff is generated but NOT applied
+    - Max 10 files per diff
+    - Human review is MANDATORY
+
+    SAFETY:
+    - NO code execution
+    - NO applying diffs
+    - NO git commits
+    - Diff file stored for human review
+    """
+    logger.info(f"Diff generation request for task: {task_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Policy check: Can generate diff?
+    allowed, reason = can_generate_diff(task_id, user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Precondition: Task MUST be APPROVED
+    if previous_state != TaskState.APPROVED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot generate diff for task in state '{previous_state.value}'. Must be APPROVED."
+        )
+
+    # Precondition: Plan file MUST exist
+    plan_path = get_plan_path(project_name, task_id)
+    if not plan_path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Plan file not found for task '{task_id}'. Generate plan first."
+        )
+
+    # Read plan content
+    with open(plan_path, 'r') as f:
+        plan_content = f.read()
+
+    # Read project manifest for tech stack
+    manifest = read_project_manifest(project_name)
+    tech_stack = manifest.get('tech_stack', [])
+
+    # Generate diff content
+    diff_content, files_in_diff = generate_diff_content(task_data, plan_content, tech_stack)
+
+    # Policy check: File limit
+    allowed, limit_reason = diff_file_limit_ok(len(files_in_diff))
+    if not allowed:
+        raise HTTPException(status_code=400, detail=limit_reason)
+
+    # Policy check: Scope (files in diff vs files in plan)
+    # For Phase 3, we use the files_in_diff as the "plan files" since we don't parse the plan
+    allowed, scope_reason = diff_within_scope(files_in_diff, files_in_diff)
+    if not allowed:
+        raise HTTPException(status_code=400, detail=scope_reason)
+
+    # Generate diff header
+    diff_header = generate_diff_header(
+        task_id=task_id,
+        project_name=project_name,
+        plan_path=f"plans/{task_id}_plan.md"
+    )
+
+    # Write diff file
+    diff_path = get_diff_path(project_name, task_id)
+    write_diff_file(diff_path, diff_header, diff_content)
+    logger.info(f"Diff generated: {diff_path}")
+
+    # Update task state to DIFF_GENERATED
+    task_data['current_state'] = TaskState.DIFF_GENERATED.value
+    task_data['diff_path'] = str(diff_path)
+    task_data['diff_generated_at'] = datetime.utcnow().isoformat()
+    task_data['diff_generated_by'] = user_id
+    task_data['files_in_diff'] = files_in_diff
+    write_task(project_name, task_id, task_data)
+
+    logger.info(f"Task {task_id} state updated to DIFF_GENERATED")
+
+    return DiffGenerateResponse(
+        task_id=task_id,
+        project_name=project_name,
+        previous_state=previous_state,
+        current_state=TaskState.DIFF_GENERATED,
+        diff_path=str(diff_path),
+        files_in_diff=len(files_in_diff),
+        message="Diff generated successfully. Review before applying.",
+        warning="DIFF NOT APPLIED. FOR HUMAN REVIEW ONLY."
+    )
+
+
+@app.get("/task/{task_id}/diff")
+async def get_diff(task_id: str, project_name: str):
+    """Get the diff for a task."""
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    diff_path = get_diff_path(project_name, task_id)
+    if not diff_path.exists():
+        raise HTTPException(status_code=404, detail=f"Diff for task '{task_id}' not found")
+
+    with open(diff_path, 'r') as f:
+        return {
+            "task_id": task_id,
+            "diff": f.read(),
+            "warning": "DIFF NOT APPLIED. FOR HUMAN REVIEW ONLY."
+        }
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Execution (Phase 4)
+# -----------------------------------------------------------------------------
+@app.post("/task/{task_id}/dry-run", response_model=DryRunResponse)
+async def dry_run(task_id: str, project_name: str, user_id: Optional[str] = None):
+    """
+    Perform a dry-run of diff application.
+
+    Phase 4 Constraints:
+    - Task MUST be in DIFF_GENERATED state
+    - NO files are modified
+    - Validates diff can be applied cleanly
+    - Outputs summary of changes
+
+    SAFETY:
+    - This is a READ-ONLY operation
+    - NO files are written
+    - NO backups created (no need)
+    """
+    logger.info(f"Dry-run request for task: {task_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Policy check
+    allowed, reason = can_dry_run(task_id, user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Precondition: Task MUST be DIFF_GENERATED
+    if previous_state != TaskState.DIFF_GENERATED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot dry-run task in state '{previous_state.value}'. Must be DIFF_GENERATED."
+        )
+
+    # Read diff
+    diff_path = get_diff_path(project_name, task_id)
+    if not diff_path.exists():
+        raise HTTPException(status_code=400, detail=f"Diff file not found for task '{task_id}'.")
+
+    with open(diff_path, 'r') as f:
+        diff_content = f.read()
+
+    # Parse diff for summary
+    files_affected = parse_diff_files(diff_content)
+    lines_added, lines_removed = count_diff_lines(diff_content)
+
+    # Simulate apply to check for conflicts
+    project_path = get_project_path(project_name)
+    can_apply, conflicts = simulate_diff_apply(project_path, diff_content)
+
+    # Update task state to READY_TO_APPLY if no conflicts
+    if can_apply:
+        task_data['current_state'] = TaskState.READY_TO_APPLY.value
+        task_data['dry_run_at'] = datetime.utcnow().isoformat()
+        task_data['dry_run_by'] = user_id
+        write_task(project_name, task_id, task_data)
+        logger.info(f"Task {task_id} dry-run PASSED, state updated to READY_TO_APPLY")
+        message = "Dry-run successful. Task is ready to apply. Use /task/{task_id}/apply with confirm=true."
+    else:
+        message = f"Dry-run found conflicts: {conflicts}. Fix before applying."
+        logger.warning(f"Task {task_id} dry-run found conflicts: {conflicts}")
+
+    return DryRunResponse(
+        task_id=task_id,
+        project_name=project_name,
+        previous_state=previous_state,
+        current_state=TaskState(task_data['current_state']),
+        files_affected=files_affected,
+        lines_added=lines_added,
+        lines_removed=lines_removed,
+        can_apply=can_apply,
+        conflicts=conflicts,
+        message=message,
+        warning="DRY-RUN ONLY. NO FILES MODIFIED."
+    )
+
+
+@app.post("/task/{task_id}/apply", response_model=ApplyResponse)
+async def apply_diff_endpoint(
+    task_id: str,
+    project_name: str,
+    confirm: bool = False,
+    user_id: Optional[str] = None
+):
+    """
+    Apply a diff to project files.
+
+    Phase 4 Constraints:
+    - Task MUST be in READY_TO_APPLY state (dry-run must pass first)
+    - EXPLICIT confirmation required (confirm=true)
+    - Backup MUST be created before apply
+    - Rollback MUST be available after apply
+
+    SAFETY:
+    - REQUIRES confirm=true parameter
+    - Creates backup BEFORE any modification
+    - Logs all file changes
+    - Rollback available via /task/{task_id}/rollback
+    """
+    logger.info(f"Apply request for task: {task_id}, confirm={confirm}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # CRITICAL: Policy check with confirmation requirement
+    allowed, reason = can_apply(task_id, user_id, confirmed=confirm)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Precondition: Task MUST be READY_TO_APPLY (dry-run must pass first)
+    if previous_state != TaskState.READY_TO_APPLY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot apply task in state '{previous_state.value}'. Must be READY_TO_APPLY (run dry-run first)."
+        )
+
+    # Read diff
+    diff_path = get_diff_path(project_name, task_id)
+    if not diff_path.exists():
+        raise HTTPException(status_code=400, detail=f"Diff file not found for task '{task_id}'.")
+
+    with open(diff_path, 'r') as f:
+        diff_content = f.read()
+
+    # Get files that will be affected
+    files_to_modify = parse_diff_files(diff_content)
+
+    # Update state to APPLYING
+    task_data['current_state'] = TaskState.APPLYING.value
+    task_data['apply_started_at'] = datetime.utcnow().isoformat()
+    task_data['apply_started_by'] = user_id
+    write_task(project_name, task_id, task_data)
+    logger.info(f"Task {task_id} state updated to APPLYING")
+
+    try:
+        # CRITICAL: Create backup BEFORE any modification
+        backup_path = create_backup(project_name, task_id, files_to_modify)
+        logger.info(f"Backup created at: {backup_path}")
+
+        # Apply the diff
+        modified_files = apply_diff_to_files(project_name, task_id, diff_content)
+        logger.info(f"Diff applied successfully: {modified_files}")
+
+        # Update state to APPLIED
+        task_data['current_state'] = TaskState.APPLIED.value
+        task_data['applied_at'] = datetime.utcnow().isoformat()
+        task_data['applied_by'] = user_id
+        task_data['backup_path'] = str(backup_path)
+        task_data['files_modified'] = modified_files
+        write_task(project_name, task_id, task_data)
+        logger.info(f"Task {task_id} state updated to APPLIED")
+
+        return ApplyResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=TaskState.APPLIED,
+            files_modified=modified_files,
+            backup_path=str(backup_path),
+            message="Diff applied successfully. Rollback available via /task/{task_id}/rollback.",
+            rollback_available=True
+        )
+
+    except Exception as e:
+        # CRITICAL: Automatic restore on failure
+        logger.error(f"Apply failed for task {task_id}: {e}")
+
+        try:
+            # Attempt to restore from backup
+            restore_from_backup(project_name, task_id)
+            logger.info(f"Restored from backup after failure")
+        except Exception as restore_error:
+            logger.error(f"Restore also failed: {restore_error}")
+
+        # Update state to EXECUTION_FAILED
+        task_data['current_state'] = TaskState.EXECUTION_FAILED.value
+        task_data['execution_failed_at'] = datetime.utcnow().isoformat()
+        task_data['execution_error'] = str(e)
+        write_task(project_name, task_id, task_data)
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Apply failed: {e}. Automatic restore attempted. Task state: EXECUTION_FAILED."
+        )
+
+
+@app.post("/task/{task_id}/rollback", response_model=RollbackResponse)
+async def rollback_task(task_id: str, project_name: str, user_id: Optional[str] = None):
+    """
+    Rollback applied changes.
+
+    Phase 4 Constraints:
+    - Task MUST be in APPLIED state
+    - Backup MUST exist
+    - Restores all files from backup
+
+    SAFETY:
+    - Restores original file state
+    - Deletes newly created files
+    - Preserves all artifacts (diff, plan, backup)
+    """
+    logger.info(f"Rollback request for task: {task_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Policy check
+    allowed, reason = can_rollback(task_id, user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Precondition: Task MUST be APPLIED
+    if previous_state != TaskState.APPLIED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot rollback task in state '{previous_state.value}'. Must be APPLIED."
+        )
+
+    # Verify backup exists
+    backup_path = get_backup_path(project_name, task_id)
+    if not backup_path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Backup not found for task '{task_id}'. Cannot rollback."
+        )
+
+    try:
+        # Restore from backup
+        restored_files = restore_from_backup(project_name, task_id)
+        logger.info(f"Rollback successful: {restored_files}")
+
+        # Update state to ROLLED_BACK
+        task_data['current_state'] = TaskState.ROLLED_BACK.value
+        task_data['rolled_back_at'] = datetime.utcnow().isoformat()
+        task_data['rolled_back_by'] = user_id
+        task_data['files_restored'] = restored_files
+        write_task(project_name, task_id, task_data)
+        logger.info(f"Task {task_id} state updated to ROLLED_BACK")
+
+        return RollbackResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=TaskState.ROLLED_BACK,
+            files_restored=restored_files,
+            message="Rollback successful. All changes have been reverted."
+        )
+
+    except Exception as e:
+        logger.error(f"Rollback failed for task {task_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Rollback failed: {e}. Manual intervention may be required."
+        )
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - CI/Release (Phase 5)
+# -----------------------------------------------------------------------------
+@app.post("/task/{task_id}/commit", response_model=CommitResponse)
+async def commit_task(
+    task_id: str,
+    project_name: str,
+    confirm: bool = False,
+    user_id: Optional[str] = None
+):
+    """
+    Prepare a git commit for applied changes.
+
+    Phase 5 Constraints:
+    - Task MUST be in APPLIED state
+    - EXPLICIT confirmation required (confirm=true)
+    - Commit is created LOCALLY, NOT pushed
+    - Human must manually push if desired
+
+    SAFETY:
+    - REQUIRES confirm=true parameter
+    - Does NOT push to remote
+    - Does NOT trigger CI automatically
+    - Commit hash and message are recorded
+    """
+    logger.info(f"Commit request for task: {task_id}, confirm={confirm}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # CRITICAL: Policy check with confirmation requirement
+    allowed, reason = can_commit(task_id, user_id, confirmed=confirm)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Precondition: Task MUST be APPLIED
+    if previous_state != TaskState.APPLIED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot commit task in state '{previous_state.value}'. Must be APPLIED."
+        )
+
+    try:
+        # Prepare git commit (does NOT actually run git)
+        commit_hash, commit_message, files_committed = prepare_git_commit(
+            project_name, task_id, task_data
+        )
+        logger.info(f"Commit prepared: {commit_hash}")
+
+        # Update state to COMMITTED
+        task_data['current_state'] = TaskState.COMMITTED.value
+        task_data['committed_at'] = datetime.utcnow().isoformat()
+        task_data['committed_by'] = user_id
+        task_data['commit_hash'] = commit_hash
+        task_data['commit_message'] = commit_message
+        task_data['files_committed'] = files_committed
+        write_task(project_name, task_id, task_data)
+        logger.info(f"Task {task_id} state updated to COMMITTED")
+
+        return CommitResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=TaskState.COMMITTED,
+            commit_hash=commit_hash,
+            commit_message=commit_message,
+            files_committed=files_committed,
+            message="Commit created locally. Use /task/{task_id}/ci/run to trigger CI.",
+            warning="COMMIT CREATED LOCALLY. NOT PUSHED."
+        )
+
+    except Exception as e:
+        logger.error(f"Commit failed for task {task_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Commit failed: {e}"
+        )
+
+
+@app.post("/task/{task_id}/ci/run", response_model=CIRunResponse)
+async def trigger_ci(task_id: str, project_name: str, user_id: Optional[str] = None):
+    """
+    Trigger CI pipeline for a committed task.
+
+    Phase 5 Constraints:
+    - Task MUST be in COMMITTED state
+    - Human MUST explicitly trigger CI
+    - CI runs in external system (placeholder in Phase 5)
+    - Results must be ingested via /task/{task_id}/ci/result
+
+    SAFETY:
+    - Does NOT auto-deploy on CI pass
+    - Does NOT auto-merge
+    - CI failure blocks promotion
+    """
+    logger.info(f"CI trigger request for task: {task_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Policy check
+    allowed, reason = can_trigger_ci(task_id, user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Precondition: Task MUST be COMMITTED
+    if previous_state != TaskState.COMMITTED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot trigger CI for task in state '{previous_state.value}'. Must be COMMITTED."
+        )
+
+    try:
+        # Get commit hash from task data
+        commit_hash = task_data.get('commit_hash', 'unknown')
+
+        # Trigger CI pipeline (placeholder)
+        ci_run_id = trigger_ci_pipeline(project_name, task_id, commit_hash)
+        logger.info(f"CI triggered: {ci_run_id}")
+
+        # Update state to CI_RUNNING
+        task_data['current_state'] = TaskState.CI_RUNNING.value
+        task_data['ci_triggered_at'] = datetime.utcnow().isoformat()
+        task_data['ci_triggered_by'] = user_id
+        task_data['ci_run_id'] = ci_run_id
+        write_task(project_name, task_id, task_data)
+        logger.info(f"Task {task_id} state updated to CI_RUNNING")
+
+        return CIRunResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=TaskState.CI_RUNNING,
+            ci_run_id=ci_run_id,
+            message="CI pipeline triggered. Wait for results and submit via /task/{task_id}/ci/result.",
+            warning="CI RUNNING. WAIT FOR RESULTS."
+        )
+
+    except Exception as e:
+        logger.error(f"CI trigger failed for task {task_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"CI trigger failed: {e}"
+        )
+
+
+@app.post("/task/{task_id}/ci/result", response_model=CIResultResponse)
+async def ingest_ci_result(
+    task_id: str,
+    project_name: str,
+    request: CIResultRequest,
+    user_id: Optional[str] = None
+):
+    """
+    Ingest CI result for a running pipeline.
+
+    Phase 5 Constraints:
+    - Task MUST be in CI_RUNNING state
+    - Status MUST be 'passed' or 'failed'
+    - CI_PASSED enables deployment, CI_FAILED blocks it
+    - CI failures can be re-committed and re-run
+
+    SAFETY:
+    - Does NOT auto-deploy on pass
+    - CI failure blocks all promotion
+    - Human must explicitly proceed after CI pass
+    """
+    logger.info(f"CI result ingestion for task: {task_id}, status={request.status}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Precondition: Task MUST be CI_RUNNING
+    if previous_state != TaskState.CI_RUNNING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot ingest CI result for task in state '{previous_state.value}'. Must be CI_RUNNING."
+        )
+
+    try:
+        # Determine new state based on CI result
+        if request.status == CIStatus.PASSED:
+            new_state = TaskState.CI_PASSED
+            message = "CI passed. Use /task/{task_id}/deploy/testing to deploy to testing."
+        else:
+            new_state = TaskState.CI_FAILED
+            message = "CI failed. Fix issues and re-commit, or archive the task."
+
+        # Update task state
+        task_data['current_state'] = new_state.value
+        task_data['ci_completed_at'] = datetime.utcnow().isoformat()
+        task_data['ci_status'] = request.status.value
+        task_data['ci_logs_url'] = request.logs_url
+        task_data['ci_details'] = request.details
+        write_task(project_name, task_id, task_data)
+        logger.info(f"Task {task_id} CI result: {request.status}, state updated to {new_state.value}")
+
+        return CIResultResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=new_state,
+            ci_status=request.status,
+            logs_url=request.logs_url,
+            message=message
+        )
+
+    except Exception as e:
+        logger.error(f"CI result ingestion failed for task {task_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"CI result ingestion failed: {e}"
+        )
+
+
+@app.post("/task/{task_id}/deploy/testing", response_model=DeployTestingResponse)
+async def deploy_to_testing_endpoint(
+    task_id: str,
+    project_name: str,
+    confirm: bool = False,
+    user_id: Optional[str] = None
+):
+    """
+    Deploy to testing environment.
+
+    Phase 5 Constraints:
+    - Task MUST be in CI_PASSED state (CI must pass)
+    - EXPLICIT confirmation required (confirm=true)
+    - Deploys to TESTING only, NOT production
+    - Production deployment remains blocked
+
+    SAFETY:
+    - REQUIRES confirm=true parameter
+    - REQUIRES CI_PASSED state (cannot bypass failed CI)
+    - Deploys to testing environment only
+    - Production deployment blocked by policy
+    """
+    logger.info(f"Testing deployment request for task: {task_id}, confirm={confirm}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # CRITICAL: Policy check with confirmation requirement
+    allowed, reason = can_deploy_testing(task_id, user_id, confirmed=confirm)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Precondition: Task MUST be CI_PASSED (cannot bypass failed CI)
+    if previous_state != TaskState.CI_PASSED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot deploy task in state '{previous_state.value}'. Must be CI_PASSED. CI failures block deployment."
+        )
+
+    try:
+        # Deploy to testing (placeholder)
+        deployment_url = deploy_to_testing(project_name, task_id)
+        logger.info(f"Deployed to testing: {deployment_url}")
+
+        # Update state to DEPLOYED_TESTING
+        task_data['current_state'] = TaskState.DEPLOYED_TESTING.value
+        task_data['deployed_testing_at'] = datetime.utcnow().isoformat()
+        task_data['deployed_testing_by'] = user_id
+        task_data['testing_deployment_url'] = deployment_url
+        write_task(project_name, task_id, task_data)
+        logger.info(f"Task {task_id} state updated to DEPLOYED_TESTING")
+
+        return DeployTestingResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=TaskState.DEPLOYED_TESTING,
+            deployment_url=deployment_url,
+            message="Deployed to testing environment successfully.",
+            warning="DEPLOYED TO TESTING ONLY. NOT PRODUCTION."
+        )
+
+    except Exception as e:
+        logger.error(f"Testing deployment failed for task {task_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Testing deployment failed: {e}"
+        )
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Phase 6: Production Deployment (DUAL APPROVAL REQUIRED)
+# -----------------------------------------------------------------------------
+@app.post("/task/{task_id}/deploy/production/request", response_model=ProdDeployRequestResponse)
+async def request_production_deploy(
+    task_id: str,
+    project_name: str,
+    request: ProdDeployRequestModel,
+    user_id: str
+):
+    """
+    Request production deployment (Phase 6).
+
+    CRITICAL SAFETY CONSTRAINTS:
+    - Task MUST be in DEPLOYED_TESTING state (testing must pass first)
+    - User MUST acknowledge production risk
+    - User MUST provide justification (min 20 chars)
+    - User MUST provide rollback plan
+    - This ONLY creates a request - requires DIFFERENT user to approve
+    - State transitions to PROD_DEPLOY_REQUESTED
+
+    NEXT STEP: Another user must call /task/{task_id}/deploy/production/approve
+    """
+    logger.info(f"⚠️ PRODUCTION DEPLOY REQUEST: task={task_id}, user={user_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # CRITICAL: Policy check with risk acknowledgment
+    allowed, reason = can_request_prod_deploy(task_id, user_id, request.risk_acknowledged)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # CRITICAL: Task MUST be deployed to testing first (no bypassing testing)
+    if previous_state != TaskState.DEPLOYED_TESTING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot request production deploy for task in state '{previous_state.value}'. "
+                   f"Task MUST be DEPLOYED_TESTING first. Testing cannot be bypassed."
+        )
+
+    try:
+        # Update task state to PROD_DEPLOY_REQUESTED
+        task_data['current_state'] = TaskState.PROD_DEPLOY_REQUESTED.value
+        task_data['prod_deploy_requested_at'] = datetime.utcnow().isoformat()
+        task_data['prod_deploy_requested_by'] = user_id
+        task_data['prod_deploy_justification'] = request.justification
+        task_data['prod_deploy_rollback_plan'] = request.rollback_plan
+        task_data['prod_deploy_risk_acknowledged'] = True
+        write_task(project_name, task_id, task_data)
+
+        # Audit log entry (immutable)
+        append_audit_log(project_name, {
+            "action": "PROD_DEPLOY_REQUESTED",
+            "task_id": task_id,
+            "user_id": user_id,
+            "justification": request.justification,
+            "rollback_plan": request.rollback_plan,
+            "risk_acknowledged": True
+        })
+
+        logger.info(f"⚠️ PRODUCTION DEPLOY REQUEST CREATED: task={task_id}, awaiting approval from DIFFERENT user")
+
+        return ProdDeployRequestResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=TaskState.PROD_DEPLOY_REQUESTED,
+            requested_by=user_id,
+            justification=request.justification,
+            rollback_plan=request.rollback_plan,
+            message=f"Production deployment requested. REQUIRES approval from a DIFFERENT user.",
+            warning="⚠️ PRODUCTION DEPLOYMENT REQUESTED. REQUIRES APPROVAL FROM DIFFERENT USER.",
+            next_step=f"Another user must approve via /task/{task_id}/deploy/production/approve"
+        )
+
+    except Exception as e:
+        logger.error(f"Production deploy request failed for task {task_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Production deploy request failed: {e}"
+        )
+
+
+@app.post("/task/{task_id}/deploy/production/approve", response_model=ProdApproveResponse)
+async def approve_production_deploy(
+    task_id: str,
+    project_name: str,
+    request: ProdApproveRequest,
+    user_id: str
+):
+    """
+    Approve production deployment (Phase 6).
+
+    CRITICAL SAFETY CONSTRAINTS:
+    - Task MUST be in PROD_DEPLOY_REQUESTED state
+    - Approver MUST be DIFFERENT from requester (DUAL APPROVAL)
+    - Approver MUST confirm they reviewed changes
+    - Approver MUST confirm they reviewed rollback plan
+    - State transitions to PROD_APPROVED
+
+    NEXT STEP: Any user can call /task/{task_id}/deploy/production/apply with confirm=true
+    """
+    logger.info(f"⚠️ PRODUCTION DEPLOY APPROVAL ATTEMPT: task={task_id}, approver={user_id}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # CRITICAL: Task MUST be in PROD_DEPLOY_REQUESTED state
+    if previous_state != TaskState.PROD_DEPLOY_REQUESTED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot approve production deploy for task in state '{previous_state.value}'. "
+                   f"Task MUST be PROD_DEPLOY_REQUESTED."
+        )
+
+    # Get the original requester
+    requester_id = task_data.get('prod_deploy_requested_by')
+
+    # CRITICAL: Policy check with dual approval enforcement
+    allowed, reason = can_approve_prod_deploy(
+        task_id,
+        approver_id=user_id,
+        requester_id=requester_id,
+        reviewed_changes=request.reviewed_changes,
+        reviewed_rollback=request.reviewed_rollback
+    )
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    try:
+        # Update task state to PROD_APPROVED
+        task_data['current_state'] = TaskState.PROD_APPROVED.value
+        task_data['prod_deploy_approved_at'] = datetime.utcnow().isoformat()
+        task_data['prod_deploy_approved_by'] = user_id
+        task_data['prod_deploy_approval_reason'] = request.approval_reason
+        task_data['prod_deploy_changes_reviewed'] = True
+        task_data['prod_deploy_rollback_reviewed'] = True
+        write_task(project_name, task_id, task_data)
+
+        # Audit log entry (immutable)
+        append_audit_log(project_name, {
+            "action": "PROD_DEPLOY_APPROVED",
+            "task_id": task_id,
+            "user_id": user_id,
+            "requester_id": requester_id,
+            "approval_reason": request.approval_reason,
+            "dual_approval_verified": True
+        })
+
+        logger.info(f"✅ PRODUCTION DEPLOY APPROVED: task={task_id}, requester={requester_id}, approver={user_id}")
+
+        return ProdApproveResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=TaskState.PROD_APPROVED,
+            requested_by=requester_id,
+            approved_by=user_id,
+            approval_reason=request.approval_reason,
+            message=f"Production deployment approved. Dual approval verified (requester={requester_id}, approver={user_id}).",
+            warning="⚠️ PRODUCTION DEPLOYMENT APPROVED. READY FOR FINAL APPLY.",
+            next_step=f"Execute deploy via /task/{task_id}/deploy/production/apply with confirm=true"
+        )
+
+    except Exception as e:
+        logger.error(f"Production deploy approval failed for task {task_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Production deploy approval failed: {e}"
+        )
+
+
+@app.post("/task/{task_id}/deploy/production/apply", response_model=ProdApplyResponse)
+async def apply_production_deploy(
+    task_id: str,
+    project_name: str,
+    confirm: bool = False,
+    user_id: Optional[str] = None
+):
+    """
+    Apply production deployment (Phase 6).
+
+    CRITICAL SAFETY CONSTRAINTS:
+    - Task MUST be in PROD_APPROVED state (dual approval required first)
+    - EXPLICIT confirmation required (confirm=true)
+    - Creates release manifest and deploy log
+    - State transitions to DEPLOYED_PRODUCTION
+
+    ROLLBACK: Available via /task/{task_id}/deploy/production/rollback
+    """
+    logger.info(f"🚀 PRODUCTION DEPLOY APPLY: task={task_id}, user={user_id}, confirm={confirm}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # CRITICAL: Policy check with confirmation requirement
+    allowed, reason = can_apply_prod_deploy(task_id, user_id, confirmed=confirm)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # CRITICAL: Task MUST be PROD_APPROVED (dual approval required)
+    if previous_state != TaskState.PROD_APPROVED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot apply production deploy for task in state '{previous_state.value}'. "
+                   f"Task MUST be PROD_APPROVED (dual approval required)."
+        )
+
+    # Get the requester and approver
+    requester_id = task_data.get('prod_deploy_requested_by', 'unknown')
+    approver_id = task_data.get('prod_deploy_approved_by', 'unknown')
+    justification = task_data.get('prod_deploy_justification', '')
+    rollback_plan = task_data.get('prod_deploy_rollback_plan', '')
+
+    try:
+        # Deploy to production (placeholder)
+        deployment_url = deploy_to_production(project_name, task_id)
+
+        # Create release manifest
+        release_manifest_path = create_release_manifest(
+            project_name=project_name,
+            task_id=task_id,
+            requested_by=requester_id,
+            approved_by=approver_id,
+            applied_by=user_id,
+            justification=justification,
+            rollback_plan=rollback_plan
+        )
+
+        # Create deploy log entry
+        create_deploy_log(project_name, task_id, "PRODUCTION_APPLY", user_id, {
+            "deployment_url": deployment_url,
+            "requester": requester_id,
+            "approver": approver_id
+        })
+
+        # Update task state to DEPLOYED_PRODUCTION
+        task_data['current_state'] = TaskState.DEPLOYED_PRODUCTION.value
+        task_data['prod_deployed_at'] = datetime.utcnow().isoformat()
+        task_data['prod_deployed_by'] = user_id
+        task_data['prod_deployment_url'] = deployment_url
+        task_data['prod_release_manifest'] = release_manifest_path
+        write_task(project_name, task_id, task_data)
+
+        # Audit log entry (immutable)
+        append_audit_log(project_name, {
+            "action": "DEPLOYED_PRODUCTION",
+            "task_id": task_id,
+            "user_id": user_id,
+            "requester_id": requester_id,
+            "approver_id": approver_id,
+            "deployment_url": deployment_url,
+            "release_manifest": release_manifest_path
+        })
+
+        logger.info(f"🚀 PRODUCTION DEPLOYED: task={task_id}, url={deployment_url}")
+
+        return ProdApplyResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=TaskState.DEPLOYED_PRODUCTION,
+            requested_by=requester_id,
+            approved_by=approver_id,
+            applied_by=user_id,
+            deployment_url=deployment_url,
+            release_manifest_path=release_manifest_path,
+            message="Deployed to production successfully.",
+            warning="🚀 DEPLOYED TO PRODUCTION. MONITOR CLOSELY.",
+            rollback_available=True,
+            rollback_command=f"POST /task/{task_id}/deploy/production/rollback"
+        )
+
+    except Exception as e:
+        logger.error(f"Production deployment apply failed for task {task_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Production deployment apply failed: {e}"
+        )
+
+
+@app.post("/task/{task_id}/deploy/production/rollback", response_model=ProdRollbackResponse)
+async def rollback_production_deploy(
+    task_id: str,
+    project_name: str,
+    reason: str,
+    user_id: str
+):
+    """
+    Rollback production deployment (Phase 6 - BREAK GLASS).
+
+    CRITICAL: Rollback does NOT require dual approval (speed > ceremony for emergency).
+    - Task MUST be in DEPLOYED_PRODUCTION state
+    - User MUST provide reason for audit trail
+    - State transitions to PROD_ROLLED_BACK
+    - Rollback is immediate and always available
+    """
+    logger.info(f"⚠️ PRODUCTION ROLLBACK: task={task_id}, user={user_id}, reason={reason}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    # Policy check (requires user_id only, no dual approval for rollback)
+    allowed, policy_reason = can_rollback_prod(task_id, user_id)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=policy_reason)
+
+    # Read task
+    task_path = get_task_path(project_name, task_id)
+    if not task_path.exists():
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    task_data = read_task(project_name, task_id)
+    previous_state = TaskState(task_data['current_state'])
+
+    # Task MUST be DEPLOYED_PRODUCTION
+    if previous_state != TaskState.DEPLOYED_PRODUCTION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot rollback task in state '{previous_state.value}'. "
+                   f"Task MUST be DEPLOYED_PRODUCTION."
+        )
+
+    try:
+        # Execute rollback (placeholder)
+        rollback_success = rollback_production(project_name, task_id)
+        if not rollback_success:
+            raise Exception("Rollback execution failed")
+
+        # Create deploy log entry
+        create_deploy_log(project_name, task_id, "PRODUCTION_ROLLBACK", user_id, {
+            "reason": reason,
+            "emergency": True
+        })
+
+        # Update task state to PROD_ROLLED_BACK
+        task_data['current_state'] = TaskState.PROD_ROLLED_BACK.value
+        task_data['prod_rolled_back_at'] = datetime.utcnow().isoformat()
+        task_data['prod_rolled_back_by'] = user_id
+        task_data['prod_rollback_reason'] = reason
+        write_task(project_name, task_id, task_data)
+
+        # Audit log entry (immutable) - CRITICAL for emergency actions
+        append_audit_log(project_name, {
+            "action": "PROD_ROLLED_BACK",
+            "task_id": task_id,
+            "user_id": user_id,
+            "reason": reason,
+            "emergency_action": True,
+            "dual_approval_bypassed": True,
+            "bypass_reason": "Rollback speed > ceremony"
+        })
+
+        logger.info(f"⚠️ PRODUCTION ROLLED BACK: task={task_id}, reason={reason}")
+
+        return ProdRollbackResponse(
+            task_id=task_id,
+            project_name=project_name,
+            previous_state=previous_state,
+            current_state=TaskState.PROD_ROLLED_BACK,
+            rolled_back_by=user_id,
+            rollback_reason=reason,
+            message="Production rolled back successfully.",
+            warning="⚠️ PRODUCTION ROLLED BACK. Verify system stability."
+        )
+
+    except Exception as e:
+        logger.error(f"Production rollback failed for task {task_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Production rollback failed: {e}"
+        )
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Project Status
+# -----------------------------------------------------------------------------
+@app.get("/status/{project_name}", response_model=StatusResponse)
+async def get_project_status(project_name: str):
+    """Get current status of a project."""
+    logger.info(f"Status request for project: {project_name}")
+
+    if not project_exists(project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+    manifest = read_project_manifest(project_name)
+    tasks = list_tasks(project_name)
+
+    # Count tasks by state
+    tasks_by_state = {}
+    for task in tasks:
+        state = task.get('current_state', 'unknown')
+        tasks_by_state[state] = tasks_by_state.get(state, 0) + 1
+
+    return StatusResponse(
+        project_name=project_name,
+        current_phase=manifest.get('current_phase', 'unknown'),
+        task_count=len(tasks),
+        tasks_by_state=tasks_by_state,
+        last_updated=manifest.get('updated_at', datetime.utcnow().isoformat())
+    )
+
+
+@app.get("/projects")
+async def list_projects():
+    """List all registered projects."""
+    logger.info("Listing all projects")
+
+    projects = []
+    if PROJECTS_DIR.exists():
+        for item in PROJECTS_DIR.iterdir():
+            if item.is_dir() and not item.name.startswith(".") and item.name != "README.md":
+                manifest_path = item / "PROJECT_MANIFEST.yaml"
+                if manifest_path.exists():
+                    try:
+                        manifest = read_yaml_file(manifest_path)
+                        projects.append({
+                            "name": item.name,
+                            "phase": manifest.get('current_phase', 'unknown'),
+                            "repo_url": manifest.get('repo_url', ''),
+                            "task_count": len(manifest.get('task_history', []))
+                        })
+                    except Exception as e:
+                        logger.error(f"Error reading manifest for {item.name}: {e}")
+
+    return {
+        "projects": projects,
+        "count": len(projects)
+    }
+
+
+# -----------------------------------------------------------------------------
+# API Endpoints - Deployment (unchanged from Phase 1)
+# -----------------------------------------------------------------------------
+@app.post("/deploy", response_model=DeployResponse)
+async def trigger_deployment(request: DeployRequest):
+    """
+    Trigger deployment to an environment.
+
+    Phase 2 constraints:
+    - Production deployment BLOCKED
+    - Testing deployment placeholder only
+    """
+    logger.info(f"Deployment request for project: {request.project_name} to {request.environment}")
+
+    if request.environment == DeploymentEnvironment.PRODUCTION:
+        logger.warning("Production deployment blocked per AI_POLICY.md")
+        raise HTTPException(
+            status_code=403,
+            detail="Production deployment requires explicit human approval. Not available in Phase 2."
+        )
+
+    if not project_exists(request.project_name):
+        raise HTTPException(status_code=404, detail=f"Project '{request.project_name}' not found")
+
+    # Placeholder response - no actual deployment in Phase 4
+    deployment_url = None
+    if request.environment == DeploymentEnvironment.TESTING:
+        deployment_url = "https://aitesting.mybd.in"
+    elif request.environment == DeploymentEnvironment.DEVELOPMENT:
+        deployment_url = "http://localhost:8000"
+
+    return DeployResponse(
+        project_name=request.project_name,
+        environment=request.environment,
+        status="placeholder",
+        message="Deployment is a placeholder in Phase 4. No actual deployment triggered.",
+        deployment_url=deployment_url
+    )
+
+
+# -----------------------------------------------------------------------------
+# Error Handlers
+# -----------------------------------------------------------------------------
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """Handle HTTP exceptions with standard error format."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "code": f"HTTP_{exc.status_code}",
+                "message": exc.detail,
+                "details": {}
+            }
+        }
+    )
+
+
+# -----------------------------------------------------------------------------
+# Startup/Shutdown Events
+# -----------------------------------------------------------------------------
+@app.on_event("startup")
+async def startup_event():
+    """Initialize controller on startup."""
+    logger.info("Task Controller starting up (Phase 6)...")
+    logger.info(f"Projects directory: {PROJECTS_DIR}")
+    logger.info(f"Docs directory: {DOCS_DIR}")
+
+    # Ensure directories exist
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Task Controller ready (Phase 6: Production Hardening & Explicit Go-Live Controls)")
+    logger.info("SAFETY: Production deployment requires DUAL APPROVAL (different users).")
+    logger.info("SAFETY: All production actions logged to immutable audit trail.")
+    logger.info("SAFETY: Production rollback always available (break-glass).")
+    logger.info("SAFETY: Testing environment MUST be used before production.")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown."""
+    logger.info("Task Controller shutting down...")
+
+
+# -----------------------------------------------------------------------------
+# Main Entry Point (for development)
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

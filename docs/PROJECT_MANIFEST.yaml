@@ -1,0 +1,125 @@
+# Project Manifest - Single Source of Truth
+# This file is used by the controller and AI agents to understand project state
+
+project:
+  name: "ai-development-platform"
+  display_name: "AI-Driven Autonomous Development Platform"
+  description: "Platform enabling near-fully autonomous software development via AI agents"
+  version: "0.1.0"
+  created_at: "2026-01-16"
+  updated_at: "2026-01-16"
+
+# Repository configuration
+repository:
+  url: "https://github.com/rahul4webdev/ai-development-platform.git"
+  owner: "rahul4webdev"
+  branch_strategy: "main-develop"  # main for production, develop for features
+  default_branch: "main"
+
+# Domain configuration
+domains:
+  development: "localhost"  # Local development
+  testing: "aitesting.mybd.in"
+  production: "ai.mybd.in"
+
+# Current operational phase
+phase:
+  current: "bootstrap"
+  # Phases: bootstrap | development | hardening | release | maintenance
+
+# Autonomy mode - controls AI agent behavior
+autonomy:
+  mode: "bootstrap"
+  # Modes: bootstrap | development | hardening | release | maintenance
+  #
+  # bootstrap   - Scaffold project, create files, ask questions (no deploy)
+  # development - Implement features, write tests, deploy to dev/test (no prod)
+  # hardening   - Bug fixes, stability improvements (no new features)
+  # release     - Prepare release, deploy to production (with explicit trigger)
+  # maintenance - Bug fixes, minor updates (no large features)
+
+# Active features/modules tracking
+features:
+  planned:
+    - id: "telegram-bot"
+      name: "Telegram Chat Bot"
+      status: "not_started"
+      priority: "high"
+    - id: "task-controller"
+      name: "Task Controller Service"
+      status: "not_started"
+      priority: "high"
+    - id: "claude-agent-integration"
+      name: "Claude CLI Agent Integration"
+      status: "not_started"
+      priority: "high"
+    - id: "cicd-pipeline"
+      name: "CI/CD Pipeline Setup"
+      status: "not_started"
+      priority: "high"
+    - id: "multi-project-support"
+      name: "Multi-Project Support"
+      status: "not_started"
+      priority: "medium"
+
+  in_progress: []
+
+  completed: []
+
+# Environment configuration
+environments:
+  development:
+    enabled: false
+    deployed_version: null
+    last_deployment: null
+  testing:
+    enabled: false
+    deployed_version: null
+    last_deployment: null
+  production:
+    enabled: false
+    deployed_version: null
+    last_deployment: null
+
+# Technology stack (CONFIRMED)
+tech_stack:
+  chat_bot:
+    language: "python"
+    framework: "python-telegram-bot"
+  task_controller:
+    language: "python"
+    framework: "fastapi"
+  ai_agent: "claude-cli"
+  cicd: "github-actions"
+  containerization: "docker"
+
+# Hosting configuration
+hosting:
+  provider: "VPS"
+  os: "AlmaLinux 9"
+  control_panel: "CyberPanel"
+  web_server: "OpenLiteSpeed"
+  # Note: Full server path and credentials to be provided per project
+
+# Policy references
+policies:
+  ai_policy: "AI_POLICY.md"
+  deployment: "DEPLOYMENT.md"
+  testing: "TESTING_STRATEGY.md"
+  architecture: "ARCHITECTURE.md"
+
+# Metadata
+metadata:
+  bootstrap_completed: false
+  last_task: "bootstrap_documentation"
+  last_task_status: "in_progress"
+  blocking_issues: []
+
+# Notifications configuration
+notifications:
+  enabled: false  # [TBD] Enable after bot setup
+  channels:
+    telegram:
+      enabled: false
+      bot_token_secret: "TELEGRAM_BOT_TOKEN"
+      chat_id: ""  # [TBD]
