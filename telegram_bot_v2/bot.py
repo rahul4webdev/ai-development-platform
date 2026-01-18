@@ -847,7 +847,30 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lines.append(f"   Error: {controller_health.get('error')}")
         else:
             lines.append("✅ *Controller:* Healthy")
-            lines.append(f"   Phase: {controller_health.get('phase', 'unknown')}")
+            controller_phase = controller_health.get('phase', 'unknown')
+            controller_version = controller_health.get('version', 'unknown')
+            lines.append(f"   Phase: {controller_phase}")
+            lines.append(f"   Version: {controller_version}")
+
+            # Safeguard: Check version/phase consistency
+            # If bot is 13.x but controller reports phase < 13, log ERROR
+            try:
+                bot_major = int(BOT_VERSION.split('.')[1])  # "0.13.10" -> 13
+                # Extract phase number from "Phase 13.9" or "Phase 12"
+                phase_str = controller_phase.replace("Phase ", "").split(".")[0]
+                controller_major = int(phase_str)
+
+                if bot_major >= 13 and controller_major < 13:
+                    logger.error(
+                        f"VERSION MISMATCH: Bot v{BOT_VERSION} (Phase 13+) but "
+                        f"controller reports {controller_phase}. Controller needs update!"
+                    )
+                    lines.append("")
+                    lines.append("⚠️ *WARNING: Version Mismatch*")
+                    lines.append(f"   Bot expects Phase 13+, controller reports {controller_phase}")
+                    lines.append("   Controller metadata may need updating!")
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Could not parse version for consistency check: {e}")
 
         lines.append("")
 

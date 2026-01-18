@@ -56,6 +56,9 @@ from pydantic import BaseModel, Field
 # Phase 12: Multi-Aspect Project Router
 from .phase12_router import router as phase12_router
 
+# Import phase metadata from single source of truth
+from . import __version__, CURRENT_PHASE, CURRENT_PHASE_NAME, CURRENT_PHASE_FULL
+
 # -----------------------------------------------------------------------------
 # Logging Configuration
 # -----------------------------------------------------------------------------
@@ -1738,8 +1741,8 @@ def deploy_to_testing(project_name: str, task_id: str) -> str:
 # -----------------------------------------------------------------------------
 app = FastAPI(
     title="AI Development Platform - Task Controller",
-    description="Phase 12: Autonomous Multi-Aspect Project Orchestration",
-    version="0.12.0"
+    description=CURRENT_PHASE_FULL,
+    version=__version__
 )
 
 # Include Phase 12 router for multi-aspect projects
@@ -1754,9 +1757,9 @@ async def root():
     """Health check endpoint."""
     return {
         "service": "AI Development Platform - Task Controller",
-        "phase": "Phase 12: Autonomous Multi-Aspect Project Orchestration",
+        "phase": CURRENT_PHASE_FULL,
         "status": "running",
-        "version": "0.12.0"
+        "version": __version__
     }
 
 
@@ -1771,7 +1774,9 @@ async def health_check():
             "projects_dir": PROJECTS_DIR.exists(),
             "docs_dir": DOCS_DIR.exists()
         },
-        "phase": "Phase 12",
+        "phase": f"Phase {CURRENT_PHASE}",
+        "phase_name": CURRENT_PHASE_NAME,
+        "version": __version__,
         "capabilities": [
             "project_bootstrap",
             "task_lifecycle",
