@@ -3642,6 +3642,313 @@ async def get_claude_scheduler_status():
 
 
 # -----------------------------------------------------------------------------
+# Phase 15.1: Lifecycle Engine Endpoints
+# -----------------------------------------------------------------------------
+
+# Import lifecycle_v2 module
+try:
+    from .lifecycle_v2 import (
+        get_lifecycle_manager,
+        create_project_lifecycle,
+        create_change_lifecycle,
+        get_lifecycle,
+        list_lifecycles,
+        transition_lifecycle,
+        get_lifecycle_guidance,
+        LifecycleState,
+        LifecycleMode,
+        ChangeType,
+        ProjectAspect as LifecycleAspect,
+        TransitionTrigger,
+        UserRole,
+    )
+    LIFECYCLE_AVAILABLE = True
+    logger.info("Phase 15.1: Lifecycle V2 module loaded successfully")
+except ImportError as e:
+    LIFECYCLE_AVAILABLE = False
+    logger.warning(f"Lifecycle V2 module not available: {e}")
+
+
+# Pydantic models for lifecycle endpoints
+class CreateProjectLifecycleRequest(BaseModel):
+    """Request to create a PROJECT_MODE lifecycle."""
+    project_name: str
+    aspect: str
+    created_by: str
+    description: str = ""
+
+
+class CreateChangeLifecycleRequest(BaseModel):
+    """Request to create a CHANGE_MODE lifecycle."""
+    project_name: str
+    project_id: str
+    aspect: str
+    change_type: str  # bug, feature, improvement, refactor
+    created_by: str
+    description: str = ""
+
+
+class TransitionLifecycleRequest(BaseModel):
+    """Request to transition a lifecycle state."""
+    trigger: str  # claude_job_completed, test_passed, test_failed, etc.
+    triggered_by: str
+    role: str  # owner, admin, developer, tester
+    reason: str = ""
+    metadata: dict = Field(default_factory=dict)
+
+
+@app.post("/lifecycle")
+async def create_lifecycle(request: CreateProjectLifecycleRequest):
+    """
+    Create a new PROJECT_MODE lifecycle (Phase 15.1).
+
+    Creates a lifecycle instance for a new project with the specified aspect.
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    try:
+        aspect = LifecycleAspect(request.aspect)
+    except ValueError:
+        valid_aspects = [a.value for a in LifecycleAspect]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid aspect '{request.aspect}'. Valid aspects: {valid_aspects}"
+        )
+
+    success, message, lifecycle = await create_project_lifecycle(
+        project_name=request.project_name,
+        aspect=aspect,
+        created_by=request.created_by,
+        description=request.description,
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "success": True,
+        "message": message,
+        "lifecycle": lifecycle.to_dict() if lifecycle else None,
+    }
+
+
+@app.post("/lifecycle/change")
+async def create_change_lifecycle_endpoint(request: CreateChangeLifecycleRequest):
+    """
+    Create a new CHANGE_MODE lifecycle (Phase 15.1).
+
+    Creates a lifecycle instance for a change (bug, feature, improvement, refactor)
+    on an existing project. Requires project_id and change_type.
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    try:
+        aspect = LifecycleAspect(request.aspect)
+    except ValueError:
+        valid_aspects = [a.value for a in LifecycleAspect]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid aspect '{request.aspect}'. Valid aspects: {valid_aspects}"
+        )
+
+    try:
+        change_type = ChangeType(request.change_type)
+    except ValueError:
+        valid_types = [t.value for t in ChangeType]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid change_type '{request.change_type}'. Valid types: {valid_types}"
+        )
+
+    success, message, lifecycle = await create_change_lifecycle(
+        project_name=request.project_name,
+        project_id=request.project_id,
+        aspect=aspect,
+        change_type=change_type,
+        created_by=request.created_by,
+        description=request.description,
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "success": True,
+        "message": message,
+        "lifecycle": lifecycle.to_dict() if lifecycle else None,
+    }
+
+
+@app.get("/lifecycle/{lifecycle_id}")
+async def get_lifecycle_by_id(lifecycle_id: str):
+    """
+    Get a lifecycle by ID (Phase 15.1).
+
+    Returns the full lifecycle state including:
+    - Current state
+    - Mode (PROJECT_MODE or CHANGE_MODE)
+    - Aspect
+    - Transition history count
+    - Associated Claude jobs
+    - Guidance for next steps
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    lifecycle = await get_lifecycle(lifecycle_id)
+    if not lifecycle:
+        raise HTTPException(status_code=404, detail=f"Lifecycle {lifecycle_id} not found")
+
+    guidance = await get_lifecycle_guidance(lifecycle_id)
+
+    return {
+        "lifecycle": lifecycle.to_dict(),
+        "guidance": guidance,
+    }
+
+
+@app.get("/lifecycle")
+async def list_lifecycles_endpoint(
+    project_id: Optional[str] = None,
+    state: Optional[str] = None,
+    mode: Optional[str] = None,
+    limit: int = 50
+):
+    """
+    List lifecycles with optional filtering (Phase 15.1).
+
+    Filters:
+    - project_id: Filter by project name
+    - state: Filter by lifecycle state (created, planning, development, etc.)
+    - mode: Filter by mode (project_mode, change_mode)
+    - limit: Maximum number of results (default: 50)
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    # Validate state if provided
+    if state:
+        try:
+            LifecycleState(state)
+        except ValueError:
+            valid_states = [s.value for s in LifecycleState]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid state '{state}'. Valid states: {valid_states}"
+            )
+
+    # Validate mode if provided
+    if mode:
+        try:
+            LifecycleMode(mode)
+        except ValueError:
+            valid_modes = [m.value for m in LifecycleMode]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid mode '{mode}'. Valid modes: {valid_modes}"
+            )
+
+    lifecycles = await list_lifecycles(
+        project_name=project_id,
+        state=state,
+        mode=mode,
+        limit=limit,
+    )
+
+    return {
+        "lifecycles": lifecycles,
+        "count": len(lifecycles),
+    }
+
+
+@app.post("/lifecycle/{lifecycle_id}/transition")
+async def transition_lifecycle_endpoint(lifecycle_id: str, request: TransitionLifecycleRequest):
+    """
+    Transition a lifecycle to a new state (Phase 15.1).
+
+    Validates:
+    - Current state allows the transition
+    - User role has permission for the trigger
+    - Logs the transition to immutable audit trail
+
+    Triggers:
+    - claude_job_completed: Claude job finished
+    - test_passed: Automated tests passed
+    - test_failed: Automated tests failed
+    - telegram_feedback: User feedback from Telegram
+    - human_approval: Human approved transition
+    - human_rejection: Human rejected
+    - system_init: System initialization
+    - manual_archive: Manual archive request
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    # Validate trigger
+    try:
+        TransitionTrigger(request.trigger)
+    except ValueError:
+        valid_triggers = [t.value for t in TransitionTrigger]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid trigger '{request.trigger}'. Valid triggers: {valid_triggers}"
+        )
+
+    # Validate role
+    try:
+        UserRole(request.role)
+    except ValueError:
+        valid_roles = [r.value for r in UserRole]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role '{request.role}'. Valid roles: {valid_roles}"
+        )
+
+    success, message, new_state = await transition_lifecycle(
+        lifecycle_id=lifecycle_id,
+        trigger=request.trigger,
+        triggered_by=request.triggered_by,
+        role=request.role,
+        reason=request.reason,
+        metadata=request.metadata,
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "success": True,
+        "message": message,
+        "new_state": new_state,
+    }
+
+
+@app.get("/lifecycle/{lifecycle_id}/guidance")
+async def get_lifecycle_guidance_endpoint(lifecycle_id: str):
+    """
+    Get guidance for what happens next in a lifecycle (Phase 15.1).
+
+    Returns:
+    - Current state
+    - Available actions
+    - What the system is waiting for
+    - Next step description
+
+    Useful for Telegram bot to show users what actions are available.
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    guidance = await get_lifecycle_guidance(lifecycle_id)
+    if not guidance:
+        raise HTTPException(status_code=404, detail=f"Lifecycle {lifecycle_id} not found")
+
+    return guidance
+
+
+# -----------------------------------------------------------------------------
 # Error Handlers
 # -----------------------------------------------------------------------------
 @app.exception_handler(HTTPException)
@@ -3666,7 +3973,7 @@ async def http_exception_handler(request, exc):
 @app.on_event("startup")
 async def startup_event():
     """Initialize controller on startup."""
-    logger.info("Task Controller starting up (Phase 14)...")
+    logger.info("Task Controller starting up (Phase 15.1)...")
     logger.info(f"Projects directory: {PROJECTS_DIR}")
     logger.info(f"Docs directory: {DOCS_DIR}")
 
@@ -3681,12 +3988,21 @@ async def startup_event():
         except Exception as e:
             logger.error(f"Failed to start Claude scheduler: {e}")
 
-    logger.info("Task Controller ready (Phase 14.10: Multi-Worker Scheduler)")
+    # Phase 15.1: Initialize lifecycle manager and recover state
+    if LIFECYCLE_AVAILABLE:
+        try:
+            manager = get_lifecycle_manager()
+            recovery_summary = await manager.recover_state()
+            logger.info(f"Phase 15.1: Lifecycle manager initialized ({recovery_summary['total']} lifecycles recovered)")
+        except Exception as e:
+            logger.error(f"Failed to initialize lifecycle manager: {e}")
+
+    logger.info("Task Controller ready (Phase 15.1: Autonomous Lifecycle Engine)")
     logger.info("SAFETY: Production deployment requires DUAL APPROVAL (different users).")
     logger.info("SAFETY: All production actions logged to immutable audit trail.")
     logger.info("SAFETY: Production rollback always available (break-glass).")
     logger.info("SAFETY: Testing environment MUST be used before production.")
-    logger.info(f"PHASE 14.10: Multi-worker Claude execution (max {MAX_CONCURRENT_JOBS if CLAUDE_BACKEND_AVAILABLE else 'N/A'} concurrent jobs).")
+    logger.info("PHASE 15.1: Deterministic lifecycle state machine with event-driven transitions.")
 
 
 @app.on_event("shutdown")

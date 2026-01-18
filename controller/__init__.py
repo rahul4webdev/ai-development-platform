@@ -11,9 +11,9 @@ Phase 14: Claude CLI Bootstrap & Full Integration
 - Phase 14: Claude CLI as execution backend, job workspaces, autonomous development
 """
 
-__version__ = "0.14.11"
+__version__ = "0.15.1"
 
 # Single source of truth for phase metadata
-CURRENT_PHASE = "14.11"
-CURRENT_PHASE_NAME = "Priority & Fair Scheduling"
+CURRENT_PHASE = "15.1"
+CURRENT_PHASE_NAME = "Autonomous Lifecycle Engine"
 CURRENT_PHASE_FULL = f"Phase {CURRENT_PHASE}: {CURRENT_PHASE_NAME}"

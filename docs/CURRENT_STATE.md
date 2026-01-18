@@ -7,14 +7,14 @@ The AI agent MUST update this file after completing any task.
 
 ## Last Updated
 - **Timestamp**: 2026-01-19
-- **Task**: Phase 14.11 Priority & Fair Scheduling - COMPLETED
+- **Task**: Phase 15.1 Autonomous Lifecycle Engine - COMPLETED
 - **Status**: Complete (ANTHROPIC_API_KEY still required for execution)
 
 ---
 
 ## Current Phase
 ```
-Phase: PHASE_14.11_COMPLETE
+Phase: PHASE_15.1_COMPLETE
 Mode: development
 ```
 
@@ -65,6 +65,13 @@ Mode: development
 | Starvation Prevention | Implemented | controller/claude_backend.py | Phase 14.11: Auto-escalation after 30min wait |
 | Priority Audit Logging | Implemented | controller/claude_backend.py | Phase 14.11: Append-only escalation audit trail |
 | Priority Tests | Implemented | tests/test_priority_scheduling.py | Phase 14.11: 20+ tests for priority scheduling |
+| Lifecycle State Machine | Implemented | controller/lifecycle_v2.py | Phase 15.1: Deterministic 10-state lifecycle |
+| PROJECT_MODE/CHANGE_MODE | Implemented | controller/lifecycle_v2.py | Phase 15.1: Two modes of work |
+| Multi-Aspect Isolation | Implemented | controller/lifecycle_v2.py | Phase 15.1: core/backend/frontend isolation |
+| Event-Driven Transitions | Implemented | controller/lifecycle_v2.py | Phase 15.1: Claude/test/feedback/approval triggers |
+| Lifecycle API Endpoints | Implemented | controller/main.py | Phase 15.1: GET/POST /lifecycle endpoints |
+| Telegram Lifecycle Commands | Implemented | telegram_bot_v2/bot.py | Phase 15.1: lifecycle_status/approve/reject/feedback |
+| Lifecycle Tests | Implemented | tests/test_lifecycle_engine.py | Phase 15.1: 50+ tests for lifecycle engine |
 
 ---
 
@@ -132,6 +139,7 @@ None
 
 | Timestamp | Task | Status | Details |
 |-----------|------|--------|---------|
+| 2026-01-19 | Phase 15.1 complete | Completed | Autonomous Lifecycle Engine: 10-state machine, PROJECT/CHANGE modes, aspect isolation, event triggers |
 | 2026-01-19 | Phase 14.11 complete | Completed | Priority & Fair Scheduling: EMERGENCY/HIGH/NORMAL/LOW, starvation prevention (30min), audit logging |
 | 2026-01-19 | Phase 14.10 complete | Completed | Multi-worker scheduler: MAX_CONCURRENT_JOBS=3, persistent state, resource limits, crash recovery |
 | 2026-01-18 | Phase 14.0-14.6 complete | Completed | Claude CLI installation, execution wrapper, job backend, workspace model, API endpoints |
@@ -149,6 +157,127 @@ None
 | 2026-01-16 | Phase 1 skeleton | Completed | Created controller/, bots/, tests/, workflows/, moved docs/, created README files |
 | 2026-01-16 | Bootstrap config | Completed | Updated all files with confirmed repository, domains, hosting, and tech stack details |
 | 2026-01-16 | Bootstrap docs | Completed | Created all foundational files |
+
+---
+
+## Phase 15.1 Deliverables
+
+### Lifecycle State Machine (controller/lifecycle_v2.py)
+
+| State | Description |
+|-------|-------------|
+| CREATED | Lifecycle instance created, awaiting initialization |
+| PLANNING | Claude is generating implementation plan |
+| DEVELOPMENT | Claude is implementing feature/fix |
+| TESTING | Automated tests are running |
+| AWAITING_FEEDBACK | Human review and feedback required |
+| FIXING | Claude is addressing feedback/bugs |
+| READY_FOR_PRODUCTION | Final approval needed for production |
+| DEPLOYED | Successfully deployed to production |
+| REJECTED | Lifecycle rejected (terminal) |
+| ARCHIVED | Lifecycle archived (terminal) |
+
+### Lifecycle Modes
+
+| Mode | Description |
+|------|-------------|
+| PROJECT_MODE | New project development (no change_reference required) |
+| CHANGE_MODE | Feature/bug/improvement on existing project (requires change_reference) |
+
+### Change Types (CHANGE_MODE)
+
+| Type | Description |
+|------|-------------|
+| bug | Bug fix |
+| feature | New feature |
+| improvement | Enhancement to existing functionality |
+| refactor | Code refactoring |
+
+### Project Aspects (Multi-Aspect Isolation)
+
+| Aspect | Description |
+|--------|-------------|
+| core | APIs, shared services |
+| backend | Admin panels, internal tools |
+| frontend_web | Web application |
+| frontend_mobile | Mobile application |
+| admin | Administrative interfaces |
+| custom | Custom aspect type |
+
+### Transition Triggers
+
+| Trigger | Description |
+|---------|-------------|
+| claude_job_completed | Claude CLI job finished |
+| test_passed | Automated tests passed |
+| test_failed | Automated tests failed |
+| telegram_feedback | User feedback from Telegram |
+| human_approval | Human approved transition |
+| human_rejection | Human rejected |
+| system_init | System initialization |
+| manual_archive | Manual archive request |
+
+### User Roles & Permissions
+
+| Role | Can Trigger |
+|------|-------------|
+| owner | All triggers |
+| admin | All triggers except system_init |
+| developer | claude_job_completed, test_*, system_init |
+| tester | test_passed, test_failed, telegram_feedback |
+| viewer | None (read-only) |
+
+### API Endpoints (Phase 15.1)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| /lifecycle | POST | Create PROJECT_MODE lifecycle |
+| /lifecycle/change | POST | Create CHANGE_MODE lifecycle |
+| /lifecycle/{id} | GET | Get lifecycle by ID |
+| /lifecycle | GET | List lifecycles with filters |
+| /lifecycle/{id}/transition | POST | Trigger state transition |
+| /lifecycle/{id}/guidance | GET | Get next steps guidance |
+
+### Telegram Bot Commands (Phase 15.1)
+
+| Command | Purpose |
+|---------|---------|
+| /lifecycle_status [id] | View lifecycle state and guidance |
+| /lifecycle_approve <id> [reason] | Approve lifecycle transition |
+| /lifecycle_reject <id> <reason> | Reject lifecycle |
+| /lifecycle_feedback <id> <text> | Submit feedback |
+| /lifecycle_prod_approve <id> | Final production approval |
+
+### Safety Guarantees
+
+- **NO_STATE_SKIPPING**: All transitions must follow valid paths
+- **NO_IMPLICIT_APPROVALS**: Human approval required at gates
+- **NO_CROSS_ASPECT_EFFECTS**: Aspects are fully isolated
+- **NO_SILENT_FAILURES**: Invalid actions rejected with explanation
+- **IMMUTABLE_AUDIT**: All transitions logged to audit trail
+- **ROLE_ENFORCED**: Permissions checked for every transition
+
+### Files
+
+| Path | Purpose |
+|------|---------|
+| /home/aitesting.mybd.in/jobs/lifecycle/lifecycles.json | Persistent lifecycle state |
+| /home/aitesting.mybd.in/jobs/lifecycle/lifecycle_audit.log | Immutable audit trail |
+
+### Test Coverage (tests/test_lifecycle_engine.py)
+
+| Test Class | Coverage |
+|------------|----------|
+| TestValidTransitions | Full lifecycle flow, state-to-state |
+| TestInvalidTransitions | State skipping, wrong triggers |
+| TestAspectIsolation | Multi-aspect creation, filtering |
+| TestLifecycleModes | PROJECT_MODE vs CHANGE_MODE |
+| TestEventDrivenTransitions | All trigger types |
+| TestRolePermissions | Role-based access control |
+| TestPersistenceRecovery | State persistence, crash recovery |
+| TestStateMachineConfig | Configuration validation |
+| TestGuidanceSystem | Next steps guidance |
+| TestSerialization | Data roundtrip |
 
 ---
 

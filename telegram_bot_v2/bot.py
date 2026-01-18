@@ -81,7 +81,7 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.14.0"
+BOT_VERSION = "0.15.1"
 BOT_START_TIME = datetime.utcnow()
 
 # -----------------------------------------------------------------------------
@@ -1659,6 +1659,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 /feedback <project> <aspect> - Submit feedback
 /prod\\_approve <project> <aspect> - Production approval
 
+*Lifecycle Management (Phase 15.1):*
+/lifecycle\\_status [id] - View lifecycle state
+/lifecycle\\_approve <id> - Approve transition
+/lifecycle\\_reject <id> <reason> - Reject lifecycle
+/lifecycle\\_feedback <id> <text> - Submit feedback
+/lifecycle\\_prod\\_approve <id> - Production approval
+
 *Notifications:*
 /notifications - View pending actions
 """
@@ -2342,6 +2349,284 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # -----------------------------------------------------------------------------
+# Phase 15.1: Lifecycle Commands
+# -----------------------------------------------------------------------------
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
+async def lifecycle_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /lifecycle_status [lifecycle_id] - Show lifecycle state and guidance (Phase 15.1)
+    """
+    try:
+        if not context.args:
+            # List recent lifecycles
+            result = await controller.get("/lifecycle?limit=10")
+            if "error" in result:
+                await update.message.reply_text(f"❌ Error: {result.get('error')}")
+                return
+
+            lifecycles = result.get("lifecycles", [])
+            if not lifecycles:
+                await update.message.reply_text("No lifecycles found.")
+                return
+
+            text = "*Recent Lifecycles:*\n\n"
+            for lc in lifecycles[:10]:
+                text += f"• `{lc['lifecycle_id'][:8]}...`\n"
+                text += f"  Project: {lc['project_name']}\n"
+                text += f"  Aspect: {lc['aspect']}\n"
+                text += f"  State: *{lc['state']}*\n"
+                text += f"  Mode: {lc['mode']}\n\n"
+
+            text += "Use /lifecycle\\_status <id> for details"
+            await update.message.reply_text(text, parse_mode="Markdown")
+        else:
+            lifecycle_id = context.args[0]
+            result = await controller.get(f"/lifecycle/{lifecycle_id}")
+            if "error" in result:
+                await update.message.reply_text(f"❌ Error: {result.get('error')}")
+                return
+
+            lc = result.get("lifecycle", {})
+            guidance = result.get("guidance", {})
+
+            text = f"*Lifecycle Details*\n\n"
+            text += f"*ID:* `{lc.get('lifecycle_id', 'N/A')}`\n"
+            text += f"*Project:* {lc.get('project_name', 'N/A')}\n"
+            text += f"*Aspect:* {lc.get('aspect', 'N/A')}\n"
+            text += f"*Mode:* {lc.get('mode', 'N/A')}\n"
+            text += f"*State:* *{lc.get('state', 'N/A')}*\n"
+            text += f"*Transitions:* {lc.get('transition_count', 0)}\n\n"
+
+            if guidance:
+                text += "*Next Steps:*\n"
+                text += f"• {guidance.get('next_step', 'None')}\n"
+                if guidance.get('waiting_for'):
+                    text += f"• Waiting for: {guidance.get('waiting_for')}\n"
+                if guidance.get('available_actions'):
+                    text += f"• Actions: {', '.join(guidance.get('available_actions', []))}\n"
+
+            await update.message.reply_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in lifecycle_status_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN)
+async def lifecycle_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /lifecycle_approve <lifecycle_id> [reason] - Approve lifecycle transition (Phase 15.1)
+    """
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /lifecycle\\_approve <lifecycle\\_id> [reason]\n"
+            "Example: /lifecycle\\_approve abc123 Looks good"
+        )
+        return
+
+    lifecycle_id = context.args[0]
+    reason = " ".join(context.args[1:]) if len(context.args) > 1 else "Approved via Telegram"
+    user_id = str(update.effective_user.id)
+    user_role = get_user_role(update.effective_user.id)
+
+    try:
+        result = await controller.post(f"/lifecycle/{lifecycle_id}/transition", {
+            "trigger": "human_approval",
+            "triggered_by": user_id,
+            "role": user_role.value,
+            "reason": reason,
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        new_state = result.get("new_state", "unknown")
+        await update.message.reply_text(
+            f"✅ Lifecycle approved!\n\n"
+            f"*New State:* {new_state}\n"
+            f"*Reason:* {reason}",
+            parse_mode="Markdown"
+        )
+
+        safety.log_action(int(user_id), "lifecycle_approve", {
+            "lifecycle_id": lifecycle_id,
+            "new_state": new_state
+        })
+
+    except Exception as e:
+        logger.error(f"Error in lifecycle_approve_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN)
+async def lifecycle_reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /lifecycle_reject <lifecycle_id> <reason> - Reject lifecycle (Phase 15.1)
+    """
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /lifecycle\\_reject <lifecycle\\_id> <reason>\n"
+            "Example: /lifecycle\\_reject abc123 Needs more testing"
+        )
+        return
+
+    lifecycle_id = context.args[0]
+    reason = " ".join(context.args[1:])
+    user_id = str(update.effective_user.id)
+    user_role = get_user_role(update.effective_user.id)
+
+    if len(reason) < 10:
+        await update.message.reply_text("Rejection reason must be at least 10 characters.")
+        return
+
+    try:
+        result = await controller.post(f"/lifecycle/{lifecycle_id}/transition", {
+            "trigger": "human_rejection",
+            "triggered_by": user_id,
+            "role": user_role.value,
+            "reason": reason,
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        new_state = result.get("new_state", "unknown")
+        await update.message.reply_text(
+            f"🚫 Lifecycle rejected!\n\n"
+            f"*New State:* {new_state}\n"
+            f"*Reason:* {reason}",
+            parse_mode="Markdown"
+        )
+
+        safety.log_action(int(user_id), "lifecycle_reject", {
+            "lifecycle_id": lifecycle_id,
+            "new_state": new_state,
+            "reason": reason
+        })
+
+    except Exception as e:
+        logger.error(f"Error in lifecycle_reject_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
+async def lifecycle_feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /lifecycle_feedback <lifecycle_id> <feedback> - Submit feedback (Phase 15.1)
+    """
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /lifecycle\\_feedback <lifecycle\\_id> <feedback>\n"
+            "Example: /lifecycle\\_feedback abc123 Button color needs adjustment"
+        )
+        return
+
+    lifecycle_id = context.args[0]
+    feedback_text = " ".join(context.args[1:])
+    user_id = str(update.effective_user.id)
+    user_role = get_user_role(update.effective_user.id)
+
+    if len(feedback_text) < 10:
+        await update.message.reply_text("Feedback must be at least 10 characters.")
+        return
+
+    try:
+        result = await controller.post(f"/lifecycle/{lifecycle_id}/transition", {
+            "trigger": "telegram_feedback",
+            "triggered_by": user_id,
+            "role": user_role.value,
+            "reason": feedback_text,
+            "metadata": {"feedback_type": "improvement"}
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        new_state = result.get("new_state", "unknown")
+        await update.message.reply_text(
+            f"📝 Feedback submitted!\n\n"
+            f"*New State:* {new_state}\n"
+            f"The system will work on addressing your feedback.",
+            parse_mode="Markdown"
+        )
+
+        safety.log_action(int(user_id), "lifecycle_feedback", {
+            "lifecycle_id": lifecycle_id,
+            "new_state": new_state,
+            "feedback": feedback_text
+        })
+
+    except Exception as e:
+        logger.error(f"Error in lifecycle_feedback_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN)
+async def lifecycle_prod_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /lifecycle_prod_approve <lifecycle_id> - Final production approval (Phase 15.1)
+    """
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /lifecycle\\_prod\\_approve <lifecycle\\_id>\n"
+            "Example: /lifecycle\\_prod\\_approve abc123\n\n"
+            "⚠️ This is a PRODUCTION approval - use carefully!"
+        )
+        return
+
+    lifecycle_id = context.args[0]
+    user_id = str(update.effective_user.id)
+    user_role = get_user_role(update.effective_user.id)
+
+    try:
+        # First check if lifecycle is ready for production
+        check_result = await controller.get(f"/lifecycle/{lifecycle_id}")
+        if "error" in check_result:
+            await update.message.reply_text(f"❌ Error: {check_result.get('error')}")
+            return
+
+        lc = check_result.get("lifecycle", {})
+        if lc.get("state") != "ready_for_production":
+            await update.message.reply_text(
+                f"❌ Lifecycle is not ready for production.\n"
+                f"Current state: {lc.get('state')}"
+            )
+            return
+
+        result = await controller.post(f"/lifecycle/{lifecycle_id}/transition", {
+            "trigger": "human_approval",
+            "triggered_by": user_id,
+            "role": user_role.value,
+            "reason": "Production approval via Telegram",
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        new_state = result.get("new_state", "unknown")
+        await update.message.reply_text(
+            f"🚀 Production deployment approved!\n\n"
+            f"*New State:* {new_state}\n"
+            f"*Approved by:* {user_id}",
+            parse_mode="Markdown"
+        )
+
+        safety.log_action(int(user_id), "lifecycle_prod_approve", {
+            "lifecycle_id": lifecycle_id,
+            "new_state": new_state
+        })
+
+    except Exception as e:
+        logger.error(f"Error in lifecycle_prod_approve_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
 # Error Handler
 # -----------------------------------------------------------------------------
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2402,6 +2687,13 @@ def main():
     application.add_handler(CommandHandler("feedback", feedback_command))
     application.add_handler(CommandHandler("prod_approve", prod_approve_command))
     application.add_handler(CommandHandler("notifications", notifications_command))
+
+    # Phase 15.1: Lifecycle commands
+    application.add_handler(CommandHandler("lifecycle_status", lifecycle_status_command))
+    application.add_handler(CommandHandler("lifecycle_approve", lifecycle_approve_command))
+    application.add_handler(CommandHandler("lifecycle_reject", lifecycle_reject_command))
+    application.add_handler(CommandHandler("lifecycle_feedback", lifecycle_feedback_command))
+    application.add_handler(CommandHandler("lifecycle_prod_approve", lifecycle_prod_approve_command))
 
     # Callback query handler for inline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))
