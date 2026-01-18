@@ -1,5 +1,5 @@
 """
-Telegram Bot - Phase 13.3-14.0
+Telegram Bot - Phase 13.3-15.2
 
 Production Control Plane for AI Development Platform.
 
@@ -15,6 +15,8 @@ Features:
 - Timeouts & retries (13.11)
 - Degraded mode handling (13.12)
 - Claude CLI job management (14.0)
+- Autonomous lifecycle engine (15.1)
+- Continuous change cycles (15.2)
 
 Safety:
 - Bot cannot trigger prod deploy directly
@@ -81,7 +83,7 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.15.1"
+BOT_VERSION = "0.15.2"
 BOT_START_TIME = datetime.utcnow()
 
 # -----------------------------------------------------------------------------
@@ -2627,6 +2629,201 @@ async def lifecycle_prod_approve_command(update: Update, context: ContextTypes.D
 
 
 # -----------------------------------------------------------------------------
+# Phase 15.2: Continuous Change Cycle Commands
+# -----------------------------------------------------------------------------
+
+async def _request_change(update: Update, context: ContextTypes.DEFAULT_TYPE, change_type: str, change_name: str) -> None:
+    """
+    Helper function to request a continuous change on a deployed lifecycle.
+    """
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            f"Usage: /{change_name} <lifecycle\\_id> <description>\n"
+            f"Example: /{change_name} abc123 Add user login form\n\n"
+            f"Note: Lifecycle must be in DEPLOYED state."
+        )
+        return
+
+    lifecycle_id = context.args[0]
+    description = " ".join(context.args[1:])
+    user_id = str(update.effective_user.id)
+    user_role = get_user_role(update.effective_user.id)
+
+    if len(description) < 10:
+        await update.message.reply_text("Description must be at least 10 characters.")
+        return
+
+    try:
+        result = await controller.post(f"/lifecycle/{lifecycle_id}/change", {
+            "change_type": change_type,
+            "change_summary": description,
+            "requested_by": user_id,
+            "role": user_role.value,
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        cycle_number = result.get("cycle_number", "N/A")
+        change_type_emoji = {
+            "feature": "✨",
+            "bug": "🐛",
+            "improvement": "📈",
+            "refactor": "🔧",
+            "security": "🔒",
+        }
+        emoji = change_type_emoji.get(change_type, "📝")
+
+        await update.message.reply_text(
+            f"{emoji} *Change Request Submitted!*\n\n"
+            f"*Type:* {change_type}\n"
+            f"*Cycle:* {cycle_number}\n"
+            f"*Description:* {description}\n\n"
+            f"The system will process your request.",
+            parse_mode="Markdown"
+        )
+
+        safety.log_action(int(user_id), f"change_{change_type}", {
+            "lifecycle_id": lifecycle_id,
+            "cycle_number": cycle_number,
+            "description": description
+        })
+
+    except Exception as e:
+        logger.error(f"Error in {change_name} command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
+async def new_feature_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /new_feature <lifecycle_id> <description> - Request a new feature (Phase 15.2)
+    """
+    await _request_change(update, context, "feature", "new_feature")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER)
+async def report_bug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /report_bug <lifecycle_id> <description> - Report a bug (Phase 15.2)
+    """
+    await _request_change(update, context, "bug", "report_bug")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
+async def improve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /improve <lifecycle_id> <description> - Request an improvement (Phase 15.2)
+    """
+    await _request_change(update, context, "improvement", "improve")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
+async def refactor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /refactor <lifecycle_id> <description> - Request a refactoring (Phase 15.2)
+    """
+    await _request_change(update, context, "refactor", "refactor")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
+async def security_fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /security_fix <lifecycle_id> <description> - Request a security fix (Phase 15.2)
+    """
+    await _request_change(update, context, "security", "security_fix")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER)
+async def cycle_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /cycle_history <lifecycle_id> - Show cycle history for a lifecycle (Phase 15.2)
+    """
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /cycle\\_history <lifecycle\\_id>\n"
+            "Example: /cycle\\_history abc123"
+        )
+        return
+
+    lifecycle_id = context.args[0]
+
+    try:
+        result = await controller.get(f"/lifecycle/{lifecycle_id}/cycles")
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        cycles = result.get("cycles", [])
+        if not cycles:
+            await update.message.reply_text("No cycle history found.")
+            return
+
+        text = f"*Cycle History*\n\n"
+        for cycle in cycles:
+            is_current = cycle.get("is_current", False)
+            status = "🔄 Current" if is_current else "✅ Complete"
+            text += f"*Cycle {cycle.get('cycle_number')}* {status}\n"
+            if cycle.get("change_summary"):
+                text += f"  Summary: {cycle.get('change_summary')[:50]}...\n"
+            if cycle.get("state"):
+                text += f"  State: {cycle.get('state')}\n"
+            text += "\n"
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in cycle_history_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER)
+async def change_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /change_summary <lifecycle_id> - Show deployment summary (Phase 15.2)
+    """
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /change\\_summary <lifecycle\\_id>\n"
+            "Example: /change\\_summary abc123"
+        )
+        return
+
+    lifecycle_id = context.args[0]
+
+    try:
+        result = await controller.get(f"/lifecycle/{lifecycle_id}/summary")
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        summary = result
+
+        text = f"*Deployment Summary*\n\n"
+        text += f"*Project:* {summary.get('project_name', 'N/A')}\n"
+        text += f"*Aspect:* {summary.get('aspect', 'N/A')}\n"
+        text += f"*Mode:* {summary.get('mode', 'N/A')}\n"
+        text += f"*State:* {summary.get('current_state', 'N/A')}\n"
+        text += f"*Cycle:* {summary.get('current_cycle', 1)}\n"
+        text += f"*Transitions:* {summary.get('total_transitions', 0)}\n"
+        text += f"*Claude Jobs:* {summary.get('total_claude_jobs', 0)}\n\n"
+
+        changes = summary.get("changes", [])
+        if changes:
+            text += "*Changes:*\n"
+            for change in changes[-5:]:  # Show last 5 changes
+                in_progress = "🔄" if change.get("in_progress") else "✅"
+                text += f"{in_progress} Cycle {change.get('cycle')}: {change.get('summary', 'N/A')[:40]}...\n"
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in change_summary_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
 # Error Handler
 # -----------------------------------------------------------------------------
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2694,6 +2891,15 @@ def main():
     application.add_handler(CommandHandler("lifecycle_reject", lifecycle_reject_command))
     application.add_handler(CommandHandler("lifecycle_feedback", lifecycle_feedback_command))
     application.add_handler(CommandHandler("lifecycle_prod_approve", lifecycle_prod_approve_command))
+
+    # Phase 15.2: Continuous Change Cycle commands
+    application.add_handler(CommandHandler("new_feature", new_feature_command))
+    application.add_handler(CommandHandler("report_bug", report_bug_command))
+    application.add_handler(CommandHandler("improve", improve_command))
+    application.add_handler(CommandHandler("refactor", refactor_command))
+    application.add_handler(CommandHandler("security_fix", security_fix_command))
+    application.add_handler(CommandHandler("cycle_history", cycle_history_command))
+    application.add_handler(CommandHandler("change_summary", change_summary_command))
 
     # Callback query handler for inline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))

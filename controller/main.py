@@ -3661,9 +3661,16 @@ try:
         ProjectAspect as LifecycleAspect,
         TransitionTrigger,
         UserRole,
+        # Phase 15.2: Continuous Change Cycle imports
+        request_continuous_change,
+        get_cycle_history,
+        get_change_lineage,
+        get_deployment_summary,
+        get_project_changes,
+        get_aspect_history,
     )
     LIFECYCLE_AVAILABLE = True
-    logger.info("Phase 15.1: Lifecycle V2 module loaded successfully")
+    logger.info("Phase 15.2: Lifecycle V2 module loaded successfully")
 except ImportError as e:
     LIFECYCLE_AVAILABLE = False
     logger.warning(f"Lifecycle V2 module not available: {e}")
@@ -3695,6 +3702,15 @@ class TransitionLifecycleRequest(BaseModel):
     role: str  # owner, admin, developer, tester
     reason: str = ""
     metadata: dict = Field(default_factory=dict)
+
+
+# Phase 15.2: Continuous Change Request model
+class ContinuousChangeRequest(BaseModel):
+    """Request to create a continuous change on a deployed lifecycle."""
+    change_type: str  # bug, feature, improvement, refactor, security
+    change_summary: str
+    requested_by: str
+    role: str  # owner, admin, developer, tester
 
 
 @app.post("/lifecycle")
@@ -3949,6 +3965,162 @@ async def get_lifecycle_guidance_endpoint(lifecycle_id: str):
 
 
 # -----------------------------------------------------------------------------
+# Phase 15.2: Continuous Change Cycle Endpoints
+# -----------------------------------------------------------------------------
+
+@app.post("/lifecycle/{lifecycle_id}/change")
+async def request_change_endpoint(lifecycle_id: str, request: ContinuousChangeRequest):
+    """
+    Phase 15.2: Request a continuous change on a deployed lifecycle.
+
+    This triggers the DEPLOYED -> AWAITING_FEEDBACK transition and starts
+    a new change cycle. The lifecycle must be in DEPLOYED state.
+
+    Valid change types: bug, feature, improvement, refactor, security
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    # Validate change type
+    valid_types = ["bug", "feature", "improvement", "refactor", "security"]
+    if request.change_type not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid change_type: {request.change_type}. Valid types: {valid_types}"
+        )
+
+    # Validate role
+    valid_roles = ["owner", "admin", "developer", "tester"]
+    if request.role not in valid_roles:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role: {request.role}. Valid roles: {valid_roles}"
+        )
+
+    success, message, cycle_number = await request_continuous_change(
+        lifecycle_id=lifecycle_id,
+        change_type=request.change_type,
+        change_summary=request.change_summary,
+        requested_by=request.requested_by,
+        role=request.role,
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "success": True,
+        "message": message,
+        "cycle_number": cycle_number,
+    }
+
+
+@app.get("/lifecycle/{lifecycle_id}/cycles")
+async def get_cycle_history_endpoint(lifecycle_id: str):
+    """
+    Phase 15.2: Get the complete cycle history for a lifecycle.
+
+    Returns all past and current cycles with their details.
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    success, message, history = await get_cycle_history(lifecycle_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=message)
+
+    return {
+        "lifecycle_id": lifecycle_id,
+        "cycles": history,
+    }
+
+
+@app.get("/lifecycle/{lifecycle_id}/lineage")
+async def get_lineage_endpoint(lifecycle_id: str):
+    """
+    Phase 15.2: Get the change lineage for a lifecycle.
+
+    Returns the chain of deployments and their relationships.
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    success, message, lineage = await get_change_lineage(lifecycle_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=message)
+
+    return lineage
+
+
+@app.get("/lifecycle/{lifecycle_id}/summary")
+async def get_summary_endpoint(lifecycle_id: str):
+    """
+    Phase 15.2: Generate a "What Changed" deployment summary.
+
+    Returns a comprehensive summary of all changes made in the lifecycle.
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    success, message, summary = await get_deployment_summary(lifecycle_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=message)
+
+    return summary
+
+
+@app.get("/project/{project_name}/changes")
+async def get_project_changes_endpoint(project_name: str, aspect: Optional[str] = None):
+    """
+    Phase 15.2: Get all changes (CHANGE_MODE lifecycles) for a project.
+
+    Optionally filtered by aspect.
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    # Validate aspect if provided
+    if aspect:
+        valid_aspects = ["core", "backend", "frontend_web", "frontend_mobile", "admin", "custom"]
+        if aspect not in valid_aspects:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid aspect: {aspect}. Valid aspects: {valid_aspects}"
+            )
+
+    changes = await get_project_changes(project_name, aspect)
+
+    return {
+        "project_name": project_name,
+        "aspect": aspect,
+        "changes": changes,
+    }
+
+
+@app.get("/project/{project_name}/aspects/{aspect}/history")
+async def get_aspect_history_endpoint(project_name: str, aspect: str):
+    """
+    Phase 15.2: Get the complete history for a project aspect.
+
+    Includes all lifecycles (project and change mode) for the aspect.
+    """
+    if not LIFECYCLE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Lifecycle engine not available")
+
+    # Validate aspect
+    valid_aspects = ["core", "backend", "frontend_web", "frontend_mobile", "admin", "custom"]
+    if aspect not in valid_aspects:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid aspect: {aspect}. Valid aspects: {valid_aspects}"
+        )
+
+    history = await get_aspect_history(project_name, aspect)
+
+    return history
+
+
+# -----------------------------------------------------------------------------
 # Error Handlers
 # -----------------------------------------------------------------------------
 @app.exception_handler(HTTPException)
@@ -3997,12 +4169,12 @@ async def startup_event():
         except Exception as e:
             logger.error(f"Failed to initialize lifecycle manager: {e}")
 
-    logger.info("Task Controller ready (Phase 15.1: Autonomous Lifecycle Engine)")
+    logger.info("Task Controller ready (Phase 15.2: Continuous Change Cycles)")
     logger.info("SAFETY: Production deployment requires DUAL APPROVAL (different users).")
     logger.info("SAFETY: All production actions logged to immutable audit trail.")
     logger.info("SAFETY: Production rollback always available (break-glass).")
     logger.info("SAFETY: Testing environment MUST be used before production.")
-    logger.info("PHASE 15.1: Deterministic lifecycle state machine with event-driven transitions.")
+    logger.info("PHASE 15.2: Continuous change cycles with DEPLOYED -> AWAITING_FEEDBACK loops.")
 
 
 @app.on_event("shutdown")

@@ -1,5 +1,5 @@
 """
-Phase 15.1: Autonomous Lifecycle Engine
+Phase 15.2: Continuous Change Cycles
 
 This module implements a deterministic lifecycle state machine for managing
 project and change lifecycles with explicit states, validated transitions,
@@ -12,11 +12,17 @@ Key features:
 - Event-driven transitions (Claude completion, test results, feedback, approval)
 - Persistent state with crash recovery
 - Safety guarantees (no implicit approvals, no cross-aspect side effects)
+- Continuous change cycles (DEPLOYED → AWAITING_FEEDBACK → FIXING → ...)
+- Change history and lineage tracking
+- Deployment summaries
 
 States:
     CREATED → PLANNING → DEVELOPMENT → TESTING → AWAITING_FEEDBACK →
     FIXING → READY_FOR_PRODUCTION → DEPLOYED → ARCHIVED
     (REJECTED can occur from PLANNING, DEVELOPMENT, TESTING, AWAITING_FEEDBACK)
+
+Continuous Loops (Phase 15.2):
+    DEPLOYED → AWAITING_FEEDBACK → FIXING → READY_FOR_PRODUCTION → DEPLOYED
 
 IMPORTANT: This module does NOT replace Phase 12 lifecycle_engine.py.
 It ADDS a new deterministic lifecycle layer for Phase 15.1+.
@@ -50,6 +56,8 @@ class LifecycleState(str, Enum):
 
     State machine enforces explicit, validated transitions only.
     No state skipping is allowed.
+
+    Phase 15.2: DEPLOYED is no longer terminal - can loop back to AWAITING_FEEDBACK.
     """
     CREATED = "created"
     PLANNING = "planning"
@@ -64,8 +72,14 @@ class LifecycleState(str, Enum):
 
     @classmethod
     def terminal_states(cls) -> Set["LifecycleState"]:
-        """States that indicate lifecycle completion."""
-        return {cls.DEPLOYED, cls.REJECTED, cls.ARCHIVED}
+        """States that indicate lifecycle completion (no further work)."""
+        # Phase 15.2: DEPLOYED is no longer terminal, only REJECTED and ARCHIVED
+        return {cls.REJECTED, cls.ARCHIVED}
+
+    @classmethod
+    def deployed_states(cls) -> Set["LifecycleState"]:
+        """States indicating deployment (may still receive changes)."""
+        return {cls.DEPLOYED}
 
     @classmethod
     def active_states(cls) -> Set["LifecycleState"]:
@@ -87,11 +101,14 @@ class LifecycleMode(str, Enum):
 class ChangeType(str, Enum):
     """
     Type of change for CHANGE_MODE lifecycles.
+
+    Phase 15.2: Added SECURITY for security-related fixes.
     """
     BUG = "bug"
     FEATURE = "feature"
     IMPROVEMENT = "improvement"
     REFACTOR = "refactor"
+    SECURITY = "security"  # Phase 15.2: Security fixes
 
 
 class ProjectAspect(str, Enum):
@@ -114,6 +131,8 @@ class TransitionTrigger(str, Enum):
     Valid triggers for lifecycle transitions.
 
     Transitions may ONLY be triggered by these events.
+
+    Phase 15.2: Added CONTINUOUS_CHANGE_REQUEST for post-deployment loops.
     """
     CLAUDE_JOB_COMPLETED = "claude_job_completed"
     TEST_PASSED = "test_passed"
@@ -123,6 +142,8 @@ class TransitionTrigger(str, Enum):
     HUMAN_REJECTION = "human_rejection"
     SYSTEM_INIT = "system_init"
     MANUAL_ARCHIVE = "manual_archive"
+    # Phase 15.2: Continuous change cycle triggers
+    CONTINUOUS_CHANGE_REQUEST = "continuous_change_request"  # DEPLOYED -> AWAITING_FEEDBACK
 
 
 class UserRole(str, Enum):
@@ -141,6 +162,7 @@ class UserRole(str, Enum):
 # -----------------------------------------------------------------------------
 
 # Map of current_state -> {trigger: target_state}
+# Phase 15.2: Added DEPLOYED -> AWAITING_FEEDBACK loop for continuous changes
 VALID_TRANSITIONS: Dict[LifecycleState, Dict[TransitionTrigger, LifecycleState]] = {
     LifecycleState.CREATED: {
         TransitionTrigger.SYSTEM_INIT: LifecycleState.PLANNING,
@@ -172,6 +194,8 @@ VALID_TRANSITIONS: Dict[LifecycleState, Dict[TransitionTrigger, LifecycleState]]
         TransitionTrigger.HUMAN_REJECTION: LifecycleState.REJECTED,
     },
     LifecycleState.DEPLOYED: {
+        # Phase 15.2: Continuous change cycle - DEPLOYED can loop back to AWAITING_FEEDBACK
+        TransitionTrigger.CONTINUOUS_CHANGE_REQUEST: LifecycleState.AWAITING_FEEDBACK,
         TransitionTrigger.MANUAL_ARCHIVE: LifecycleState.ARCHIVED,
     },
     LifecycleState.REJECTED: {
@@ -192,6 +216,8 @@ TRANSITION_PERMISSIONS: Dict[TransitionTrigger, Set[UserRole]] = {
     TransitionTrigger.HUMAN_REJECTION: {UserRole.OWNER, UserRole.ADMIN},
     TransitionTrigger.SYSTEM_INIT: {UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER},
     TransitionTrigger.MANUAL_ARCHIVE: {UserRole.OWNER, UserRole.ADMIN},
+    # Phase 15.2: Continuous change triggers
+    TransitionTrigger.CONTINUOUS_CHANGE_REQUEST: {UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER},
 }
 
 
@@ -209,6 +235,58 @@ class ChangeReference:
     change_type: ChangeType
     parent_lifecycle_id: Optional[str] = None  # For tracking related changes
     description: str = ""
+
+
+@dataclass
+class CycleRecord:
+    """
+    Phase 15.2: Record of a deployment cycle iteration.
+
+    Each time a lifecycle loops from DEPLOYED -> AWAITING_FEEDBACK -> ... -> DEPLOYED,
+    a new cycle record is created.
+    """
+    cycle_number: int
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    change_type: Optional[ChangeType] = None
+    change_summary: str = ""
+    previous_deployment_id: Optional[str] = None  # Claude job ID of previous deployment
+    deployment_job_id: Optional[str] = None  # Claude job ID of this deployment
+    files_changed: List[str] = field(default_factory=list)
+    commit_hash: Optional[str] = None
+    feedback_summary: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "cycle_number": self.cycle_number,
+            "started_at": self.started_at.isoformat(),
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "change_type": self.change_type.value if self.change_type else None,
+            "change_summary": self.change_summary,
+            "previous_deployment_id": self.previous_deployment_id,
+            "deployment_job_id": self.deployment_job_id,
+            "files_changed": self.files_changed,
+            "commit_hash": self.commit_hash,
+            "feedback_summary": self.feedback_summary,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CycleRecord":
+        return cls(
+            cycle_number=data["cycle_number"],
+            started_at=datetime.fromisoformat(data["started_at"]),
+            completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
+            change_type=ChangeType(data["change_type"]) if data.get("change_type") else None,
+            change_summary=data.get("change_summary", ""),
+            previous_deployment_id=data.get("previous_deployment_id"),
+            deployment_job_id=data.get("deployment_job_id"),
+            files_changed=data.get("files_changed", []),
+            commit_hash=data.get("commit_hash"),
+            feedback_summary=data.get("feedback_summary", ""),
+            metadata=data.get("metadata", {}),
+        )
 
 
 @dataclass
@@ -253,6 +331,7 @@ class LifecycleInstance:
     - Associated Claude jobs
     - Transition history
     - Aspect isolation
+    - Phase 15.2: Cycle history for continuous change loops
     """
     lifecycle_id: str
     project_name: str
@@ -277,6 +356,11 @@ class LifecycleInstance:
     # Transition history
     transition_count: int = 0
     last_transition_at: Optional[datetime] = None
+    # Phase 15.2: Continuous change cycle tracking
+    cycle_number: int = 1  # Current cycle (starts at 1, increments on each DEPLOYED -> AWAITING_FEEDBACK loop)
+    cycle_history: List[Dict[str, Any]] = field(default_factory=list)  # History of all cycles
+    current_change_summary: str = ""  # Summary of changes in current cycle
+    previous_deployment_id: Optional[str] = None  # Claude job ID of previous deployment
     # Metadata
     description: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -306,6 +390,11 @@ class LifecycleInstance:
             "feedback_history": self.feedback_history,
             "transition_count": self.transition_count,
             "last_transition_at": self.last_transition_at.isoformat() if self.last_transition_at else None,
+            # Phase 15.2: Cycle tracking
+            "cycle_number": self.cycle_number,
+            "cycle_history": self.cycle_history,
+            "current_change_summary": self.current_change_summary,
+            "previous_deployment_id": self.previous_deployment_id,
             "description": self.description,
             "metadata": self.metadata,
         }
@@ -342,6 +431,11 @@ class LifecycleInstance:
             feedback_history=data.get("feedback_history", []),
             transition_count=data.get("transition_count", 0),
             last_transition_at=datetime.fromisoformat(data["last_transition_at"]) if data.get("last_transition_at") else None,
+            # Phase 15.2: Cycle tracking
+            cycle_number=data.get("cycle_number", 1),
+            cycle_history=data.get("cycle_history", []),
+            current_change_summary=data.get("current_change_summary", ""),
+            previous_deployment_id=data.get("previous_deployment_id"),
             description=data.get("description", ""),
             metadata=data.get("metadata", {}),
         )
@@ -461,9 +555,11 @@ class LifecycleStateMachine:
             guidance["available_actions"] = ["approve_production", "reject"]
 
         elif state == LifecycleState.DEPLOYED:
-            guidance["next_step"] = "Deployment complete - can archive when ready"
+            # Phase 15.2: DEPLOYED is no longer terminal - can request continuous changes
+            guidance["next_step"] = "Deployment complete - can request changes or archive"
             guidance["waiting_for"] = None
-            guidance["available_actions"] = ["archive"]
+            guidance["available_actions"] = ["new_feature", "report_bug", "improve", "refactor", "security_fix", "archive"]
+            guidance["cycle_number"] = lifecycle.cycle_number  # Phase 15.2: Include cycle info
 
         elif state == LifecycleState.REJECTED:
             guidance["next_step"] = "Lifecycle was rejected - can archive"
@@ -523,6 +619,38 @@ class LifecycleStateMachine:
             lifecycle.transition_count += 1
             lifecycle.last_transition_at = datetime.utcnow()
 
+            # Phase 15.2: Handle cycle tracking for continuous change loops
+            if (old_state == LifecycleState.DEPLOYED and
+                trigger == TransitionTrigger.CONTINUOUS_CHANGE_REQUEST):
+                # Starting a new change cycle
+                # Save current cycle to history before incrementing
+                current_cycle_record = {
+                    "cycle_number": lifecycle.cycle_number,
+                    "completed_at": datetime.utcnow().isoformat(),
+                    "change_summary": lifecycle.current_change_summary,
+                    "deployment_job_id": lifecycle.current_claude_job_id,
+                }
+                lifecycle.cycle_history.append(current_cycle_record)
+
+                # Increment cycle and store previous deployment reference
+                lifecycle.previous_deployment_id = lifecycle.current_claude_job_id
+                lifecycle.cycle_number += 1
+                lifecycle.current_change_summary = reason  # Store the change request as summary
+
+                logger.info(
+                    f"Lifecycle {lifecycle.lifecycle_id}: Starting cycle {lifecycle.cycle_number} "
+                    f"(previous deployment: {lifecycle.previous_deployment_id})"
+                )
+
+            # Phase 15.2: Track when a cycle completes deployment
+            if (target_state == LifecycleState.DEPLOYED and
+                old_state == LifecycleState.READY_FOR_PRODUCTION):
+                # Cycle completed successfully
+                logger.info(
+                    f"Lifecycle {lifecycle.lifecycle_id}: Cycle {lifecycle.cycle_number} deployed "
+                    f"(job: {lifecycle.current_claude_job_id})"
+                )
+
             # Check if terminal state
             if target_state in LifecycleState.terminal_states():
                 lifecycle.completed_at = datetime.utcnow()
@@ -541,7 +669,12 @@ class LifecycleStateMachine:
                 metadata=metadata or {},
             )
 
-            # Log to audit trail
+            # Log to audit trail (enhanced for Phase 15.2)
+            audit_metadata = metadata or {}
+            audit_metadata["cycle_number"] = lifecycle.cycle_number
+            if lifecycle.previous_deployment_id:
+                audit_metadata["previous_deployment_id"] = lifecycle.previous_deployment_id
+
             await self._log_audit(
                 lifecycle_id=lifecycle.lifecycle_id,
                 event="transition_completed",
@@ -551,12 +684,12 @@ class LifecycleStateMachine:
                 triggered_by=triggered_by,
                 role=user_role.value,
                 reason=reason,
-                metadata=metadata or {},
+                metadata=audit_metadata,
             )
 
             logger.info(
                 f"Lifecycle {lifecycle.lifecycle_id}: {old_state.value} -> {target_state.value} "
-                f"(trigger: {trigger.value}, by: {triggered_by})"
+                f"(trigger: {trigger.value}, by: {triggered_by}, cycle: {lifecycle.cycle_number})"
             )
 
             return True, f"Transitioned to {target_state.value}", target_state
@@ -855,6 +988,294 @@ class LifecycleManager:
         return True, "Feedback recorded"
 
     # -------------------------------------------------------------------------
+    # Phase 15.2: Continuous Change Cycles
+    # -------------------------------------------------------------------------
+
+    async def request_continuous_change(
+        self,
+        lifecycle_id: str,
+        change_type: ChangeType,
+        change_summary: str,
+        requested_by: str,
+        user_role: UserRole,
+    ) -> Tuple[bool, str, Optional[int]]:
+        """
+        Phase 15.2: Request a continuous change on a deployed lifecycle.
+
+        This triggers the DEPLOYED -> AWAITING_FEEDBACK transition and starts
+        a new cycle.
+
+        Returns (success, message, new_cycle_number)
+        """
+        lifecycle = await self.get_lifecycle(lifecycle_id)
+        if not lifecycle:
+            return False, f"Lifecycle {lifecycle_id} not found", None
+
+        if lifecycle.state != LifecycleState.DEPLOYED:
+            return False, f"Cannot request change: lifecycle is in state '{lifecycle.state.value}', must be 'deployed'", None
+
+        # Build metadata for the change request
+        metadata = {
+            "change_type": change_type.value,
+            "change_summary": change_summary,
+            "previous_cycle": lifecycle.cycle_number,
+        }
+
+        # Perform the transition
+        success, message, new_state = await self._state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by=requested_by,
+            user_role=user_role,
+            reason=change_summary,
+            metadata=metadata,
+        )
+
+        if success:
+            # Update change reference for tracking
+            if lifecycle.change_reference:
+                lifecycle.change_reference.change_type = change_type
+                lifecycle.change_reference.description = change_summary
+            await self._save_lifecycle(lifecycle)
+
+            # Log the change request
+            await self._state_machine._log_audit(
+                lifecycle_id=lifecycle_id,
+                event="continuous_change_requested",
+                from_state=LifecycleState.DEPLOYED.value,
+                to_state=LifecycleState.AWAITING_FEEDBACK.value,
+                trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST.value,
+                triggered_by=requested_by,
+                role=user_role.value,
+                reason=change_summary,
+                metadata={
+                    "change_type": change_type.value,
+                    "cycle_number": lifecycle.cycle_number,
+                },
+            )
+
+            return True, f"Change request accepted. Starting cycle {lifecycle.cycle_number}", lifecycle.cycle_number
+
+        return False, message, None
+
+    async def get_cycle_history(
+        self,
+        lifecycle_id: str,
+    ) -> Tuple[bool, str, List[Dict[str, Any]]]:
+        """
+        Phase 15.2: Get the complete cycle history for a lifecycle.
+
+        Returns (success, message, cycle_history)
+        """
+        lifecycle = await self.get_lifecycle(lifecycle_id)
+        if not lifecycle:
+            return False, f"Lifecycle {lifecycle_id} not found", []
+
+        # Build history including current cycle
+        history = list(lifecycle.cycle_history)
+
+        # Add current cycle as in-progress
+        current_cycle = {
+            "cycle_number": lifecycle.cycle_number,
+            "started_at": lifecycle.last_transition_at.isoformat() if lifecycle.last_transition_at else lifecycle.created_at.isoformat(),
+            "completed_at": None,
+            "change_summary": lifecycle.current_change_summary,
+            "state": lifecycle.state.value,
+            "deployment_job_id": lifecycle.current_claude_job_id,
+            "is_current": True,
+        }
+        history.append(current_cycle)
+
+        return True, f"Found {len(history)} cycles", history
+
+    async def get_change_lineage(
+        self,
+        lifecycle_id: str,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Phase 15.2: Get the lineage of changes for a lifecycle.
+
+        Returns the chain of deployments and their relationships.
+        """
+        lifecycle = await self.get_lifecycle(lifecycle_id)
+        if not lifecycle:
+            return False, f"Lifecycle {lifecycle_id} not found", {}
+
+        lineage = {
+            "lifecycle_id": lifecycle_id,
+            "project_name": lifecycle.project_name,
+            "aspect": lifecycle.aspect.value,
+            "total_cycles": lifecycle.cycle_number,
+            "total_deployments": len([c for c in lifecycle.cycle_history if c.get("deployment_job_id")]),
+            "current_state": lifecycle.state.value,
+            "deployments": [],
+        }
+
+        # Build deployment chain
+        for cycle in lifecycle.cycle_history:
+            if cycle.get("deployment_job_id"):
+                lineage["deployments"].append({
+                    "cycle": cycle["cycle_number"],
+                    "job_id": cycle["deployment_job_id"],
+                    "completed_at": cycle.get("completed_at"),
+                    "change_summary": cycle.get("change_summary", ""),
+                })
+
+        # Add current deployment if deployed
+        if lifecycle.state == LifecycleState.DEPLOYED and lifecycle.current_claude_job_id:
+            lineage["deployments"].append({
+                "cycle": lifecycle.cycle_number,
+                "job_id": lifecycle.current_claude_job_id,
+                "completed_at": lifecycle.updated_at.isoformat() if lifecycle.updated_at else None,
+                "change_summary": lifecycle.current_change_summary,
+                "is_current": True,
+            })
+
+        return True, "Lineage retrieved", lineage
+
+    async def generate_deployment_summary(
+        self,
+        lifecycle_id: str,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Phase 15.2: Generate a "What Changed" deployment summary.
+
+        Returns a summary of what changed across cycles.
+        """
+        lifecycle = await self.get_lifecycle(lifecycle_id)
+        if not lifecycle:
+            return False, f"Lifecycle {lifecycle_id} not found", {}
+
+        summary = {
+            "lifecycle_id": lifecycle_id,
+            "project_name": lifecycle.project_name,
+            "aspect": lifecycle.aspect.value,
+            "mode": lifecycle.mode.value,
+            "current_cycle": lifecycle.cycle_number,
+            "current_state": lifecycle.state.value,
+            "created_at": lifecycle.created_at.isoformat(),
+            "last_updated": lifecycle.updated_at.isoformat() if lifecycle.updated_at else None,
+            "total_transitions": lifecycle.transition_count,
+            "total_feedback_items": len(lifecycle.feedback_history),
+            "total_claude_jobs": len(lifecycle.claude_job_ids),
+            "total_test_runs": len(lifecycle.test_run_ids),
+            "changes": [],
+        }
+
+        # Build change summary from cycle history
+        for cycle in lifecycle.cycle_history:
+            if cycle.get("change_summary"):
+                summary["changes"].append({
+                    "cycle": cycle["cycle_number"],
+                    "summary": cycle["change_summary"],
+                    "completed_at": cycle.get("completed_at"),
+                })
+
+        # Add current cycle change if any
+        if lifecycle.current_change_summary:
+            summary["changes"].append({
+                "cycle": lifecycle.cycle_number,
+                "summary": lifecycle.current_change_summary,
+                "in_progress": True,
+            })
+
+        # Latest feedback summary
+        if lifecycle.feedback_history:
+            latest_feedback = lifecycle.feedback_history[-1]
+            summary["latest_feedback"] = {
+                "type": latest_feedback.get("feedback_type"),
+                "text": latest_feedback.get("feedback_text"),
+                "submitted_at": latest_feedback.get("submitted_at"),
+            }
+
+        return True, "Summary generated", summary
+
+    async def get_changes_for_project(
+        self,
+        project_name: str,
+        aspect: Optional[ProjectAspect] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Phase 15.2: Get all changes (CHANGE_MODE lifecycles) for a project.
+
+        Optionally filtered by aspect.
+        """
+        lifecycles = await self._load_all_lifecycles()
+
+        # Filter to CHANGE_MODE only
+        changes = [
+            lc for lc in lifecycles
+            if lc.project_name == project_name and lc.mode == LifecycleMode.CHANGE_MODE
+        ]
+
+        # Filter by aspect if specified
+        if aspect:
+            changes = [lc for lc in changes if lc.aspect == aspect]
+
+        # Sort by created_at descending
+        changes.sort(key=lambda lc: lc.created_at, reverse=True)
+
+        # Build response
+        return [
+            {
+                "lifecycle_id": lc.lifecycle_id,
+                "aspect": lc.aspect.value,
+                "state": lc.state.value,
+                "change_type": lc.change_reference.change_type.value if lc.change_reference else None,
+                "description": lc.change_reference.description if lc.change_reference else lc.description,
+                "cycle_number": lc.cycle_number,
+                "created_at": lc.created_at.isoformat(),
+                "updated_at": lc.updated_at.isoformat() if lc.updated_at else None,
+            }
+            for lc in changes
+        ]
+
+    async def get_aspect_history(
+        self,
+        project_name: str,
+        aspect: ProjectAspect,
+    ) -> Dict[str, Any]:
+        """
+        Phase 15.2: Get the complete history for a project aspect.
+
+        Includes all lifecycles (project and change mode) for the aspect.
+        """
+        lifecycles = await self.get_lifecycles_for_aspect(project_name, aspect)
+
+        # Sort by created_at
+        lifecycles.sort(key=lambda lc: lc.created_at)
+
+        history = {
+            "project_name": project_name,
+            "aspect": aspect.value,
+            "total_lifecycles": len(lifecycles),
+            "lifecycles": [],
+        }
+
+        total_cycles = 0
+        total_deployments = 0
+
+        for lc in lifecycles:
+            total_cycles += lc.cycle_number
+            if lc.state == LifecycleState.DEPLOYED:
+                total_deployments += 1
+            total_deployments += len([c for c in lc.cycle_history if c.get("deployment_job_id")])
+
+            history["lifecycles"].append({
+                "lifecycle_id": lc.lifecycle_id,
+                "mode": lc.mode.value,
+                "state": lc.state.value,
+                "cycles": lc.cycle_number,
+                "created_at": lc.created_at.isoformat(),
+                "description": lc.description or (lc.change_reference.description if lc.change_reference else ""),
+            })
+
+        history["total_cycles"] = total_cycles
+        history["total_deployments"] = total_deployments
+
+        return history
+
+    # -------------------------------------------------------------------------
     # Persistence
     # -------------------------------------------------------------------------
 
@@ -1112,4 +1533,85 @@ async def get_lifecycle_guidance(lifecycle_id: str) -> Optional[Dict[str, Any]]:
     return manager.get_guidance(lifecycle)
 
 
-logger.info("Lifecycle V2 module loaded successfully (Phase 15.1)")
+# -----------------------------------------------------------------------------
+# Phase 15.2: Continuous Change Cycle Public API
+# -----------------------------------------------------------------------------
+
+async def request_continuous_change(
+    lifecycle_id: str,
+    change_type: str,
+    change_summary: str,
+    requested_by: str,
+    role: str,
+) -> Tuple[bool, str, Optional[int]]:
+    """
+    Phase 15.2: Request a continuous change on a deployed lifecycle.
+
+    Args:
+        lifecycle_id: ID of the deployed lifecycle
+        change_type: Type of change (bug, feature, improvement, refactor, security)
+        change_summary: Description of the requested change
+        requested_by: User requesting the change
+        role: User's role (owner, admin, developer, tester)
+
+    Returns:
+        (success, message, new_cycle_number)
+    """
+    manager = get_lifecycle_manager()
+    return await manager.request_continuous_change(
+        lifecycle_id=lifecycle_id,
+        change_type=ChangeType(change_type),
+        change_summary=change_summary,
+        requested_by=requested_by,
+        user_role=UserRole(role),
+    )
+
+
+async def get_cycle_history(lifecycle_id: str) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """
+    Phase 15.2: Get the complete cycle history for a lifecycle.
+    """
+    manager = get_lifecycle_manager()
+    return await manager.get_cycle_history(lifecycle_id)
+
+
+async def get_change_lineage(lifecycle_id: str) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Phase 15.2: Get the lineage of changes for a lifecycle.
+    """
+    manager = get_lifecycle_manager()
+    return await manager.get_change_lineage(lifecycle_id)
+
+
+async def get_deployment_summary(lifecycle_id: str) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Phase 15.2: Generate a "What Changed" deployment summary.
+    """
+    manager = get_lifecycle_manager()
+    return await manager.generate_deployment_summary(lifecycle_id)
+
+
+async def get_project_changes(
+    project_name: str,
+    aspect: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Phase 15.2: Get all changes for a project.
+    """
+    manager = get_lifecycle_manager()
+    aspect_filter = ProjectAspect(aspect) if aspect else None
+    return await manager.get_changes_for_project(project_name, aspect_filter)
+
+
+async def get_aspect_history(
+    project_name: str,
+    aspect: str,
+) -> Dict[str, Any]:
+    """
+    Phase 15.2: Get the complete history for a project aspect.
+    """
+    manager = get_lifecycle_manager()
+    return await manager.get_aspect_history(project_name, ProjectAspect(aspect))
+
+
+logger.info("Lifecycle V2 module loaded successfully (Phase 15.2)")

@@ -175,6 +175,8 @@ class ClaudeJob:
     stdout_file: Optional[Path] = None
     stderr_file: Optional[Path] = None
     result_summary: Optional[str] = None
+    # Phase 15.2: Aspect isolation
+    aspect: str = "core"  # Project aspect for scheduler isolation
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -196,6 +198,8 @@ class ClaudeJob:
             "workspace_dir": str(self.workspace_dir) if self.workspace_dir else None,
             "created_by": self.created_by,
             "result_summary": self.result_summary,
+            # Phase 15.2: Aspect isolation
+            "aspect": self.aspect,
         }
 
     def get_wait_time_seconds(self) -> float:
@@ -766,6 +770,8 @@ class PersistentJobStore:
             workspace_dir=Path(data["workspace_dir"]) if data.get("workspace_dir") else None,
             created_by=data.get("created_by"),
             result_summary=data.get("result_summary"),
+            # Phase 15.2: Aspect isolation with default for backwards compatibility
+            aspect=data.get("aspect", "core"),
         )
 
 
@@ -1134,8 +1140,29 @@ class MultiWorkerScheduler:
                         # Get queued jobs
                         queued_jobs = await persistent_store.get_queued_jobs()
 
-                        # Assign jobs to workers (up to available capacity)
-                        for worker, job in zip(available_workers, queued_jobs):
+                        # Phase 15.2: Get currently active jobs to enforce aspect isolation
+                        active_jobs = await persistent_store.get_active_jobs()
+                        active_aspects = {
+                            (job.project_name, job.aspect)
+                            for job in active_jobs
+                        }
+
+                        # Filter queued jobs to enforce one active job per project+aspect
+                        eligible_jobs = []
+                        for job in queued_jobs:
+                            job_key = (job.project_name, job.aspect)
+                            if job_key not in active_aspects:
+                                eligible_jobs.append(job)
+                                # Mark as "will be active" to prevent double-scheduling same aspect
+                                active_aspects.add(job_key)
+                            else:
+                                logger.debug(
+                                    f"Job {job.job_id} blocked - active job exists for "
+                                    f"{job.project_name}/{job.aspect}"
+                                )
+
+                        # Assign eligible jobs to workers (up to available capacity)
+                        for worker, job in zip(available_workers, eligible_jobs):
                             # Mark as preparing to prevent double-assignment
                             job.state = JobState.PREPARING
                             await persistent_store.save_job(job)
@@ -1143,7 +1170,10 @@ class MultiWorkerScheduler:
                             # Execute asynchronously
                             asyncio.create_task(self._execute_job(worker, job))
 
-                            logger.info(f"Assigned job {job.job_id} to worker {worker.worker_id}")
+                            logger.info(
+                                f"Assigned job {job.job_id} to worker {worker.worker_id} "
+                                f"(project: {job.project_name}, aspect: {job.aspect})"
+                            )
 
                 # Wait before next scheduling cycle
                 await asyncio.sleep(2)
@@ -1350,12 +1380,14 @@ async def create_job(
     task_type: str = "feature_development",
     created_by: Optional[str] = None,
     priority: int = JobPriority.NORMAL.value,
+    aspect: str = "core",
 ) -> ClaudeJob:
     """
     Create and enqueue a new Claude CLI job.
 
     Phase 14.10: Now uses multi-worker scheduler with persistent state.
     Phase 14.11: Added priority parameter for scheduling.
+    Phase 15.2: Added aspect parameter for scheduler isolation.
 
     Args:
         project_name: Name of the project
@@ -1363,12 +1395,17 @@ async def create_job(
         task_type: Type of task (feature_development, bug_fix, refactoring, deployment)
         created_by: User ID or identifier of creator
         priority: Job priority (default: NORMAL=50). Use JobPriority enum values.
+        aspect: Project aspect for scheduler isolation (core, backend, frontend_web, etc.)
 
     Returns:
         The created ClaudeJob
     """
     # Phase 14.11: Validate and normalize priority
     validated_priority = max(JobPriority.LOW.value, min(priority, JobPriority.EMERGENCY.value))
+
+    # Phase 15.2: Validate aspect
+    valid_aspects = ["core", "backend", "frontend_web", "frontend_mobile", "admin", "custom"]
+    validated_aspect = aspect if aspect in valid_aspects else "core"
 
     job = ClaudeJob(
         job_id=str(uuid.uuid4()),
@@ -1379,6 +1416,7 @@ async def create_job(
         created_at=datetime.utcnow(),
         created_by=created_by,
         priority=validated_priority,
+        aspect=validated_aspect,
     )
 
     # Create workspace early so it's ready
@@ -1387,7 +1425,10 @@ async def create_job(
     # Use multi-worker scheduler (Phase 14.10)
     await multi_scheduler.enqueue_job(job)
 
-    logger.info(f"Created job {job.job_id} for project {project_name} (priority: {validated_priority})")
+    logger.info(
+        f"Created job {job.job_id} for project {project_name}/{validated_aspect} "
+        f"(priority: {validated_priority})"
+    )
     return job
 
 

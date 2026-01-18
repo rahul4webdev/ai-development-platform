@@ -830,5 +830,601 @@ class TestSerialization:
         assert restored.change_reference.change_type == ChangeType.BUG
 
 
+# -----------------------------------------------------------------------------
+# Phase 15.2: Continuous Change Cycle Tests
+# -----------------------------------------------------------------------------
+
+class TestContinuousChangeCycles:
+    """Test continuous change cycle support (Phase 15.2)."""
+
+    @pytest.mark.asyncio
+    async def test_deployed_to_awaiting_feedback(self, state_machine):
+        """Test transition from DEPLOYED to AWAITING_FEEDBACK via continuous change."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+
+        success, message, new_state = await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by="user-1",
+            user_role=UserRole.DEVELOPER,
+            reason="New feature request",
+        )
+
+        assert success is True
+        assert new_state == LifecycleState.AWAITING_FEEDBACK
+
+    @pytest.mark.asyncio
+    async def test_deployed_not_terminal_state(self):
+        """Test that DEPLOYED is no longer a terminal state."""
+        assert LifecycleState.DEPLOYED not in LifecycleState.terminal_states()
+        assert LifecycleState.DEPLOYED in LifecycleState.deployed_states()
+
+    @pytest.mark.asyncio
+    async def test_cycle_number_increments(self, state_machine):
+        """Test that cycle number increments on continuous change request."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+        lifecycle.cycle_number = 1
+        lifecycle.current_claude_job_id = "job-1"
+
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by="user-1",
+            user_role=UserRole.DEVELOPER,
+            reason="New feature",
+        )
+
+        assert lifecycle.cycle_number == 2
+
+    @pytest.mark.asyncio
+    async def test_previous_deployment_id_tracked(self, state_machine):
+        """Test that previous deployment ID is tracked on continuous change."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+        lifecycle.cycle_number = 1
+        lifecycle.current_claude_job_id = "job-1"
+
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by="user-1",
+            user_role=UserRole.DEVELOPER,
+            reason="Bug fix",
+        )
+
+        assert lifecycle.previous_deployment_id == "job-1"
+
+    @pytest.mark.asyncio
+    async def test_change_summary_recorded(self, state_machine):
+        """Test that change summary is recorded on continuous change."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by="user-1",
+            user_role=UserRole.DEVELOPER,
+            reason="Add login functionality",
+        )
+
+        assert lifecycle.current_change_summary == "Add login functionality"
+
+    @pytest.mark.asyncio
+    async def test_cycle_history_recorded(self, state_machine):
+        """Test that cycle history is recorded."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+        lifecycle.cycle_number = 1
+        lifecycle.current_claude_job_id = "job-1"
+        lifecycle.current_change_summary = "Initial deployment"
+
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by="user-1",
+            user_role=UserRole.DEVELOPER,
+            reason="Feature update",
+        )
+
+        assert len(lifecycle.cycle_history) == 1
+        assert lifecycle.cycle_history[0]["cycle_number"] == 1
+        assert lifecycle.cycle_history[0]["change_summary"] == "Initial deployment"
+
+    @pytest.mark.asyncio
+    async def test_full_continuous_loop(self, state_machine):
+        """Test full continuous change loop: DEPLOYED -> AWAITING -> FIXING -> TESTING -> AWAITING -> READY -> DEPLOYED."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+        lifecycle.cycle_number = 1
+
+        # Start continuous change
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by="user-1",
+            user_role=UserRole.DEVELOPER,
+            reason="Bug fix",
+        )
+        assert lifecycle.state == LifecycleState.AWAITING_FEEDBACK
+        assert lifecycle.cycle_number == 2
+
+        # Provide feedback -> FIXING
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.TELEGRAM_FEEDBACK,
+            triggered_by="user-1",
+            user_role=UserRole.TESTER,
+            reason="Found issue",
+        )
+        assert lifecycle.state == LifecycleState.FIXING
+
+        # Fix complete -> TESTING
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CLAUDE_JOB_COMPLETED,
+            triggered_by="system",
+            user_role=UserRole.DEVELOPER,
+        )
+        assert lifecycle.state == LifecycleState.TESTING
+
+        # Tests pass -> AWAITING_FEEDBACK
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.TEST_PASSED,
+            triggered_by="system",
+            user_role=UserRole.TESTER,
+        )
+        assert lifecycle.state == LifecycleState.AWAITING_FEEDBACK
+
+        # Approve -> READY_FOR_PRODUCTION
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.HUMAN_APPROVAL,
+            triggered_by="user-1",
+            user_role=UserRole.ADMIN,
+        )
+        assert lifecycle.state == LifecycleState.READY_FOR_PRODUCTION
+
+        # Final approval -> DEPLOYED
+        await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.HUMAN_APPROVAL,
+            triggered_by="user-2",
+            user_role=UserRole.OWNER,
+        )
+        assert lifecycle.state == LifecycleState.DEPLOYED
+
+
+class TestSecurityChangeType:
+    """Test SECURITY change type (Phase 15.2)."""
+
+    def test_security_change_type_exists(self):
+        """Test that SECURITY change type is defined."""
+        assert ChangeType.SECURITY.value == "security"
+
+    @pytest.mark.asyncio
+    async def test_security_change_lifecycle(self, lifecycle_manager):
+        """Test creating a lifecycle with SECURITY change type."""
+        change_ref = ChangeReference(
+            project_id="parent-project",
+            aspect=ProjectAspect.CORE,
+            change_type=ChangeType.SECURITY,
+            description="Fix SQL injection vulnerability",
+        )
+
+        success, message, lifecycle = await lifecycle_manager.create_lifecycle(
+            project_name="test-project",
+            mode=LifecycleMode.CHANGE_MODE,
+            aspect=ProjectAspect.CORE,
+            created_by="security-user",
+            change_reference=change_ref,
+        )
+
+        assert success is True
+        assert lifecycle.change_reference.change_type == ChangeType.SECURITY
+
+
+class TestCycleHistory:
+    """Test cycle history tracking (Phase 15.2)."""
+
+    @pytest.mark.asyncio
+    async def test_get_cycle_history(self, lifecycle_manager):
+        """Test getting cycle history for a lifecycle."""
+        success, message, lifecycle = await lifecycle_manager.create_lifecycle(
+            project_name="test-project",
+            mode=LifecycleMode.PROJECT_MODE,
+            aspect=ProjectAspect.CORE,
+            created_by="user-1",
+        )
+
+        # Add some cycle history manually
+        lifecycle.cycle_history.append({
+            "cycle_number": 1,
+            "completed_at": datetime.utcnow().isoformat(),
+            "change_summary": "Initial deployment",
+            "deployment_job_id": "job-1",
+        })
+        lifecycle.cycle_number = 2
+        await lifecycle_manager._save_lifecycle(lifecycle)
+
+        success, message, history = await lifecycle_manager.get_cycle_history(lifecycle.lifecycle_id)
+
+        assert success is True
+        assert len(history) == 2  # 1 historical + 1 current
+        assert history[0]["cycle_number"] == 1
+        assert history[1]["is_current"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_change_lineage(self, lifecycle_manager):
+        """Test getting change lineage for a lifecycle."""
+        success, message, lifecycle = await lifecycle_manager.create_lifecycle(
+            project_name="test-project",
+            mode=LifecycleMode.PROJECT_MODE,
+            aspect=ProjectAspect.CORE,
+            created_by="user-1",
+        )
+
+        # Add cycle history with deployment
+        lifecycle.cycle_history.append({
+            "cycle_number": 1,
+            "completed_at": datetime.utcnow().isoformat(),
+            "change_summary": "Initial",
+            "deployment_job_id": "deploy-job-1",
+        })
+        lifecycle.cycle_number = 2
+        lifecycle.state = LifecycleState.DEPLOYED
+        lifecycle.current_claude_job_id = "deploy-job-2"
+        await lifecycle_manager._save_lifecycle(lifecycle)
+
+        success, message, lineage = await lifecycle_manager.get_change_lineage(lifecycle.lifecycle_id)
+
+        assert success is True
+        assert lineage["total_cycles"] == 2
+        assert len(lineage["deployments"]) == 2
+
+
+class TestDeploymentSummary:
+    """Test deployment summary generation (Phase 15.2)."""
+
+    @pytest.mark.asyncio
+    async def test_generate_deployment_summary(self, lifecycle_manager):
+        """Test generating a deployment summary."""
+        success, message, lifecycle = await lifecycle_manager.create_lifecycle(
+            project_name="summary-project",
+            mode=LifecycleMode.PROJECT_MODE,
+            aspect=ProjectAspect.BACKEND,
+            created_by="user-1",
+        )
+
+        # Add some data
+        lifecycle.transition_count = 5
+        lifecycle.claude_job_ids = ["job-1", "job-2"]
+        lifecycle.test_run_ids = ["test-1"]
+        lifecycle.current_change_summary = "Added API endpoints"
+        await lifecycle_manager._save_lifecycle(lifecycle)
+
+        success, message, summary = await lifecycle_manager.generate_deployment_summary(lifecycle.lifecycle_id)
+
+        assert success is True
+        assert summary["project_name"] == "summary-project"
+        assert summary["aspect"] == "backend"
+        assert summary["total_transitions"] == 5
+        assert summary["total_claude_jobs"] == 2
+
+
+class TestContinuousChangeRequest:
+    """Test request_continuous_change method (Phase 15.2)."""
+
+    @pytest.mark.asyncio
+    async def test_request_change_success(self, lifecycle_manager):
+        """Test successful continuous change request."""
+        success, message, lifecycle = await lifecycle_manager.create_lifecycle(
+            project_name="test-project",
+            mode=LifecycleMode.PROJECT_MODE,
+            aspect=ProjectAspect.CORE,
+            created_by="user-1",
+        )
+
+        # Move to DEPLOYED state
+        lifecycle.state = LifecycleState.DEPLOYED
+        lifecycle.cycle_number = 1
+        await lifecycle_manager._save_lifecycle(lifecycle)
+
+        success, message, cycle_number = await lifecycle_manager.request_continuous_change(
+            lifecycle_id=lifecycle.lifecycle_id,
+            change_type=ChangeType.FEATURE,
+            change_summary="Add user dashboard",
+            requested_by="user-1",
+            user_role=UserRole.DEVELOPER,
+        )
+
+        assert success is True
+        assert cycle_number == 2
+
+        # Verify state changed
+        updated = await lifecycle_manager.get_lifecycle(lifecycle.lifecycle_id)
+        assert updated.state == LifecycleState.AWAITING_FEEDBACK
+
+    @pytest.mark.asyncio
+    async def test_request_change_not_deployed_fails(self, lifecycle_manager):
+        """Test that change request fails if not in DEPLOYED state."""
+        success, message, lifecycle = await lifecycle_manager.create_lifecycle(
+            project_name="test-project",
+            mode=LifecycleMode.PROJECT_MODE,
+            aspect=ProjectAspect.CORE,
+            created_by="user-1",
+        )
+
+        # Keep in CREATED state
+        success, message, cycle_number = await lifecycle_manager.request_continuous_change(
+            lifecycle_id=lifecycle.lifecycle_id,
+            change_type=ChangeType.BUG,
+            change_summary="Fix bug",
+            requested_by="user-1",
+            user_role=UserRole.DEVELOPER,
+        )
+
+        assert success is False
+        assert "must be 'deployed'" in message
+
+    @pytest.mark.asyncio
+    async def test_all_change_types_accepted(self, lifecycle_manager):
+        """Test all change types can be requested."""
+        for change_type in [ChangeType.BUG, ChangeType.FEATURE, ChangeType.IMPROVEMENT, ChangeType.REFACTOR, ChangeType.SECURITY]:
+            success, message, lifecycle = await lifecycle_manager.create_lifecycle(
+                project_name=f"test-{change_type.value}",
+                mode=LifecycleMode.PROJECT_MODE,
+                aspect=ProjectAspect.CORE,
+                created_by="user-1",
+            )
+
+            lifecycle.state = LifecycleState.DEPLOYED
+            lifecycle.cycle_number = 1
+            await lifecycle_manager._save_lifecycle(lifecycle)
+
+            success, message, cycle_number = await lifecycle_manager.request_continuous_change(
+                lifecycle_id=lifecycle.lifecycle_id,
+                change_type=change_type,
+                change_summary=f"Test {change_type.value}",
+                requested_by="user-1",
+                user_role=UserRole.DEVELOPER,
+            )
+
+            assert success is True, f"Failed for {change_type.value}: {message}"
+
+
+class TestProjectChanges:
+    """Test get_changes_for_project method (Phase 15.2)."""
+
+    @pytest.mark.asyncio
+    async def test_get_changes_for_project(self, lifecycle_manager):
+        """Test getting all changes for a project."""
+        # Create a project lifecycle
+        await lifecycle_manager.create_lifecycle(
+            project_name="my-project",
+            mode=LifecycleMode.PROJECT_MODE,
+            aspect=ProjectAspect.CORE,
+            created_by="user-1",
+        )
+
+        # Create change lifecycles
+        change_ref = ChangeReference(
+            project_id="my-project-id",
+            aspect=ProjectAspect.CORE,
+            change_type=ChangeType.BUG,
+            description="Bug fix 1",
+        )
+        await lifecycle_manager.create_lifecycle(
+            project_name="my-project",
+            mode=LifecycleMode.CHANGE_MODE,
+            aspect=ProjectAspect.CORE,
+            created_by="user-1",
+            change_reference=change_ref,
+        )
+
+        change_ref2 = ChangeReference(
+            project_id="my-project-id",
+            aspect=ProjectAspect.BACKEND,
+            change_type=ChangeType.FEATURE,
+            description="Feature 1",
+        )
+        await lifecycle_manager.create_lifecycle(
+            project_name="my-project",
+            mode=LifecycleMode.CHANGE_MODE,
+            aspect=ProjectAspect.BACKEND,
+            created_by="user-1",
+            change_reference=change_ref2,
+        )
+
+        # Get all changes
+        changes = await lifecycle_manager.get_changes_for_project("my-project")
+        assert len(changes) == 2
+
+        # Get changes by aspect
+        core_changes = await lifecycle_manager.get_changes_for_project("my-project", ProjectAspect.CORE)
+        assert len(core_changes) == 1
+        assert core_changes[0]["aspect"] == "core"
+
+
+class TestAspectHistory:
+    """Test get_aspect_history method (Phase 15.2)."""
+
+    @pytest.mark.asyncio
+    async def test_get_aspect_history(self, lifecycle_manager):
+        """Test getting complete history for an aspect."""
+        # Create multiple lifecycles for same aspect
+        await lifecycle_manager.create_lifecycle(
+            project_name="history-project",
+            mode=LifecycleMode.PROJECT_MODE,
+            aspect=ProjectAspect.FRONTEND_WEB,
+            created_by="user-1",
+        )
+
+        change_ref = ChangeReference(
+            project_id="history-project-id",
+            aspect=ProjectAspect.FRONTEND_WEB,
+            change_type=ChangeType.IMPROVEMENT,
+            description="UI improvement",
+        )
+        await lifecycle_manager.create_lifecycle(
+            project_name="history-project",
+            mode=LifecycleMode.CHANGE_MODE,
+            aspect=ProjectAspect.FRONTEND_WEB,
+            created_by="user-1",
+            change_reference=change_ref,
+        )
+
+        history = await lifecycle_manager.get_aspect_history("history-project", ProjectAspect.FRONTEND_WEB)
+
+        assert history["project_name"] == "history-project"
+        assert history["aspect"] == "frontend_web"
+        assert history["total_lifecycles"] == 2
+
+
+class TestContinuousChangePermissions:
+    """Test permissions for continuous change requests (Phase 15.2)."""
+
+    @pytest.mark.asyncio
+    async def test_developer_can_request_change(self, state_machine):
+        """Test that developer can request continuous change."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+
+        success, message, new_state = await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by="dev-1",
+            user_role=UserRole.DEVELOPER,
+        )
+
+        assert success is True
+
+    @pytest.mark.asyncio
+    async def test_tester_can_request_change(self, state_machine):
+        """Test that tester can request continuous change."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+
+        success, message, new_state = await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by="tester-1",
+            user_role=UserRole.TESTER,
+        )
+
+        assert success is True
+
+    @pytest.mark.asyncio
+    async def test_viewer_cannot_request_change(self, state_machine):
+        """Test that viewer cannot request continuous change."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+
+        success, message, new_state = await state_machine.transition(
+            lifecycle=lifecycle,
+            trigger=TransitionTrigger.CONTINUOUS_CHANGE_REQUEST,
+            triggered_by="viewer-1",
+            user_role=UserRole.VIEWER,
+        )
+
+        assert success is False
+
+
+class TestCycleDataFields:
+    """Test cycle-related data fields in LifecycleInstance (Phase 15.2)."""
+
+    def test_default_cycle_number(self):
+        """Test that default cycle number is 1."""
+        lifecycle = create_test_lifecycle()
+        assert lifecycle.cycle_number == 1
+
+    def test_default_cycle_history_empty(self):
+        """Test that default cycle history is empty."""
+        lifecycle = create_test_lifecycle()
+        assert lifecycle.cycle_history == []
+
+    def test_default_change_summary_empty(self):
+        """Test that default change summary is empty."""
+        lifecycle = create_test_lifecycle()
+        assert lifecycle.current_change_summary == ""
+
+    def test_default_previous_deployment_none(self):
+        """Test that default previous deployment ID is None."""
+        lifecycle = create_test_lifecycle()
+        assert lifecycle.previous_deployment_id is None
+
+    def test_cycle_fields_serialization(self):
+        """Test that cycle fields serialize correctly."""
+        lifecycle = create_test_lifecycle()
+        lifecycle.cycle_number = 3
+        lifecycle.cycle_history = [{"cycle_number": 1}, {"cycle_number": 2}]
+        lifecycle.current_change_summary = "Test summary"
+        lifecycle.previous_deployment_id = "job-123"
+
+        data = lifecycle.to_dict()
+
+        assert data["cycle_number"] == 3
+        assert len(data["cycle_history"]) == 2
+        assert data["current_change_summary"] == "Test summary"
+        assert data["previous_deployment_id"] == "job-123"
+
+    def test_cycle_fields_deserialization(self):
+        """Test that cycle fields deserialize correctly."""
+        lifecycle = create_test_lifecycle()
+        lifecycle.cycle_number = 5
+        lifecycle.cycle_history = [{"cycle_number": 1}]
+        lifecycle.current_change_summary = "Deserialization test"
+        lifecycle.previous_deployment_id = "prev-job"
+
+        data = lifecycle.to_dict()
+        restored = LifecycleInstance.from_dict(data)
+
+        assert restored.cycle_number == 5
+        assert len(restored.cycle_history) == 1
+        assert restored.current_change_summary == "Deserialization test"
+        assert restored.previous_deployment_id == "prev-job"
+
+
+class TestGuidanceForDeployed:
+    """Test guidance updates for DEPLOYED state (Phase 15.2)."""
+
+    def test_deployed_guidance_includes_change_actions(self, state_machine):
+        """Test that DEPLOYED state guidance includes change actions."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+        guidance = state_machine.get_next_guidance(lifecycle)
+
+        assert "new_feature" in guidance["available_actions"]
+        assert "report_bug" in guidance["available_actions"]
+        assert "improve" in guidance["available_actions"]
+        assert "refactor" in guidance["available_actions"]
+        assert "security_fix" in guidance["available_actions"]
+        assert "archive" in guidance["available_actions"]
+
+    def test_deployed_guidance_includes_cycle_number(self, state_machine):
+        """Test that DEPLOYED guidance includes cycle number."""
+        lifecycle = create_test_lifecycle(state=LifecycleState.DEPLOYED)
+        lifecycle.cycle_number = 5
+        guidance = state_machine.get_next_guidance(lifecycle)
+
+        assert guidance.get("cycle_number") == 5
+
+
+class TestTransitionTriggers:
+    """Test Phase 15.2 transition triggers."""
+
+    def test_continuous_change_request_trigger_exists(self):
+        """Test that CONTINUOUS_CHANGE_REQUEST trigger exists."""
+        assert TransitionTrigger.CONTINUOUS_CHANGE_REQUEST.value == "continuous_change_request"
+
+    def test_continuous_change_request_permission(self):
+        """Test permissions for CONTINUOUS_CHANGE_REQUEST trigger."""
+        perms = TRANSITION_PERMISSIONS[TransitionTrigger.CONTINUOUS_CHANGE_REQUEST]
+        assert UserRole.OWNER in perms
+        assert UserRole.ADMIN in perms
+        assert UserRole.DEVELOPER in perms
+        assert UserRole.TESTER in perms
+        assert UserRole.VIEWER not in perms
+
+    def test_deployed_has_continuous_change_transition(self):
+        """Test that DEPLOYED state can transition to AWAITING_FEEDBACK."""
+        transitions = VALID_TRANSITIONS[LifecycleState.DEPLOYED]
+        assert TransitionTrigger.CONTINUOUS_CHANGE_REQUEST in transitions
+        assert transitions[TransitionTrigger.CONTINUOUS_CHANGE_REQUEST] == LifecycleState.AWAITING_FEEDBACK
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

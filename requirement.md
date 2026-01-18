@@ -466,4 +466,3 @@ Claude works without repeated instructions
 Features move from idea → prod with minimal friction
 
 Human effort is reduced to validation only
-
