@@ -3477,8 +3477,12 @@ try:
         get_queue_status,
         cancel_job,
         check_claude_availability,
-        scheduler,
+        get_scheduler_status,
+        start_scheduler,
+        stop_scheduler,
+        multi_scheduler,  # Phase 14.10: Multi-worker scheduler
         JobState,
+        MAX_CONCURRENT_JOBS,  # Phase 14.10: Concurrency limit
     )
     CLAUDE_BACKEND_AVAILABLE = True
 except ImportError as e:
@@ -3594,22 +3598,46 @@ async def get_claude_status():
     Returns information about:
     - Claude CLI installation
     - API key configuration
-    - Job scheduler status
+    - Job scheduler status (Phase 14.10: multi-worker)
     """
     if not CLAUDE_BACKEND_AVAILABLE:
         return {
             "available": False,
             "error": "Claude backend module not loaded",
-            "queue": None
+            "scheduler": None
         }
 
     cli_status = await check_claude_availability()
-    queue_status = await get_queue_status()
+    scheduler_status = await get_scheduler_status()
 
     return {
         "available": cli_status["available"] and cli_status["api_key_configured"],
         "cli": cli_status,
-        "queue": queue_status
+        "scheduler": scheduler_status  # Phase 14.10: Enhanced multi-worker status
+    }
+
+
+@app.get("/claude/scheduler")
+async def get_claude_scheduler_status():
+    """
+    Get detailed multi-worker scheduler status (Phase 14.10).
+
+    Returns comprehensive information about:
+    - Running state
+    - Worker count and availability
+    - Active jobs per worker
+    - Queue depth
+    - Job statistics
+    """
+    if not CLAUDE_BACKEND_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Claude backend not available")
+
+    status = await get_scheduler_status()
+    return {
+        "phase": "14.10",
+        "scheduler": status,
+        "concurrency_limit": MAX_CONCURRENT_JOBS,
+        "message": f"Multi-worker scheduler with {status['active_workers']}/{status['max_workers']} active workers"
     }
 
 
@@ -3645,20 +3673,20 @@ async def startup_event():
     # Ensure directories exist
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Phase 14: Start Claude job scheduler if available
+    # Phase 14.10: Start Claude multi-worker scheduler if available
     if CLAUDE_BACKEND_AVAILABLE:
         try:
-            await scheduler.start()
-            logger.info("Claude job scheduler started")
+            await start_scheduler()
+            logger.info(f"Claude multi-worker scheduler started (max {MAX_CONCURRENT_JOBS} concurrent jobs)")
         except Exception as e:
-            logger.error(f"Failed to start Claude job scheduler: {e}")
+            logger.error(f"Failed to start Claude scheduler: {e}")
 
-    logger.info("Task Controller ready (Phase 14: Claude CLI Integration)")
+    logger.info("Task Controller ready (Phase 14.10: Multi-Worker Scheduler)")
     logger.info("SAFETY: Production deployment requires DUAL APPROVAL (different users).")
     logger.info("SAFETY: All production actions logged to immutable audit trail.")
     logger.info("SAFETY: Production rollback always available (break-glass).")
     logger.info("SAFETY: Testing environment MUST be used before production.")
-    logger.info("PHASE 14: Claude CLI execution backend available (if API key configured).")
+    logger.info(f"PHASE 14.10: Multi-worker Claude execution (max {MAX_CONCURRENT_JOBS if CLAUDE_BACKEND_AVAILABLE else 'N/A'} concurrent jobs).")
 
 
 @app.on_event("shutdown")
@@ -3666,13 +3694,13 @@ async def shutdown_event():
     """Cleanup on shutdown."""
     logger.info("Task Controller shutting down...")
 
-    # Phase 14: Stop Claude job scheduler if running
+    # Phase 14.10: Stop Claude multi-worker scheduler if running
     if CLAUDE_BACKEND_AVAILABLE:
         try:
-            await scheduler.stop()
-            logger.info("Claude job scheduler stopped")
+            await stop_scheduler()
+            logger.info("Claude multi-worker scheduler stopped")
         except Exception as e:
-            logger.error(f"Error stopping Claude job scheduler: {e}")
+            logger.error(f"Error stopping Claude scheduler: {e}")
 
 
 # -----------------------------------------------------------------------------

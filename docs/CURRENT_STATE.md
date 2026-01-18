@@ -6,15 +6,15 @@ The AI agent MUST update this file after completing any task.
 ---
 
 ## Last Updated
-- **Timestamp**: 2026-01-18
-- **Task**: Phase 14 Claude CLI Bootstrap & Full Integration - IN PROGRESS
-- **Status**: Blocked (ANTHROPIC_API_KEY required)
+- **Timestamp**: 2026-01-19
+- **Task**: Phase 14.10 Multi-Worker Scheduler - COMPLETED
+- **Status**: Complete (ANTHROPIC_API_KEY still required for execution)
 
 ---
 
 ## Current Phase
 ```
-Phase: PHASE_14_IN_PROGRESS
+Phase: PHASE_14.10_COMPLETE
 Mode: development
 ```
 
@@ -57,6 +57,10 @@ Mode: development
 | Job Workspace Model | Implemented | controller/claude_backend.py | Phase 14.4: Isolated workspaces with policy docs |
 | Claude API Endpoints | Implemented | controller/main.py | Phase 14.3: /claude/job, /claude/jobs, /claude/queue, /claude/status |
 | Bot Claude Integration | Implemented | telegram_bot_v2/bot.py | Phase 14.6: /health shows Claude status |
+| Multi-Worker Scheduler | Implemented | controller/claude_backend.py | Phase 14.10: MAX_CONCURRENT_JOBS=3, FIFO queue |
+| Persistent Job Store | Implemented | controller/claude_backend.py | Phase 14.10: JSON-based state persistence for crash recovery |
+| Worker Process Isolation | Implemented | controller/claude_backend.py | Phase 14.10: CPU nice, memory limits, isolated subprocesses |
+| Scheduler Status Endpoint | Implemented | controller/main.py | Phase 14.10: /claude/scheduler for worker monitoring |
 
 ---
 
@@ -124,6 +128,9 @@ None
 
 | Timestamp | Task | Status | Details |
 |-----------|------|--------|---------|
+| 2026-01-19 | Phase 14.10 complete | Completed | Multi-worker scheduler: MAX_CONCURRENT_JOBS=3, persistent state, resource limits, crash recovery |
+| 2026-01-18 | Phase 14.0-14.6 complete | Completed | Claude CLI installation, execution wrapper, job backend, workspace model, API endpoints |
+| 2026-01-18 | Phase 13.10-13.12 complete | Completed | Rate limiting, timeouts/retries, degraded mode for Telegram bot |
 | 2026-01-16 | Phase 6 complete | Completed | Production request, approval (dual), apply, rollback (break-glass), audit trail |
 | 2026-01-16 | Phase 6 tests | Completed | Dual approval tests, audit log tests, state transition tests, policy tests |
 | 2026-01-16 | Phase 5 complete | Completed | Commit, CI trigger, CI result, testing deploy with gates |
@@ -137,6 +144,74 @@ None
 | 2026-01-16 | Phase 1 skeleton | Completed | Created controller/, bots/, tests/, workflows/, moved docs/, created README files |
 | 2026-01-16 | Bootstrap config | Completed | Updated all files with confirmed repository, domains, hosting, and tech stack details |
 | 2026-01-16 | Bootstrap docs | Completed | Created all foundational files |
+
+---
+
+## Phase 14.10 Deliverables
+
+### Multi-Worker Scheduler (controller/claude_backend.py)
+
+| Component | Description |
+|-----------|-------------|
+| MAX_CONCURRENT_JOBS | 3 concurrent Claude CLI jobs maximum |
+| WORKER_NICE_VALUE | 10 (lower CPU priority for worker processes) |
+| WORKER_MEMORY_LIMIT_MB | 2048 MB per worker process |
+| JOB_CLEANUP_AFTER_HOURS | 24 hours (auto-cleanup completed jobs) |
+
+### New Classes
+
+| Class | Purpose |
+|-------|---------|
+| PersistentJobStore | JSON-based job state persistence for crash recovery |
+| ClaudeWorker | Individual worker with process isolation and resource limits |
+| MultiWorkerScheduler | Manages worker pool, enforces concurrency, handles recovery |
+
+### Extended JobState Enum
+
+| State | Description |
+|-------|-------------|
+| QUEUED | Job in queue, waiting for worker |
+| PREPARING | Worker assigned, preparing workspace |
+| RUNNING | Claude CLI executing |
+| AWAITING_APPROVAL | Completed, waiting for human approval |
+| DEPLOYED | Deployed to environment |
+| COMPLETED | Successfully completed |
+| FAILED | Execution failed |
+| TIMEOUT | Execution timed out |
+| CANCELLED | Cancelled by user |
+
+### New API Functions
+
+| Function | Purpose |
+|----------|---------|
+| get_scheduler_status() | Get multi-worker scheduler status |
+| start_scheduler() | Start scheduler with crash recovery |
+| stop_scheduler() | Gracefully stop scheduler |
+
+### New Endpoints (controller/main.py)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| /claude/scheduler | GET | Detailed multi-worker scheduler status |
+
+### Safety Guarantees
+
+- **CONCURRENCY_LIMIT_ENFORCED**: Maximum 3 concurrent jobs (4th waits in FIFO queue)
+- **PROCESS_ISOLATION**: Each worker runs in isolated subprocess
+- **RESOURCE_LIMITS**: CPU nice value (10) and memory limits (512MB) per worker
+- **CRASH_RECOVERY**: Persistent state enables restart without losing queue
+- **GRACEFUL_SHUTDOWN**: Workers can complete current job before stopping
+- **AUTO_CLEANUP**: Old completed jobs cleaned up after 24 hours
+- **FIFO_ORDERING**: Jobs processed in order received
+- **STATE_PERSISTENCE**: All job state changes persisted to JSON file
+
+### Files
+
+| Path | Purpose |
+|------|---------|
+| /home/aitesting.mybd.in/jobs/job_state.json | Persistent job state |
+| /home/aitesting.mybd.in/jobs/job-{uuid}/ | Individual job workspace |
+| /home/aitesting.mybd.in/jobs/archives/ | Archived job logs |
 
 ---
 

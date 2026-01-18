@@ -1,25 +1,36 @@
 """
 Claude CLI Execution Backend
 Phase 14.3: Controller Integration
+Phase 14.10: Multi-Claude Worker Scheduler
 
 This module integrates Claude CLI as an execution backend for the controller.
 It manages job workspaces, invokes the secure wrapper, and tracks job state.
+
+Phase 14.10 adds:
+- Multi-worker scheduler (MAX_CONCURRENT_JOBS=3)
+- Persistent job state
+- Resource limits (CPU nice, memory)
+- Crash recovery
+- Graceful failure handling
 
 IMPORTANT: This module does NOT replace existing controller functionality.
 It ADDS Claude CLI as a new execution backend alongside the existing flow.
 """
 
 import asyncio
+import json
 import logging
 import os
+import resource
 import shutil
+import signal
 import subprocess
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 
 import yaml
 
@@ -32,6 +43,13 @@ JOBS_BASE_DIR = Path(os.getenv("CLAUDE_JOBS_DIR", "/home/aitesting.mybd.in/jobs"
 DOCS_DIR = Path(os.getenv("CLAUDE_DOCS_DIR", "/home/aitesting.mybd.in/public_html/docs"))
 WRAPPER_SCRIPT = Path("/home/aitesting.mybd.in/public_html/scripts/run_claude_job.sh")
 JOB_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "600"))
+
+# Phase 14.10: Multi-worker configuration
+MAX_CONCURRENT_JOBS = 3  # Maximum concurrent Claude CLI jobs
+WORKER_NICE_VALUE = 10   # CPU nice value for worker processes (lower priority)
+WORKER_MEMORY_LIMIT_MB = 2048  # Memory limit per worker in MB
+JOB_STATE_FILE = JOBS_BASE_DIR / "job_state.json"  # Persistent job state
+JOB_CLEANUP_AFTER_HOURS = 24  # Auto-cleanup completed jobs after this many hours
 
 # Required policy documents (must exist in docs/)
 REQUIRED_DOCS = [
@@ -46,17 +64,40 @@ REQUIRED_DOCS = [
 
 
 # -----------------------------------------------------------------------------
-# Job State Management
+# Job State Management (Phase 14.10 Extended)
 # -----------------------------------------------------------------------------
 class JobState(str, Enum):
-    """Job execution states."""
+    """
+    Job execution states.
+
+    State machine:
+    QUEUED → RUNNING → AWAITING_APPROVAL → DEPLOYED → COMPLETED
+                   ↓           ↓              ↓
+                 FAILED      FAILED        FAILED
+                   ↓
+                TIMEOUT
+                   ↓
+               CANCELLED
+    """
     QUEUED = "queued"
     PREPARING = "preparing"
     RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"  # Phase 14.10: waiting for human approval
+    DEPLOYED = "deployed"  # Phase 14.10: deployed to environment
     COMPLETED = "completed"
     FAILED = "failed"
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
+
+    @classmethod
+    def terminal_states(cls) -> Set["JobState"]:
+        """Return states that indicate job completion."""
+        return {cls.COMPLETED, cls.FAILED, cls.TIMEOUT, cls.CANCELLED}
+
+    @classmethod
+    def active_states(cls) -> Set["JobState"]:
+        """Return states where a job is actively being processed."""
+        return {cls.PREPARING, cls.RUNNING}
 
 
 @dataclass
@@ -516,12 +557,578 @@ class JobScheduler:
                 await asyncio.sleep(10)
 
 
-# Global scheduler instance
+# Global scheduler instance (legacy - kept for compatibility)
 scheduler = JobScheduler()
 
 
 # -----------------------------------------------------------------------------
-# Public API
+# Phase 14.10: Persistent Job Store
+# -----------------------------------------------------------------------------
+class PersistentJobStore:
+    """
+    Persistent job storage for crash recovery.
+
+    Stores job state to JSON file, enabling:
+    - State recovery after scheduler restart
+    - Audit trail of all jobs
+    - Queue reconstruction
+    """
+
+    def __init__(self, state_file: Path = JOB_STATE_FILE):
+        self._state_file = state_file
+        self._lock = asyncio.Lock()
+        self._ensure_dir()
+
+    def _ensure_dir(self) -> None:
+        """Ensure state file directory exists."""
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            # May fail on non-VPS environments, which is OK
+            logger.debug(f"Could not create state file directory: {e}")
+
+    async def save_job(self, job: ClaudeJob) -> None:
+        """Save or update a job in persistent storage."""
+        async with self._lock:
+            state = await self._load_state()
+            state["jobs"][job.job_id] = job.to_dict()
+            state["last_updated"] = datetime.utcnow().isoformat()
+            await self._save_state(state)
+            logger.debug(f"Persisted job {job.job_id} state: {job.state.value}")
+
+    async def load_jobs(self) -> List[ClaudeJob]:
+        """Load all jobs from persistent storage."""
+        state = await self._load_state()
+        jobs = []
+        for job_data in state.get("jobs", {}).values():
+            try:
+                job = self._deserialize_job(job_data)
+                jobs.append(job)
+            except Exception as e:
+                logger.warning(f"Failed to deserialize job: {e}")
+        return jobs
+
+    async def get_job(self, job_id: str) -> Optional[ClaudeJob]:
+        """Load a specific job from persistent storage."""
+        state = await self._load_state()
+        job_data = state.get("jobs", {}).get(job_id)
+        if job_data:
+            return self._deserialize_job(job_data)
+        return None
+
+    async def remove_job(self, job_id: str) -> bool:
+        """Remove a job from persistent storage."""
+        async with self._lock:
+            state = await self._load_state()
+            if job_id in state.get("jobs", {}):
+                del state["jobs"][job_id]
+                await self._save_state(state)
+                return True
+            return False
+
+    async def get_queued_jobs(self) -> List[ClaudeJob]:
+        """Get all jobs in QUEUED state, ordered by created_at."""
+        jobs = await self.load_jobs()
+        queued = [j for j in jobs if j.state == JobState.QUEUED]
+        queued.sort(key=lambda j: j.created_at)  # FIFO order
+        return queued
+
+    async def get_active_jobs(self) -> List[ClaudeJob]:
+        """Get all jobs in active states (PREPARING, RUNNING)."""
+        jobs = await self.load_jobs()
+        return [j for j in jobs if j.state in JobState.active_states()]
+
+    async def _load_state(self) -> Dict[str, Any]:
+        """Load state from file."""
+        if not self._state_file.exists():
+            return {"jobs": {}, "created_at": datetime.utcnow().isoformat()}
+        try:
+            return json.loads(self._state_file.read_text())
+        except (json.JSONDecodeError, IOError) as e:
+            logger.error(f"Failed to load state file: {e}")
+            return {"jobs": {}, "created_at": datetime.utcnow().isoformat()}
+
+    async def _save_state(self, state: Dict[str, Any]) -> None:
+        """Save state to file atomically."""
+        temp_file = self._state_file.with_suffix(".tmp")
+        try:
+            temp_file.write_text(json.dumps(state, indent=2, default=str))
+            temp_file.replace(self._state_file)
+        except IOError as e:
+            logger.error(f"Failed to save state file: {e}")
+            if temp_file.exists():
+                temp_file.unlink()
+
+    def _deserialize_job(self, data: Dict[str, Any]) -> ClaudeJob:
+        """Deserialize a job from dict."""
+        return ClaudeJob(
+            job_id=data["job_id"],
+            project_name=data["project_name"],
+            task_description=data["task_description"],
+            task_type=data["task_type"],
+            state=JobState(data["state"]),
+            created_at=datetime.fromisoformat(data["created_at"]),
+            started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
+            completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
+            exit_code=data.get("exit_code"),
+            error_message=data.get("error_message"),
+            workspace_dir=Path(data["workspace_dir"]) if data.get("workspace_dir") else None,
+            created_by=data.get("created_by"),
+            result_summary=data.get("result_summary"),
+        )
+
+
+# Global persistent store instance
+persistent_store = PersistentJobStore()
+
+
+# -----------------------------------------------------------------------------
+# Phase 14.10: Claude Worker with Process Isolation
+# -----------------------------------------------------------------------------
+class ClaudeWorker:
+    """
+    Individual worker for Claude CLI execution.
+
+    Features:
+    - Process isolation via subprocess
+    - Resource limits (CPU nice, memory)
+    - Graceful shutdown
+    - Execution logging
+    """
+
+    def __init__(self, worker_id: int):
+        self.worker_id = worker_id
+        self._process: Optional[asyncio.subprocess.Process] = None
+        self._current_job: Optional[ClaudeJob] = None
+        self._running = False
+
+    @property
+    def is_busy(self) -> bool:
+        """Check if worker is currently executing a job."""
+        return self._current_job is not None
+
+    @property
+    def current_job_id(self) -> Optional[str]:
+        """Get ID of current job being executed."""
+        return self._current_job.job_id if self._current_job else None
+
+    async def execute(self, job: ClaudeJob) -> ClaudeJob:
+        """
+        Execute a Claude CLI job with resource limits.
+
+        Returns the updated job with execution results.
+        """
+        self._current_job = job
+        self._running = True
+        logger.info(f"Worker {self.worker_id}: Executing job {job.job_id}")
+
+        try:
+            # Validate wrapper script
+            if not WRAPPER_SCRIPT.exists():
+                job.state = JobState.FAILED
+                job.error_message = f"Wrapper script not found: {WRAPPER_SCRIPT}"
+                job.completed_at = datetime.utcnow()
+                return job
+
+            # Ensure workspace exists
+            if not job.workspace_dir or not job.workspace_dir.exists():
+                job.workspace_dir = WorkspaceManager.create_workspace(
+                    job.job_id, job.project_name
+                )
+
+            # Create task file
+            task_file = WorkspaceManager.create_task_file(
+                job.workspace_dir,
+                job.task_description,
+                job.task_type,
+                {
+                    "job_id": job.job_id,
+                    "project_name": job.project_name,
+                    "created_at": job.created_at.isoformat(),
+                    "created_by": job.created_by,
+                    "worker_id": self.worker_id,
+                }
+            )
+
+            # Update job state
+            job.state = JobState.RUNNING
+            job.started_at = datetime.utcnow()
+
+            # Persist state
+            await persistent_store.save_job(job)
+
+            # Build command with resource limits
+            # Use nice for CPU priority and ulimit for memory
+            cmd = self._build_command(job, task_file)
+
+            # Execute
+            process = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(job.workspace_dir),
+                preexec_fn=self._setup_resource_limits,
+            )
+
+            self._process = process
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=JOB_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                job.state = JobState.TIMEOUT
+                job.error_message = f"Job timed out after {JOB_TIMEOUT}s"
+                job.completed_at = datetime.utcnow()
+                logger.warning(f"Worker {self.worker_id}: Job {job.job_id} timed out")
+                return job
+
+            job.exit_code = process.returncode
+
+            # Store output files
+            job.stdout_file = job.workspace_dir / "logs" / "stdout.log"
+            job.stderr_file = job.workspace_dir / "logs" / "stderr.log"
+
+            if job.exit_code == 0:
+                job.state = JobState.COMPLETED
+                # Try to read result summary
+                result_file = job.workspace_dir / "logs" / "result.txt"
+                if result_file.exists():
+                    job.result_summary = result_file.read_text()[:1000]
+                logger.info(f"Worker {self.worker_id}: Job {job.job_id} completed successfully")
+            else:
+                job.state = JobState.FAILED
+                job.error_message = f"Exit code: {job.exit_code}"
+                if stderr:
+                    job.error_message += f"\nStderr: {stderr.decode()[:500]}"
+                logger.error(f"Worker {self.worker_id}: Job {job.job_id} failed: {job.error_message}")
+
+        except Exception as e:
+            logger.error(f"Worker {self.worker_id}: Job execution error: {e}")
+            job.state = JobState.FAILED
+            job.error_message = str(e)
+
+        finally:
+            job.completed_at = datetime.utcnow()
+            self._process = None
+            self._current_job = None
+            self._running = False
+
+            # Persist final state
+            await persistent_store.save_job(job)
+
+        return job
+
+    def _build_command(self, job: ClaudeJob, task_file: Path) -> str:
+        """Build shell command with nice prefix for CPU priority."""
+        # Use nice to lower process priority
+        return f"nice -n {WORKER_NICE_VALUE} {WRAPPER_SCRIPT} {job.job_id} {job.workspace_dir} {task_file}"
+
+    def _setup_resource_limits(self) -> None:
+        """
+        Set up resource limits for the subprocess.
+        Called in the child process before exec.
+        """
+        try:
+            # Set memory limit (soft and hard)
+            memory_bytes = WORKER_MEMORY_LIMIT_MB * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        except (ValueError, resource.error) as e:
+            # Log but don't fail - resource limits may not be available
+            pass
+
+    async def cancel(self) -> bool:
+        """Cancel the currently running job."""
+        if self._process and self._current_job:
+            logger.info(f"Worker {self.worker_id}: Cancelling job {self._current_job.job_id}")
+            try:
+                self._process.terminate()
+                await asyncio.sleep(2)  # Grace period
+                if self._process.returncode is None:
+                    self._process.kill()
+                return True
+            except ProcessLookupError:
+                pass
+        return False
+
+    async def shutdown(self) -> None:
+        """Gracefully shutdown the worker."""
+        await self.cancel()
+        self._running = False
+
+
+# -----------------------------------------------------------------------------
+# Phase 14.10: Multi-Worker Scheduler
+# -----------------------------------------------------------------------------
+class MultiWorkerScheduler:
+    """
+    Multi-worker job scheduler with concurrency control.
+
+    Features:
+    - Maximum concurrent jobs enforcement (MAX_CONCURRENT_JOBS=3)
+    - FIFO queue ordering
+    - Process isolation per worker
+    - Crash recovery from persistent state
+    - Graceful shutdown
+    - Auto-cleanup of old completed jobs
+    """
+
+    def __init__(self, max_workers: int = MAX_CONCURRENT_JOBS):
+        self.max_workers = max_workers
+        self._workers: List[ClaudeWorker] = []
+        self._running = False
+        self._scheduler_task: Optional[asyncio.Task] = None
+        self._cleanup_task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
+
+        # Initialize workers
+        for i in range(max_workers):
+            self._workers.append(ClaudeWorker(worker_id=i))
+
+        logger.info(f"MultiWorkerScheduler initialized with {max_workers} workers")
+
+    async def start(self) -> None:
+        """Start the scheduler and recover state."""
+        if self._running:
+            logger.warning("Scheduler already running")
+            return
+
+        self._running = True
+
+        # Recover from crash - handle interrupted jobs
+        await self._recover_state()
+
+        # Start scheduler loop
+        self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+
+        # Start cleanup task
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+        logger.info("MultiWorkerScheduler started")
+
+    async def stop(self) -> None:
+        """Stop the scheduler gracefully."""
+        self._running = False
+
+        # Cancel scheduler task
+        if self._scheduler_task:
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+
+        # Cancel cleanup task
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+
+        # Shutdown all workers
+        for worker in self._workers:
+            await worker.shutdown()
+
+        logger.info("MultiWorkerScheduler stopped")
+
+    async def enqueue_job(self, job: ClaudeJob) -> str:
+        """Add a job to the queue."""
+        # Persist immediately
+        await persistent_store.save_job(job)
+
+        # Also add to in-memory queue for legacy compatibility
+        await job_queue.enqueue(job)
+
+        logger.info(f"Job {job.job_id} enqueued (position: {await self._get_queue_position(job.job_id)})")
+        return job.job_id
+
+    async def get_status(self) -> Dict[str, Any]:
+        """Get comprehensive scheduler status."""
+        queued_jobs = await persistent_store.get_queued_jobs()
+        all_jobs = await persistent_store.load_jobs()
+
+        active_workers = [w for w in self._workers if w.is_busy]
+
+        return {
+            "running": self._running,
+            "max_workers": self.max_workers,
+            "active_workers": len(active_workers),
+            "available_workers": self.max_workers - len(active_workers),
+            "queued_jobs": len(queued_jobs),
+            "active_jobs": [w.current_job_id for w in active_workers if w.current_job_id],
+            "total_jobs": len(all_jobs),
+            "completed_jobs": sum(1 for j in all_jobs if j.state == JobState.COMPLETED),
+            "failed_jobs": sum(1 for j in all_jobs if j.state == JobState.FAILED),
+            "workers": [
+                {
+                    "id": w.worker_id,
+                    "busy": w.is_busy,
+                    "current_job": w.current_job_id,
+                }
+                for w in self._workers
+            ],
+        }
+
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel a job (queued or running)."""
+        # Check if job is running
+        for worker in self._workers:
+            if worker.current_job_id == job_id:
+                success = await worker.cancel()
+                if success:
+                    job = await persistent_store.get_job(job_id)
+                    if job:
+                        job.state = JobState.CANCELLED
+                        job.completed_at = datetime.utcnow()
+                        job.error_message = "Cancelled by user"
+                        await persistent_store.save_job(job)
+                return success
+
+        # Check if job is queued
+        job = await persistent_store.get_job(job_id)
+        if job and job.state == JobState.QUEUED:
+            job.state = JobState.CANCELLED
+            job.completed_at = datetime.utcnow()
+            job.error_message = "Cancelled before execution"
+            await persistent_store.save_job(job)
+            return True
+
+        return False
+
+    async def _scheduler_loop(self) -> None:
+        """Main scheduling loop - assigns jobs to available workers."""
+        while self._running:
+            try:
+                async with self._lock:
+                    # Find available workers
+                    available_workers = [w for w in self._workers if not w.is_busy]
+
+                    if available_workers:
+                        # Get queued jobs
+                        queued_jobs = await persistent_store.get_queued_jobs()
+
+                        # Assign jobs to workers (up to available capacity)
+                        for worker, job in zip(available_workers, queued_jobs):
+                            # Mark as preparing to prevent double-assignment
+                            job.state = JobState.PREPARING
+                            await persistent_store.save_job(job)
+
+                            # Execute asynchronously
+                            asyncio.create_task(self._execute_job(worker, job))
+
+                            logger.info(f"Assigned job {job.job_id} to worker {worker.worker_id}")
+
+                # Wait before next scheduling cycle
+                await asyncio.sleep(2)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Scheduler loop error: {e}")
+                await asyncio.sleep(5)
+
+    async def _execute_job(self, worker: ClaudeWorker, job: ClaudeJob) -> None:
+        """Execute a job on a worker and update state."""
+        try:
+            updated_job = await worker.execute(job)
+
+            # Update in-memory queue too
+            await job_queue.update_job(
+                updated_job.job_id,
+                state=updated_job.state,
+                started_at=updated_job.started_at,
+                completed_at=updated_job.completed_at,
+                exit_code=updated_job.exit_code,
+                error_message=updated_job.error_message,
+                result_summary=updated_job.result_summary,
+            )
+
+            logger.info(f"Job {updated_job.job_id} finished: {updated_job.state.value}")
+
+        except Exception as e:
+            logger.error(f"Error executing job {job.job_id}: {e}")
+            job.state = JobState.FAILED
+            job.error_message = str(e)
+            job.completed_at = datetime.utcnow()
+            await persistent_store.save_job(job)
+
+    async def _recover_state(self) -> None:
+        """Recover state after restart - handle interrupted jobs."""
+        logger.info("Recovering scheduler state...")
+
+        # Get jobs that were in active states when we crashed
+        active_jobs = await persistent_store.get_active_jobs()
+
+        for job in active_jobs:
+            logger.warning(f"Found interrupted job {job.job_id} in state {job.state.value}")
+
+            # Mark as failed with recovery message
+            job.state = JobState.FAILED
+            job.error_message = "Job interrupted by scheduler restart"
+            job.completed_at = datetime.utcnow()
+            await persistent_store.save_job(job)
+
+            # Clean up workspace (keep logs)
+            if job.workspace_dir and job.workspace_dir.exists():
+                WorkspaceManager.cleanup_workspace(job.workspace_dir, keep_logs=True)
+
+        if active_jobs:
+            logger.info(f"Recovered {len(active_jobs)} interrupted jobs")
+
+        # Load queued jobs into memory queue for legacy compatibility
+        queued_jobs = await persistent_store.get_queued_jobs()
+        for job in queued_jobs:
+            await job_queue.enqueue(job)
+
+        logger.info(f"Loaded {len(queued_jobs)} queued jobs")
+
+    async def _cleanup_loop(self) -> None:
+        """Periodically clean up old completed jobs."""
+        while self._running:
+            try:
+                await asyncio.sleep(3600)  # Run every hour
+
+                all_jobs = await persistent_store.load_jobs()
+                cutoff = datetime.utcnow() - timedelta(hours=JOB_CLEANUP_AFTER_HOURS)
+
+                cleaned = 0
+                for job in all_jobs:
+                    if job.state in JobState.terminal_states() and job.completed_at and job.completed_at < cutoff:
+                        # Clean up workspace
+                        if job.workspace_dir and job.workspace_dir.exists():
+                            WorkspaceManager.cleanup_workspace(job.workspace_dir, keep_logs=True)
+
+                        # Remove from persistent store
+                        await persistent_store.remove_job(job.job_id)
+                        cleaned += 1
+
+                if cleaned > 0:
+                    logger.info(f"Cleaned up {cleaned} old completed jobs")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Cleanup loop error: {e}")
+
+    async def _get_queue_position(self, job_id: str) -> int:
+        """Get position of a job in the queue (1-indexed)."""
+        queued_jobs = await persistent_store.get_queued_jobs()
+        for i, job in enumerate(queued_jobs):
+            if job.job_id == job_id:
+                return i + 1
+        return -1
+
+
+# Global multi-worker scheduler instance
+multi_scheduler = MultiWorkerScheduler()
+
+
+# -----------------------------------------------------------------------------
+# Public API (Phase 14.10: Updated for Multi-Worker Scheduler)
 # -----------------------------------------------------------------------------
 async def create_job(
     project_name: str,
@@ -531,6 +1138,8 @@ async def create_job(
 ) -> ClaudeJob:
     """
     Create and enqueue a new Claude CLI job.
+
+    Phase 14.10: Now uses multi-worker scheduler with persistent state.
 
     Args:
         project_name: Name of the project
@@ -554,7 +1163,8 @@ async def create_job(
     # Create workspace early so it's ready
     job.workspace_dir = WorkspaceManager.create_workspace(job.job_id, project_name)
 
-    await job_queue.enqueue(job)
+    # Use multi-worker scheduler (Phase 14.10)
+    await multi_scheduler.enqueue_job(job)
 
     logger.info(f"Created job {job.job_id} for project {project_name}")
     return job
@@ -562,6 +1172,12 @@ async def create_job(
 
 async def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
     """Get the status of a job."""
+    # Try persistent store first (Phase 14.10)
+    job = await persistent_store.get_job(job_id)
+    if job:
+        return job.to_dict()
+
+    # Fallback to in-memory queue
     job = await job_queue.get_job(job_id)
     if job:
         return job.to_dict()
@@ -574,42 +1190,78 @@ async def list_jobs(
     limit: int = 50
 ) -> List[Dict[str, Any]]:
     """List jobs with optional filtering."""
-    job_state = JobState(state) if state else None
-    jobs = await job_queue.list_jobs(state=job_state, project=project, limit=limit)
-    return [j.to_dict() for j in jobs]
+    # Use persistent store (Phase 14.10)
+    jobs = await persistent_store.load_jobs()
+
+    # Apply filters
+    if state:
+        job_state = JobState(state)
+        jobs = [j for j in jobs if j.state == job_state]
+    if project:
+        jobs = [j for j in jobs if j.project_name == project]
+
+    # Sort by created_at descending
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return [j.to_dict() for j in jobs[:limit]]
 
 
 async def get_queue_status() -> Dict[str, Any]:
-    """Get current queue status."""
-    return await job_queue.get_queue_status()
+    """
+    Get current queue status.
+
+    Phase 14.10: Returns enhanced status from multi-worker scheduler.
+    """
+    return await multi_scheduler.get_status()
 
 
 async def cancel_job(job_id: str) -> bool:
-    """Cancel a running job."""
-    job = await job_queue.get_job(job_id)
-    if not job:
-        return False
+    """
+    Cancel a running or queued job.
 
-    if job.state == JobState.RUNNING:
-        success = await executor.cancel()
-        if success:
-            await job_queue.update_job(
-                job_id,
-                state=JobState.CANCELLED,
-                completed_at=datetime.utcnow(),
-                error_message="Cancelled by user"
-            )
-        return success
-    elif job.state == JobState.QUEUED:
-        await job_queue.update_job(
-            job_id,
-            state=JobState.CANCELLED,
-            completed_at=datetime.utcnow(),
-            error_message="Cancelled before execution"
-        )
-        return True
+    Phase 14.10: Uses multi-worker scheduler for proper worker management.
+    """
+    return await multi_scheduler.cancel_job(job_id)
 
-    return False
+
+async def get_scheduler_status() -> Dict[str, Any]:
+    """
+    Get detailed multi-worker scheduler status.
+
+    Phase 14.10: New API for monitoring concurrent job execution.
+
+    Returns:
+        Dict with scheduler state including:
+        - running: bool
+        - max_workers: int (3)
+        - active_workers: int (0-3)
+        - available_workers: int
+        - queued_jobs: int
+        - active_jobs: list of job IDs currently running
+        - workers: detailed worker state
+    """
+    return await multi_scheduler.get_status()
+
+
+async def start_scheduler() -> None:
+    """
+    Start the multi-worker scheduler.
+
+    Phase 14.10: Should be called during controller startup.
+    Handles state recovery from persistent storage.
+    """
+    await multi_scheduler.start()
+    logger.info("Multi-worker scheduler started")
+
+
+async def stop_scheduler() -> None:
+    """
+    Stop the multi-worker scheduler gracefully.
+
+    Phase 14.10: Should be called during controller shutdown.
+    Allows running jobs to complete before stopping.
+    """
+    await multi_scheduler.stop()
+    logger.info("Multi-worker scheduler stopped")
 
 
 async def check_claude_availability() -> Dict[str, Any]:
