@@ -7,14 +7,14 @@ The AI agent MUST update this file after completing any task.
 
 ## Last Updated
 - **Timestamp**: 2026-01-19
-- **Task**: Phase 14.10 Multi-Worker Scheduler - COMPLETED
+- **Task**: Phase 14.11 Priority & Fair Scheduling - COMPLETED
 - **Status**: Complete (ANTHROPIC_API_KEY still required for execution)
 
 ---
 
 ## Current Phase
 ```
-Phase: PHASE_14.10_COMPLETE
+Phase: PHASE_14.11_COMPLETE
 Mode: development
 ```
 
@@ -61,6 +61,10 @@ Mode: development
 | Persistent Job Store | Implemented | controller/claude_backend.py | Phase 14.10: JSON-based state persistence for crash recovery |
 | Worker Process Isolation | Implemented | controller/claude_backend.py | Phase 14.10: CPU nice, memory limits, isolated subprocesses |
 | Scheduler Status Endpoint | Implemented | controller/main.py | Phase 14.10: /claude/scheduler for worker monitoring |
+| Priority Scheduling | Implemented | controller/claude_backend.py | Phase 14.11: EMERGENCY > HIGH > NORMAL > LOW |
+| Starvation Prevention | Implemented | controller/claude_backend.py | Phase 14.11: Auto-escalation after 30min wait |
+| Priority Audit Logging | Implemented | controller/claude_backend.py | Phase 14.11: Append-only escalation audit trail |
+| Priority Tests | Implemented | tests/test_priority_scheduling.py | Phase 14.11: 20+ tests for priority scheduling |
 
 ---
 
@@ -128,6 +132,7 @@ None
 
 | Timestamp | Task | Status | Details |
 |-----------|------|--------|---------|
+| 2026-01-19 | Phase 14.11 complete | Completed | Priority & Fair Scheduling: EMERGENCY/HIGH/NORMAL/LOW, starvation prevention (30min), audit logging |
 | 2026-01-19 | Phase 14.10 complete | Completed | Multi-worker scheduler: MAX_CONCURRENT_JOBS=3, persistent state, resource limits, crash recovery |
 | 2026-01-18 | Phase 14.0-14.6 complete | Completed | Claude CLI installation, execution wrapper, job backend, workspace model, API endpoints |
 | 2026-01-18 | Phase 13.10-13.12 complete | Completed | Rate limiting, timeouts/retries, degraded mode for Telegram bot |
@@ -144,6 +149,74 @@ None
 | 2026-01-16 | Phase 1 skeleton | Completed | Created controller/, bots/, tests/, workflows/, moved docs/, created README files |
 | 2026-01-16 | Bootstrap config | Completed | Updated all files with confirmed repository, domains, hosting, and tech stack details |
 | 2026-01-16 | Bootstrap docs | Completed | Created all foundational files |
+
+---
+
+## Phase 14.11 Deliverables
+
+### Priority Scheduling (controller/claude_backend.py)
+
+| Component | Description |
+|-----------|-------------|
+| JobPriority Enum | EMERGENCY (100) > HIGH (75) > NORMAL (50) > LOW (25) |
+| Priority Queue | Higher priority jobs scheduled first |
+| FIFO Within Priority | Same priority jobs processed in order received |
+| Job ID Tiebreaker | Deterministic ordering when priority and time match |
+
+### Starvation Prevention
+
+| Configuration | Value | Description |
+|--------------|-------|-------------|
+| STARVATION_THRESHOLD_MINUTES | 30 | Time before escalation |
+| PRIORITY_ESCALATION_AMOUNT | 10 | Priority increase per escalation |
+| PRIORITY_ESCALATION_CAP | 75 | Maximum priority (HIGH) via escalation |
+
+### Escalation Rules
+
+- Jobs waiting >30 minutes in QUEUED state get +10 priority
+- Maximum priority reachable via escalation is HIGH (75)
+- EMERGENCY (100) can only be set explicitly, not via escalation
+- Escalation is deterministic and idempotent
+- All escalations logged to audit trail
+
+### Enhanced Queue Response (/claude/queue)
+
+| Field | Description |
+|-------|-------------|
+| job_id | Unique job identifier |
+| project | Project name |
+| priority | Current priority value |
+| priority_label | Human-readable priority (EMERGENCY/HIGH/NORMAL/LOW) |
+| wait_time_minutes | Time spent waiting in queue |
+| state | Current job state |
+| escalations | Number of priority escalations |
+
+### Priority Audit Log
+
+| Path | Purpose |
+|------|---------|
+| /home/aitesting.mybd.in/jobs/priority_audit.log | Append-only escalation audit trail |
+
+### Safety Guarantees
+
+- **PRIORITY_IMMUTABLE**: Priority only changed by controller (starvation prevention)
+- **ESCALATION_CAPPED**: Cannot exceed HIGH (75) via auto-escalation
+- **DETERMINISTIC_ORDER**: Same input always produces same order
+- **AUDIT_TRAIL**: All escalations logged for governance
+- **NO_STARVATION**: All jobs eventually get processed
+
+### Test Coverage (tests/test_priority_scheduling.py)
+
+| Test Class | Coverage |
+|------------|----------|
+| TestPriorityPreemption | EMERGENCY > HIGH > NORMAL > LOW ordering |
+| TestFIFOWithinPriority | FIFO for same priority, job_id tiebreaker |
+| TestStarvationPrevention | 30-min threshold, escalation eligibility |
+| TestPriorityCapping | Cap at HIGH (75), EMERGENCY preserved |
+| TestIdempotentEscalation | Deterministic, no double escalation |
+| TestJobPriorityEnum | Enum values, from_value clamping |
+| TestClaudeJobSortKey | Sort key format and ordering |
+| TestPrioritySchedulingIntegration | Mixed priority queue ordering |
 
 ---
 

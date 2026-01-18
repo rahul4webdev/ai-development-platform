@@ -2,6 +2,7 @@
 Claude CLI Execution Backend
 Phase 14.3: Controller Integration
 Phase 14.10: Multi-Claude Worker Scheduler
+Phase 14.11: Priority & Fair Scheduling
 
 This module integrates Claude CLI as an execution backend for the controller.
 It manages job workspaces, invokes the secure wrapper, and tracks job state.
@@ -12,6 +13,12 @@ Phase 14.10 adds:
 - Resource limits (CPU nice, memory)
 - Crash recovery
 - Graceful failure handling
+
+Phase 14.11 adds:
+- Priority-aware scheduling (EMERGENCY > HIGH > NORMAL > LOW)
+- Starvation prevention (auto-escalation after 30 minutes)
+- Priority audit logging
+- Deterministic ordering (priority, then created_at, then job_id)
 
 IMPORTANT: This module does NOT replace existing controller functionality.
 It ADDS Claude CLI as a new execution backend alongside the existing flow.
@@ -50,6 +57,12 @@ WORKER_NICE_VALUE = 10   # CPU nice value for worker processes (lower priority)
 WORKER_MEMORY_LIMIT_MB = 2048  # Memory limit per worker in MB
 JOB_STATE_FILE = JOBS_BASE_DIR / "job_state.json"  # Persistent job state
 JOB_CLEANUP_AFTER_HOURS = 24  # Auto-cleanup completed jobs after this many hours
+
+# Phase 14.11: Priority & Fairness configuration
+STARVATION_THRESHOLD_MINUTES = 30  # Time before priority escalation
+PRIORITY_ESCALATION_AMOUNT = 10  # Priority increase per escalation
+PRIORITY_ESCALATION_CAP = 75  # Maximum priority from escalation (HIGH)
+PRIORITY_AUDIT_LOG = JOBS_BASE_DIR / "priority_audit.log"  # Priority escalation audit log
 
 # Required policy documents (must exist in docs/)
 REQUIRED_DOCS = [
@@ -100,6 +113,45 @@ class JobState(str, Enum):
         return {cls.PREPARING, cls.RUNNING}
 
 
+# -----------------------------------------------------------------------------
+# Phase 14.11: Job Priority
+# -----------------------------------------------------------------------------
+class JobPriority(int, Enum):
+    """
+    Job priority levels for scheduling.
+
+    Phase 14.11: Priority is immutable once assigned, except for starvation escalation.
+    Priority is set ONLY by controller logic - never by Claude CLI or Telegram bot.
+
+    Ordering: EMERGENCY (100) > HIGH (75) > NORMAL (50) > LOW (25)
+    """
+    EMERGENCY = 100
+    HIGH = 75
+    NORMAL = 50
+    LOW = 25
+
+    @classmethod
+    def from_value(cls, value: int) -> "JobPriority":
+        """Get priority enum from integer value, clamping to valid range."""
+        for priority in cls:
+            if priority.value == value:
+                return priority
+        # Return closest valid priority
+        if value >= cls.EMERGENCY.value:
+            return cls.EMERGENCY
+        elif value >= cls.HIGH.value:
+            return cls.HIGH
+        elif value >= cls.NORMAL.value:
+            return cls.NORMAL
+        return cls.LOW
+
+    @classmethod
+    def can_escalate_to(cls, current: int, target: int) -> bool:
+        """Check if escalation from current to target is allowed."""
+        # Cannot exceed HIGH (75) via escalation
+        return target <= PRIORITY_ESCALATION_CAP and target > current
+
+
 @dataclass
 class ClaudeJob:
     """Represents a Claude CLI execution job."""
@@ -109,6 +161,10 @@ class ClaudeJob:
     task_type: str
     state: JobState
     created_at: datetime
+    # Phase 14.11: Priority scheduling
+    priority: int = JobPriority.NORMAL.value  # Default to NORMAL (50)
+    priority_escalations: int = 0  # Number of times priority was escalated
+    last_escalation_at: Optional[datetime] = None  # Last escalation timestamp
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     exit_code: Optional[int] = None
@@ -129,6 +185,10 @@ class ClaudeJob:
             "task_type": self.task_type,
             "state": self.state.value,
             "created_at": self.created_at.isoformat(),
+            # Phase 14.11: Priority fields
+            "priority": self.priority,
+            "priority_escalations": self.priority_escalations,
+            "last_escalation_at": self.last_escalation_at.isoformat() if self.last_escalation_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "exit_code": self.exit_code,
@@ -137,6 +197,27 @@ class ClaudeJob:
             "created_by": self.created_by,
             "result_summary": self.result_summary,
         }
+
+    def get_wait_time_seconds(self) -> float:
+        """Get time spent waiting in QUEUED state."""
+        if self.state != JobState.QUEUED:
+            return 0
+        return (datetime.utcnow() - self.created_at).total_seconds()
+
+    def get_wait_time_minutes(self) -> float:
+        """Get time spent waiting in QUEUED state in minutes."""
+        return self.get_wait_time_seconds() / 60
+
+    def get_priority_sort_key(self) -> tuple:
+        """
+        Get sort key for priority queue ordering.
+
+        Phase 14.11: Ordering is:
+        1. Highest priority first (-priority for descending)
+        2. Oldest job first (created_at timestamp)
+        3. Job ID as tie-breaker (for stability)
+        """
+        return (-self.priority, self.created_at.timestamp(), self.job_id)
 
 
 # -----------------------------------------------------------------------------
@@ -627,10 +708,16 @@ class PersistentJobStore:
             return False
 
     async def get_queued_jobs(self) -> List[ClaudeJob]:
-        """Get all jobs in QUEUED state, ordered by created_at."""
+        """
+        Get all jobs in QUEUED state, ordered by priority.
+
+        Phase 14.11: Changed from FIFO to priority queue ordering.
+        Order: highest priority first, then oldest, then job_id for stability.
+        """
         jobs = await self.load_jobs()
         queued = [j for j in jobs if j.state == JobState.QUEUED]
-        queued.sort(key=lambda j: j.created_at)  # FIFO order
+        # Phase 14.11: Priority ordering instead of FIFO
+        queued.sort(key=lambda j: j.get_priority_sort_key())
         return queued
 
     async def get_active_jobs(self) -> List[ClaudeJob]:
@@ -668,6 +755,10 @@ class PersistentJobStore:
             task_type=data["task_type"],
             state=JobState(data["state"]),
             created_at=datetime.fromisoformat(data["created_at"]),
+            # Phase 14.11: Priority fields with defaults for backwards compatibility
+            priority=data.get("priority", JobPriority.NORMAL.value),
+            priority_escalations=data.get("priority_escalations", 0),
+            last_escalation_at=datetime.fromisoformat(data["last_escalation_at"]) if data.get("last_escalation_at") else None,
             started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
             completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
             exit_code=data.get("exit_code"),
@@ -869,7 +960,8 @@ class MultiWorkerScheduler:
 
     Features:
     - Maximum concurrent jobs enforcement (MAX_CONCURRENT_JOBS=3)
-    - FIFO queue ordering
+    - Priority-aware scheduling (Phase 14.11)
+    - Starvation prevention with auto-escalation (Phase 14.11)
     - Process isolation per worker
     - Crash recovery from persistent state
     - Graceful shutdown
@@ -882,6 +974,7 @@ class MultiWorkerScheduler:
         self._running = False
         self._scheduler_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._starvation_task: Optional[asyncio.Task] = None  # Phase 14.11
         self._lock = asyncio.Lock()
 
         # Initialize workers
@@ -907,6 +1000,9 @@ class MultiWorkerScheduler:
         # Start cleanup task
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
+        # Phase 14.11: Start starvation prevention task
+        self._starvation_task = asyncio.create_task(self._starvation_prevention_loop())
+
         logger.info("MultiWorkerScheduler started")
 
     async def stop(self) -> None:
@@ -929,6 +1025,14 @@ class MultiWorkerScheduler:
             except asyncio.CancelledError:
                 pass
 
+        # Phase 14.11: Cancel starvation prevention task
+        if self._starvation_task:
+            self._starvation_task.cancel()
+            try:
+                await self._starvation_task
+            except asyncio.CancelledError:
+                pass
+
         # Shutdown all workers
         for worker in self._workers:
             await worker.shutdown()
@@ -947,11 +1051,29 @@ class MultiWorkerScheduler:
         return job.job_id
 
     async def get_status(self) -> Dict[str, Any]:
-        """Get comprehensive scheduler status."""
+        """
+        Get comprehensive scheduler status.
+
+        Phase 14.11: Enhanced to include priority and wait_time for queued jobs.
+        """
         queued_jobs = await persistent_store.get_queued_jobs()
         all_jobs = await persistent_store.load_jobs()
 
         active_workers = [w for w in self._workers if w.is_busy]
+
+        # Phase 14.11: Build queue details with priority, wait_time, state
+        queue_details = [
+            {
+                "job_id": job.job_id,
+                "project": job.project_name,
+                "priority": job.priority,
+                "priority_label": JobPriority.from_value(job.priority).name,
+                "wait_time_minutes": round(job.get_wait_time_minutes(), 2),
+                "state": job.state.value,
+                "escalations": job.priority_escalations,
+            }
+            for job in queued_jobs
+        ]
 
         return {
             "running": self._running,
@@ -959,6 +1081,7 @@ class MultiWorkerScheduler:
             "active_workers": len(active_workers),
             "available_workers": self.max_workers - len(active_workers),
             "queued_jobs": len(queued_jobs),
+            "queue": queue_details,  # Phase 14.11: Detailed queue info
             "active_jobs": [w.current_job_id for w in active_workers if w.current_job_id],
             "total_jobs": len(all_jobs),
             "completed_jobs": sum(1 for j in all_jobs if j.state == JobState.COMPLETED),
@@ -1114,6 +1237,97 @@ class MultiWorkerScheduler:
             except Exception as e:
                 logger.error(f"Cleanup loop error: {e}")
 
+    async def _starvation_prevention_loop(self) -> None:
+        """
+        Phase 14.11: Periodically check for starving jobs and escalate priority.
+
+        If a job waits longer than STARVATION_THRESHOLD_MINUTES (30 min) in QUEUED state:
+        - Increase priority by PRIORITY_ESCALATION_AMOUNT (+10)
+        - Log escalation in audit trail
+        - Cap escalation at PRIORITY_ESCALATION_CAP (HIGH=75)
+
+        This ensures lower-priority jobs eventually get processed.
+        """
+        while self._running:
+            try:
+                # Check every 5 minutes
+                await asyncio.sleep(300)
+
+                queued_jobs = await persistent_store.get_queued_jobs()
+                now = datetime.utcnow()
+
+                for job in queued_jobs:
+                    wait_minutes = job.get_wait_time_minutes()
+
+                    # Check if job has been waiting too long
+                    if wait_minutes >= STARVATION_THRESHOLD_MINUTES:
+                        # Calculate new priority
+                        new_priority = job.priority + PRIORITY_ESCALATION_AMOUNT
+
+                        # Check if escalation is allowed (cap at HIGH=75)
+                        if JobPriority.can_escalate_to(job.priority, new_priority):
+                            old_priority = job.priority
+                            job.priority = min(new_priority, PRIORITY_ESCALATION_CAP)
+                            job.priority_escalations += 1
+                            job.last_escalation_at = now
+
+                            # Persist the change
+                            await persistent_store.save_job(job)
+
+                            # Log the escalation to audit trail
+                            await self._log_priority_escalation(
+                                job_id=job.job_id,
+                                old_priority=old_priority,
+                                new_priority=job.priority,
+                                wait_minutes=wait_minutes,
+                                escalation_count=job.priority_escalations,
+                            )
+
+                            logger.info(
+                                f"Starvation prevention: Job {job.job_id} escalated "
+                                f"from {old_priority} to {job.priority} "
+                                f"(waited {wait_minutes:.1f} min, escalation #{job.priority_escalations})"
+                            )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Starvation prevention loop error: {e}")
+
+    async def _log_priority_escalation(
+        self,
+        job_id: str,
+        old_priority: int,
+        new_priority: int,
+        wait_minutes: float,
+        escalation_count: int,
+    ) -> None:
+        """
+        Phase 14.11: Log priority escalation to audit trail.
+
+        Writes to PRIORITY_AUDIT_LOG in append-only format.
+        """
+        try:
+            PRIORITY_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.utcnow().isoformat()
+            log_entry = {
+                "timestamp": timestamp,
+                "event": "priority_escalation",
+                "job_id": job_id,
+                "old_priority": old_priority,
+                "new_priority": new_priority,
+                "wait_minutes": round(wait_minutes, 2),
+                "escalation_count": escalation_count,
+            }
+
+            # Append to audit log
+            with open(PRIORITY_AUDIT_LOG, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+
+        except IOError as e:
+            logger.warning(f"Failed to write priority audit log: {e}")
+
     async def _get_queue_position(self, job_id: str) -> int:
         """Get position of a job in the queue (1-indexed)."""
         queued_jobs = await persistent_store.get_queued_jobs()
@@ -1134,22 +1348,28 @@ async def create_job(
     project_name: str,
     task_description: str,
     task_type: str = "feature_development",
-    created_by: Optional[str] = None
+    created_by: Optional[str] = None,
+    priority: int = JobPriority.NORMAL.value,
 ) -> ClaudeJob:
     """
     Create and enqueue a new Claude CLI job.
 
     Phase 14.10: Now uses multi-worker scheduler with persistent state.
+    Phase 14.11: Added priority parameter for scheduling.
 
     Args:
         project_name: Name of the project
         task_description: Description of the task
         task_type: Type of task (feature_development, bug_fix, refactoring, deployment)
         created_by: User ID or identifier of creator
+        priority: Job priority (default: NORMAL=50). Use JobPriority enum values.
 
     Returns:
         The created ClaudeJob
     """
+    # Phase 14.11: Validate and normalize priority
+    validated_priority = max(JobPriority.LOW.value, min(priority, JobPriority.EMERGENCY.value))
+
     job = ClaudeJob(
         job_id=str(uuid.uuid4()),
         project_name=project_name,
@@ -1158,6 +1378,7 @@ async def create_job(
         state=JobState.QUEUED,
         created_at=datetime.utcnow(),
         created_by=created_by,
+        priority=validated_priority,
     )
 
     # Create workspace early so it's ready
@@ -1166,7 +1387,7 @@ async def create_job(
     # Use multi-worker scheduler (Phase 14.10)
     await multi_scheduler.enqueue_job(job)
 
-    logger.info(f"Created job {job.job_id} for project {project_name}")
+    logger.info(f"Created job {job.job_id} for project {project_name} (priority: {validated_priority})")
     return job
 
 
