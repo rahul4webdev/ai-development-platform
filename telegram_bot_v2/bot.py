@@ -1,14 +1,16 @@
 """
-Telegram Bot - Phase 13
+Telegram Bot - Phase 13.3-13.9
 
-Stateless Telegram bot that communicates only via HTTP with the controller.
+Production Control Plane for AI Development Platform.
 
 Features:
-- Polling-based (for now)
-- Token from ENV: TELEGRAM_BOT_TOKEN
-- No hardcoded secrets
-- Does NOT crash controller if Telegram fails
-- Logs to /var/log/ai-telegram-bot.log
+- Health awareness (13.3)
+- Role-aware command model (13.4)
+- Human approval workflow (13.5)
+- Deployment notifications (13.6)
+- CI trigger rules (13.7)
+- Dashboard API integration (13.8)
+- Multi-aspect project support (13.9)
 
 Safety:
 - Bot cannot trigger prod deploy directly
@@ -22,9 +24,12 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
+import subprocess
+import resource
+from datetime import datetime, timedelta
 from enum import Enum
-from typing import Optional, Dict, Any, List
+from functools import wraps
+from typing import Optional, Dict, Any, List, Callable, Tuple
 
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,11 +48,9 @@ from telegram.ext import (
 LOG_FILE = os.getenv("TELEGRAM_BOT_LOG", "/var/log/ai-telegram-bot.log")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# Create logger
 logger = logging.getLogger("telegram_bot")
 logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 
-# File handler
 try:
     file_handler = logging.FileHandler(LOG_FILE)
     file_handler.setFormatter(
@@ -55,10 +58,8 @@ try:
     )
     logger.addHandler(file_handler)
 except PermissionError:
-    # Fall back to console if can't write to log file
     pass
 
-# Console handler
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(
     logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -71,6 +72,71 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
+BOT_VERSION = "0.13.9"
+BOT_START_TIME = datetime.utcnow()
+
+# -----------------------------------------------------------------------------
+# Phase 13.4: Role System
+# -----------------------------------------------------------------------------
+class UserRole(str, Enum):
+    """User roles for access control."""
+    OWNER = "owner"
+    ADMIN = "admin"
+    TESTER = "tester"
+    VIEWER = "viewer"
+
+
+# Role configuration - loaded from environment or config
+# Format: ROLE_OWNERS=123456,789012 ROLE_ADMINS=111111,222222
+def load_role_config() -> Dict[UserRole, List[int]]:
+    """Load role mappings from environment."""
+    config = {
+        UserRole.OWNER: [],
+        UserRole.ADMIN: [],
+        UserRole.TESTER: [],
+        UserRole.VIEWER: [],
+    }
+
+    for role in UserRole:
+        env_key = f"ROLE_{role.value.upper()}S"
+        ids_str = os.getenv(env_key, "")
+        if ids_str:
+            config[role] = [int(uid.strip()) for uid in ids_str.split(",") if uid.strip()]
+
+    return config
+
+
+ROLE_CONFIG = load_role_config()
+
+
+def get_user_role(user_id: int) -> UserRole:
+    """Get the highest role for a user."""
+    for role in [UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER]:
+        if user_id in ROLE_CONFIG.get(role, []):
+            return role
+    return UserRole.VIEWER
+
+
+def role_required(*allowed_roles: UserRole):
+    """Decorator to enforce role-based access control."""
+    def decorator(func: Callable):
+        @wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            user_id = update.effective_user.id
+            user_role = get_user_role(user_id)
+
+            if user_role not in allowed_roles:
+                await update.message.reply_text(
+                    f"Access denied. Required role: " + ", ".join(r.value for r in allowed_roles) + "\n"
+                    f"Your role: {user_role.value}"
+                )
+                logger.warning(f"Access denied for user {user_id} (role: {user_role}) to {func.__name__}")
+                return
+
+            return await func(update, context, *args, **kwargs)
+        return wrapper
+    return decorator
+
 
 # -----------------------------------------------------------------------------
 # Enums
@@ -83,6 +149,25 @@ class FeedbackType(str, Enum):
     REJECT = "reject"
 
 
+class RejectionReason(str, Enum):
+    """Structured rejection reasons."""
+    BUG = "bug"
+    IMPROVEMENT = "improvement"
+    INVALID_REQUIREMENT = "invalid_requirement"
+    OTHER = "other"
+
+
+class DeploymentState(str, Enum):
+    """Deployment state machine."""
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    DEPLOYED_TESTING = "deployed_testing"
+    DEPLOYED_PRODUCTION = "deployed_production"
+    FEEDBACK_REQUIRED = "feedback_required"
+    ROLLED_BACK = "rolled_back"
+
+
 class CallbackAction(str, Enum):
     """Callback query actions."""
     FEEDBACK_APPROVE = "fb_approve"
@@ -92,45 +177,32 @@ class CallbackAction(str, Enum):
     PROD_APPROVE = "prod_approve"
     SELECT_PROJECT = "sel_proj"
     SELECT_ASPECT = "sel_aspect"
+    REJECT_BUG = "rej_bug"
+    REJECT_IMPROVEMENT = "rej_improve"
+    REJECT_INVALID = "rej_invalid"
+    REJECT_OTHER = "rej_other"
 
 
 # -----------------------------------------------------------------------------
-# User State Management (in-memory, stateless design)
+# User State Management
 # -----------------------------------------------------------------------------
 class UserState:
     """Temporary state for multi-step interactions."""
     def __init__(self):
-        self.pending_feedback: Dict[int, Dict[str, Any]] = {}  # user_id -> feedback context
-        self.pending_project_creation: Dict[int, str] = {}  # user_id -> description
-        self.awaiting_input: Dict[int, str] = {}  # user_id -> what we're waiting for
+        self.pending_feedback: Dict[int, Dict[str, Any]] = {}
+        self.pending_project_creation: Dict[int, str] = {}
+        self.awaiting_input: Dict[int, str] = {}
+        self.approval_history: Dict[str, List[Dict[str, Any]]] = {}  # deployment_id -> approvals
 
 
 user_state = UserState()
 
 
 # -----------------------------------------------------------------------------
-# HTTP Client for Controller Communication
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
 # Safety Guardrails
 # -----------------------------------------------------------------------------
 class SafetyGuardrails:
-    """
-    Safety constraints enforced by the Telegram bot.
-
-    MANDATORY CONSTRAINTS:
-    1. Bot CANNOT trigger prod deploy directly
-    2. Bot CANNOT skip CI
-    3. Bot CANNOT self-approve
-    4. All bot actions are logged
-    5. Dual approval rules enforced via controller
-
-    ARCHITECTURAL SAFETY:
-    - Bot is stateless and communicates only via HTTP
-    - All business logic and validation is in controller
-    - Bot cannot bypass controller rules
-    - If Telegram is down, system continues autonomously
-    """
+    """Safety constraints enforced by the Telegram bot."""
 
     @staticmethod
     def log_action(user_id: int, action: str, details: Dict[str, Any]) -> None:
@@ -139,7 +211,7 @@ class SafetyGuardrails:
 
     @staticmethod
     def is_production_action(action: str) -> bool:
-        """Check if action is production-related (requires extra caution)."""
+        """Check if action is production-related."""
         prod_actions = ["prod_approve", "prod_apply", "prod_deploy"]
         return action in prod_actions
 
@@ -147,22 +219,39 @@ class SafetyGuardrails:
     def validate_feedback_has_explanation(
         feedback_type: str,
         explanation: Optional[str]
-    ) -> tuple[bool, str]:
+    ) -> Tuple[bool, str]:
         """Ensure bug/improvements/reject feedback has explanation."""
         if feedback_type in ["bug", "improvements", "reject"]:
             if not explanation or len(explanation.strip()) < 10:
                 return False, f"{feedback_type.title()} feedback requires explanation (min 10 chars)"
         return True, ""
 
+    @staticmethod
+    def check_dual_approval(deployment_id: str, user_id: int) -> Tuple[bool, str]:
+        """Check if dual approval rules are satisfied."""
+        approvals = user_state.approval_history.get(deployment_id, [])
+
+        # Check if user already approved
+        for approval in approvals:
+            if approval.get("user_id") == user_id:
+                return False, "You have already approved this deployment. Dual approval requires different users."
+
+        return True, ""
+
 
 safety = SafetyGuardrails()
 
 
+# -----------------------------------------------------------------------------
+# HTTP Client for Controller Communication
+# -----------------------------------------------------------------------------
 class ControllerClient:
     """HTTP client for communicating with the controller API."""
 
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
+        self._last_health_check: Optional[datetime] = None
+        self._health_cache: Optional[Dict] = None
 
     async def _request(
         self,
@@ -198,8 +287,17 @@ class ControllerClient:
             return {"error": str(e), "status": "error"}
 
     async def health_check(self) -> Dict[str, Any]:
-        """Check controller health."""
-        return await self._request("GET", "/health")
+        """Check controller health with caching."""
+        now = datetime.utcnow()
+        if self._health_cache and self._last_health_check:
+            if (now - self._last_health_check).seconds < 30:
+                return self._health_cache
+
+        result = await self._request("GET", "/health")
+        if "error" not in result:
+            self._health_cache = result
+            self._last_health_check = now
+        return result
 
     async def create_project(
         self,
@@ -274,14 +372,76 @@ class ControllerClient:
         params = {"project_name": project_name} if project_name else None
         return await self._request("GET", "/v2/notifications", params=params)
 
+    async def get_projects_list(self) -> Dict[str, Any]:
+        """Get list of all projects."""
+        return await self._request("GET", "/v2/dashboard")
 
-# Initialize controller client
+    async def get_ledger(self, project_name: str) -> Dict[str, Any]:
+        """Get project ledger/audit trail."""
+        return await self._request("GET", f"/v2/ledger/{project_name}")
+
+
 controller = ControllerClient(CONTROLLER_BASE_URL)
 
 
 # -----------------------------------------------------------------------------
 # Helper Functions
 # -----------------------------------------------------------------------------
+def get_system_status() -> Dict[str, Any]:
+    """Get system status including memory usage."""
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        memory_mb = usage.ru_maxrss / 1024  # Convert to MB (Linux)
+        if sys.platform == "darwin":
+            memory_mb = usage.ru_maxrss / (1024 * 1024)  # macOS uses bytes
+    except Exception:
+        memory_mb = 0
+
+    uptime = datetime.utcnow() - BOT_START_TIME
+
+    return {
+        "version": BOT_VERSION,
+        "uptime_seconds": int(uptime.total_seconds()),
+        "uptime_human": str(uptime).split(".")[0],
+        "memory_mb": round(memory_mb, 2),
+        "start_time": BOT_START_TIME.isoformat()
+    }
+
+
+def get_systemd_status(service: str) -> Dict[str, Any]:
+    """Get systemd service status."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", service],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        is_active = result.stdout.strip() == "active"
+
+        result2 = subprocess.run(
+            ["systemctl", "show", service, "--property=ActiveEnterTimestamp"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        timestamp = result2.stdout.strip().split("=")[1] if "=" in result2.stdout else "unknown"
+
+        return {
+            "service": service,
+            "active": is_active,
+            "status": "running" if is_active else "stopped",
+            "since": timestamp
+        }
+    except Exception as e:
+        return {
+            "service": service,
+            "active": False,
+            "status": "unknown",
+            "error": str(e)
+        }
+
+
 def format_project_status(project: Dict[str, Any]) -> str:
     """Format project status for display."""
     lines = [
@@ -343,14 +503,13 @@ def format_dashboard(dashboard: Dict[str, Any]) -> str:
         ""
     ]
 
-    for proj in projects[:5]:  # Limit to 5 projects
+    for proj in projects[:5]:
         lines.append(f"*{proj.get('project_name', 'Unknown')}*")
         lines.append(f"  Status: {proj.get('overall_status', 'unknown')}")
 
         aspects = proj.get("aspects", {})
         for aspect_type, aspect_data in aspects.items():
             phase = aspect_data.get("current_phase", "unknown")
-            health = aspect_data.get("health", "unknown")
             emoji = get_phase_emoji(phase)
             lines.append(f"  {emoji} {aspect_type}: {phase.replace('_', ' ')}")
 
@@ -388,6 +547,40 @@ def get_feedback_keyboard(project_name: str, aspect: str) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(keyboard)
 
 
+def get_rejection_reason_keyboard(project_name: str, aspect: str) -> InlineKeyboardMarkup:
+    """Create inline keyboard for rejection reasons."""
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🐞 Bug Found",
+                callback_data=f"{CallbackAction.REJECT_BUG}:{project_name}:{aspect}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✨ Needs Improvement",
+                callback_data=f"{CallbackAction.REJECT_IMPROVEMENT}:{project_name}:{aspect}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📋 Invalid Requirement",
+                callback_data=f"{CallbackAction.REJECT_INVALID}:{project_name}:{aspect}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📝 Other (explain)",
+                callback_data=f"{CallbackAction.REJECT_OTHER}:{project_name}:{aspect}"
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+# -----------------------------------------------------------------------------
+# Notification Formatters (Phase 13.6)
+# -----------------------------------------------------------------------------
 def format_ci_notification(notif: Dict[str, Any]) -> str:
     """Format CI completion notification."""
     details = notif.get("details", {})
@@ -429,33 +622,28 @@ def format_testing_deployment_notification(notif: Dict[str, Any]) -> str:
         "",
     ]
 
-    # Testing URL
     if notif.get("environment_url"):
         lines.append(f"🔗 *Testing URL:* {notif.get('environment_url')}")
         lines.append("")
 
-    # Features deployed
     features = notif.get("features_completed", [])
     if features:
         lines.append("✅ *Features Deployed:*")
-        for feat in features[:10]:  # Limit to 10
+        for feat in features[:10]:
             lines.append(f"  • {feat}")
         lines.append("")
 
-    # Test coverage summary
     if notif.get("test_coverage_summary"):
         lines.append(f"🧪 *Test Summary:* {notif.get('test_coverage_summary')}")
         lines.append("")
 
-    # Known limitations
     limitations = notif.get("known_limitations", [])
     if limitations:
         lines.append("⚠️ *Known Limitations:*")
-        for lim in limitations[:5]:  # Limit to 5
+        for lim in limitations[:5]:
             lines.append(f"  • {lim}")
         lines.append("")
 
-    # What tester should focus on
     if details.get("testing_focus"):
         lines.append("👉 *What to Test:*")
         for focus in details.get("testing_focus", []):
@@ -463,6 +651,46 @@ def format_testing_deployment_notification(notif: Dict[str, Any]) -> str:
         lines.append("")
 
     lines.append("Please test and provide feedback using /feedback command")
+
+    return "\n".join(lines)
+
+
+def format_production_deployment_notification(notif: Dict[str, Any]) -> str:
+    """Format production deployment notification."""
+    details = notif.get("details", {})
+
+    lines = [
+        "🌐 *DEPLOYED TO PRODUCTION*",
+        "",
+        f"*Project:* {notif.get('project_name', 'Unknown')}",
+        f"*Aspect:* {notif.get('aspect', 'Unknown')}",
+        "",
+    ]
+
+    if notif.get("environment_url"):
+        lines.append(f"🔗 *Production URL:* {notif.get('environment_url')}")
+        lines.append("")
+
+    features = notif.get("features_completed", [])
+    if features:
+        lines.append("✅ *Features Deployed:*")
+        for feat in features[:10]:
+            lines.append(f"  • {feat}")
+        lines.append("")
+
+    if notif.get("test_coverage_summary"):
+        lines.append(f"🧪 *Test Summary:* {notif.get('test_coverage_summary')}")
+        lines.append("")
+
+    # Rollback instructions
+    lines.append("🔄 *Rollback Instructions:*")
+    if details.get("rollback_command"):
+        lines.append(f"  Command: `{details.get('rollback_command')}`")
+    else:
+        lines.append("  Use /rollback command if issues detected")
+    lines.append("")
+
+    lines.append("Monitor for any issues and report via /feedback")
 
     return "\n".join(lines)
 
@@ -498,7 +726,7 @@ def format_production_approval_notification(notif: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_notification(notif: Dict[str, Any]) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+def format_notification(notif: Dict[str, Any]) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
     """Format any notification with appropriate template."""
     notif_type = notif.get("notification_type", "")
     keyboard = None
@@ -507,15 +735,18 @@ def format_notification(notif: Dict[str, Any]) -> tuple[str, Optional[InlineKeyb
         text = format_ci_notification(notif)
     elif notif_type == "testing_ready":
         text = format_testing_deployment_notification(notif)
-        # Add feedback buttons
         project = notif.get("project_name", "")
         aspect = notif.get("aspect", "")
         if project and aspect:
             keyboard = get_feedback_keyboard(project, aspect)
+    elif notif_type == "deployment_complete":
+        if notif.get("details", {}).get("environment") == "production":
+            text = format_production_deployment_notification(notif)
+        else:
+            text = format_testing_deployment_notification(notif)
     elif notif_type == "approval_required":
         text = format_production_approval_notification(notif)
     else:
-        # Generic notification format
         lines = [
             f"🔔 *{notif.get('title', 'Notification')}*",
             "",
@@ -531,25 +762,217 @@ def format_notification(notif: Dict[str, Any]) -> tuple[str, Optional[InlineKeyb
 
 
 # -----------------------------------------------------------------------------
-# Command Handlers
+# Phase 13.3: Health & Status Commands (READ-ONLY)
+# -----------------------------------------------------------------------------
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /health - Check system health (Phase 13.3)
+
+    Shows:
+    - Controller reachability
+    - systemd status (controller + bot)
+    - Last deployment timestamp
+    """
+    user_id = update.effective_user.id
+    safety.log_action(user_id, "health_check", {})
+
+    lines = ["*System Health Check*", ""]
+
+    # Check controller health
+    controller_health = await controller.health_check()
+    if "error" in controller_health:
+        lines.append("❌ *Controller:* Unreachable")
+        lines.append(f"   Error: {controller_health.get('error')}")
+    else:
+        lines.append("✅ *Controller:* Healthy")
+        lines.append(f"   Phase: {controller_health.get('phase', 'unknown')}")
+
+    lines.append("")
+
+    # Check systemd services
+    services = ["ai-testing-controller", "ai-telegram-bot"]
+    for svc in services:
+        status = get_systemd_status(svc)
+        emoji = "✅" if status.get("active") else "❌"
+        lines.append(f"{emoji} *{svc}:* {status.get('status')}")
+        if status.get("since") and status.get("since") != "unknown":
+            lines.append(f"   Since: {status.get('since')}")
+
+    lines.append("")
+
+    # Last deployment info (from dashboard)
+    dashboard = await controller.get_dashboard()
+    if "error" not in dashboard:
+        projects = dashboard.get("projects", [])
+        if projects:
+            latest_deploy = None
+            for proj in projects:
+                for aspect_data in proj.get("aspects", {}).values():
+                    deploy_time = aspect_data.get("last_deploy_at")
+                    if deploy_time:
+                        if not latest_deploy or deploy_time > latest_deploy:
+                            latest_deploy = deploy_time
+
+            if latest_deploy:
+                lines.append(f"📦 *Last Deployment:* {latest_deploy}")
+            else:
+                lines.append("📦 *Last Deployment:* None recorded")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def bot_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /status - Bot status (Phase 13.3)
+
+    Shows:
+    - Version
+    - Environment
+    - Uptime
+    - Memory usage
+    """
+    user_id = update.effective_user.id
+    safety.log_action(user_id, "bot_status", {})
+
+    sys_status = get_system_status()
+    user_role = get_user_role(user_id)
+
+    environment = os.getenv("ENVIRONMENT", "testing")
+
+    lines = [
+        "*Bot Status*",
+        "",
+        f"*Version:* {sys_status['version']}",
+        f"*Environment:* {environment}",
+        f"*Uptime:* {sys_status['uptime_human']}",
+        f"*Memory:* ~{sys_status['memory_mb']} MB",
+        f"*Started:* {sys_status['start_time']}",
+        "",
+        f"*Your Role:* {user_role.value}",
+    ]
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def projects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /projects - List all projects (Phase 13.3)
+
+    Shows:
+    - Project list
+    - Current phase per project
+    """
+    user_id = update.effective_user.id
+    safety.log_action(user_id, "list_projects", {})
+
+    dashboard = await controller.get_dashboard()
+
+    if "error" in dashboard:
+        await update.message.reply_text(f"❌ Error: {dashboard.get('error')}")
+        return
+
+    projects = dashboard.get("projects", [])
+
+    if not projects:
+        await update.message.reply_text("No projects found. Use /new_project to create one.")
+        return
+
+    lines = [f"*Projects ({len(projects)})*", ""]
+
+    for proj in projects:
+        name = proj.get("project_name", "Unknown")
+        status = proj.get("overall_status", "unknown")
+        lines.append(f"📁 *{name}*")
+        lines.append(f"   Status: {status}")
+
+        aspects = proj.get("aspects", {})
+        for aspect_name, aspect_data in aspects.items():
+            phase = aspect_data.get("current_phase", "unknown")
+            emoji = get_phase_emoji(phase)
+            lines.append(f"   {emoji} {aspect_name}: {phase.replace('_', ' ')}")
+
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def deployments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /deployments - Show deployment history (Phase 13.3)
+    """
+    user_id = update.effective_user.id
+    safety.log_action(user_id, "list_deployments", {})
+
+    dashboard = await controller.get_dashboard()
+
+    if "error" in dashboard:
+        await update.message.reply_text(f"❌ Error: {dashboard.get('error')}")
+        return
+
+    projects = dashboard.get("projects", [])
+
+    if not projects:
+        await update.message.reply_text("No projects found.")
+        return
+
+    lines = ["*Deployment History*", ""]
+
+    has_deployments = False
+    for proj in projects:
+        name = proj.get("project_name", "Unknown")
+
+        for aspect_name, aspect_data in proj.get("aspects", {}).items():
+            testing_deployed = aspect_data.get("deploy_status") == "deployed_testing"
+            prod_deployed = aspect_data.get("deploy_status") == "deployed_production"
+            last_deploy = aspect_data.get("last_deploy_at")
+
+            if testing_deployed or prod_deployed or last_deploy:
+                has_deployments = True
+                env_emoji = "🌐" if prod_deployed else "🚀" if testing_deployed else "📦"
+                lines.append(f"{env_emoji} *{name}* / {aspect_name}")
+
+                if last_deploy:
+                    lines.append(f"   Last: {last_deploy}")
+                if testing_deployed:
+                    lines.append("   Testing: ✅ Deployed")
+                if prod_deployed:
+                    lines.append("   Production: ✅ Deployed")
+                lines.append("")
+
+    if not has_deployments:
+        lines.append("No deployments recorded yet.")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# -----------------------------------------------------------------------------
+# Core Command Handlers
 # -----------------------------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command - Register user."""
     user = update.effective_user
-    logger.info(f"User {user.id} ({user.username}) started bot")
+    user_role = get_user_role(user.id)
+    logger.info(f"User {user.id} ({user.username}) started bot, role: {user_role}")
 
     await update.message.reply_text(
         f"Welcome to the AI Development Platform!\n\n"
         f"I help you create and manage software projects using natural language.\n\n"
-        f"*Available Commands:*\n"
+        f"*Your Role:* {user_role.value}\n\n"
+        f"*Health & Status (Read-Only):*\n"
+        f"/health - System health check\n"
+        f"/status - Bot status\n"
+        f"/projects - List all projects\n"
+        f"/deployments - Deployment history\n\n"
+        f"*Project Management:*\n"
         f"/new\\_project - Start a new project\n"
-        f"/status - View project status\n"
-        f"/dashboard - System overview\n"
-        f"/approve - Approve testing\n"
+        f"/dashboard - System overview\n\n"
+        f"*Testing & Approval:*\n"
+        f"/approve - Approve deployment\n"
+        f"/reject - Reject with reason\n"
         f"/feedback - Submit feedback\n"
-        f"/prod\\_approve - Production approval\n"
+        f"/prod\\_approve - Production approval\n\n"
         f"/notifications - View pending actions\n"
-        f"/help - Show this help\n\n"
+        f"/help - Show detailed help\n\n"
         f"Or just describe your project in plain English!",
         parse_mode="Markdown"
     )
@@ -557,35 +980,55 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
-    await update.message.reply_text(
-        "*AI Development Platform - Help*\n\n"
-        "*Project Commands:*\n"
-        "/new\\_project - Create a new project\n"
-        "/status \\[project\\] - View project status\n"
-        "/dashboard - System overview\n\n"
-        "*Testing & Approval:*\n"
-        "/approve \\[project\\] \\[aspect\\] - Approve testing\n"
-        "/feedback \\[project\\] \\[aspect\\] - Submit feedback\n"
-        "/prod\\_approve \\[project\\] \\[aspect\\] - Approve production\n\n"
-        "*Notifications:*\n"
-        "/notifications - View pending actions\n\n"
-        "*Creating a Project:*\n"
-        "Just describe what you want to build in plain English\\!\n"
-        "Example: \"Build a SaaS CRM with admin panel and customer website\"",
-        parse_mode="MarkdownV2"
-    )
+    user_role = get_user_role(update.effective_user.id)
+
+    base_help = """
+*AI Development Platform - Help*
+
+*Health & Status (All Users):*
+/health - Check system health
+/status - Bot version and uptime
+/projects - List all projects
+/deployments - Deployment history
+
+*Project Management:*
+/new\\_project - Create a new project
+/dashboard - System overview
+
+*Testing & Approval:*
+/approve <project> <aspect> - Approve testing
+/reject <project> <aspect> - Reject with reason
+/feedback <project> <aspect> - Submit feedback
+/prod\\_approve <project> <aspect> - Production approval
+
+*Notifications:*
+/notifications - View pending actions
+"""
+
+    role_info = f"\n*Your Role:* {user_role.value}\n"
+
+    if user_role == UserRole.OWNER:
+        role_info += "_(Full access including break-glass operations)_"
+    elif user_role == UserRole.ADMIN:
+        role_info += "_(Can approve deployments and manage projects)_"
+    elif user_role == UserRole.TESTER:
+        role_info += "_(Can test and provide feedback)_"
+    else:
+        role_info += "_(Read-only access)_"
+
+    await update.message.reply_text(base_help + role_info, parse_mode="Markdown")
 
 
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
 async def new_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /new_project command."""
     user_id = update.effective_user.id
+    safety.log_action(user_id, "new_project_start", {})
 
-    # Check if description was provided with command
     if context.args:
         description = " ".join(context.args)
         await create_project_from_description(update, description, str(user_id))
     else:
-        # Ask for description
         user_state.awaiting_input[user_id] = "project_description"
         await update.message.reply_text(
             "Please describe your project in plain English.\n\n"
@@ -593,10 +1036,9 @@ async def new_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /status command."""
+async def project_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /project_status command - detailed project view."""
     if not context.args:
-        # Show all projects via dashboard
         result = await controller.get_dashboard()
         if "error" in result:
             await update.message.reply_text(f"Error: {result.get('error')}")
@@ -607,7 +1049,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode="Markdown"
         )
     else:
-        # Show specific project
         project_name = context.args[0]
         result = await controller.get_project(project_name)
 
@@ -623,6 +1064,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /dashboard command."""
+    user_id = update.effective_user.id
+    safety.log_action(user_id, "view_dashboard", {})
+
     result = await controller.get_dashboard()
 
     if "error" in result:
@@ -635,8 +1079,14 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+# -----------------------------------------------------------------------------
+# Phase 13.5: Human Approval Workflow Commands
+# -----------------------------------------------------------------------------
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /approve command - Approve testing."""
+    """
+    /approve <project> <aspect> - Approve testing (Phase 13.5)
+    """
     if len(context.args) < 2:
         await update.message.reply_text(
             "Usage: /approve <project_name> <aspect>\n"
@@ -648,7 +1098,11 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     aspect = context.args[1]
     user_id = str(update.effective_user.id)
 
-    # Submit approval feedback
+    safety.log_action(int(user_id), "approve_testing", {
+        "project": project_name,
+        "aspect": aspect
+    })
+
     result = await controller.submit_feedback(
         project_name=project_name,
         aspect=aspect,
@@ -657,7 +1111,7 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
     if "error" in result:
-        await update.message.reply_text(f"Error: {result.get('error')}")
+        await update.message.reply_text(f"❌ Error: {result.get('error')}")
         return
 
     await update.message.reply_text(
@@ -670,8 +1124,47 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
+async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /reject <project> <aspect> - Reject with structured reason (Phase 13.5)
+
+    Rejection MUST include structured reason:
+    - Bug
+    - Improvement
+    - Invalid Requirement
+    - Other
+    """
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /reject <project_name> <aspect>\n"
+            "Example: /reject my-crm core"
+        )
+        return
+
+    project_name = context.args[0]
+    aspect = context.args[1]
+    user_id = update.effective_user.id
+
+    safety.log_action(user_id, "reject_start", {
+        "project": project_name,
+        "aspect": aspect
+    })
+
+    # Show rejection reason options
+    await update.message.reply_text(
+        f"*Rejection for {project_name} - {aspect}*\n\n"
+        f"Please select the rejection reason:",
+        parse_mode="Markdown",
+        reply_markup=get_rejection_reason_keyboard(project_name, aspect)
+    )
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
 async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /feedback command - Show feedback options."""
+    """
+    /feedback <project> <aspect> - Submit feedback (Phase 13.5)
+    """
     if len(context.args) < 2:
         await update.message.reply_text(
             "Usage: /feedback <project_name> <aspect>\n"
@@ -681,8 +1174,13 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     project_name = context.args[0]
     aspect = context.args[1]
+    user_id = update.effective_user.id
 
-    # Show inline keyboard with feedback options
+    safety.log_action(user_id, "feedback_start", {
+        "project": project_name,
+        "aspect": aspect
+    })
+
     await update.message.reply_text(
         f"*Feedback for {project_name} - {aspect}*\n\n"
         f"Select your feedback type:",
@@ -691,25 +1189,46 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+@role_required(UserRole.OWNER, UserRole.ADMIN)
 async def prod_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /prod_approve command - Production approval."""
+    """
+    /prod_approve <project> <aspect> - Production approval (Phase 13.5)
+
+    Enforces:
+    - Dual approval (same user cannot approve twice)
+    - Requires justification
+    - Requires rollback plan
+    """
     if len(context.args) < 2:
         await update.message.reply_text(
             "Usage: /prod_approve <project_name> <aspect>\n"
             "Example: /prod_approve my-crm core\n\n"
-            "Note: You will be asked for justification and rollback plan."
+            "Note: You will be asked for justification and rollback plan.\n"
+            "Dual approval is required (different users must approve)."
         )
         return
 
     project_name = context.args[0]
     aspect = context.args[1]
     user_id = update.effective_user.id
+    deployment_id = f"{project_name}:{aspect}"
 
-    # Store context for multi-step approval
+    # Check dual approval
+    can_approve, error_msg = safety.check_dual_approval(deployment_id, user_id)
+    if not can_approve:
+        await update.message.reply_text(f"⛔ {error_msg}")
+        return
+
+    safety.log_action(user_id, "prod_approve_start", {
+        "project": project_name,
+        "aspect": aspect
+    })
+
     user_state.pending_feedback[user_id] = {
         "type": "prod_approval",
         "project_name": project_name,
         "aspect": aspect,
+        "deployment_id": deployment_id,
         "step": "justification"
     }
     user_state.awaiting_input[user_id] = "prod_justification"
@@ -718,6 +1237,7 @@ async def prod_approve_command(update: Update, context: ContextTypes.DEFAULT_TYP
         f"*Production Approval Request*\n\n"
         f"Project: {project_name}\n"
         f"Aspect: {aspect}\n\n"
+        f"⚠️ This will deploy to PRODUCTION.\n\n"
         f"Please provide your justification for this production deployment:",
         parse_mode="Markdown"
     )
@@ -725,6 +1245,9 @@ async def prod_approve_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /notifications command."""
+    user_id = update.effective_user.id
+    safety.log_action(user_id, "view_notifications", {})
+
     project_name = context.args[0] if context.args else None
     result = await controller.get_notifications(project_name)
 
@@ -734,18 +1257,16 @@ async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     notifications = result.get("notifications", [])
     if not notifications:
-        await update.message.reply_text("No pending notifications.")
+        await update.message.reply_text("✅ No pending notifications.")
         return
 
-    # Send first notification with details, rest as summary
     first_notif = notifications[0]
     text, keyboard = format_notification(first_notif)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
-    # If more notifications, show summary of rest
     if len(notifications) > 1:
         lines = [f"\n*+{len(notifications) - 1} more notifications:*\n"]
-        for notif in notifications[1:10]:  # Limit to 10
+        for notif in notifications[1:10]:
             emoji = "🔔"
             if notif.get("notification_type") == "testing_ready":
                 emoji = "🎯"
@@ -767,34 +1288,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # Check if we're awaiting specific input
     awaiting = user_state.awaiting_input.get(user_id)
 
     if awaiting == "project_description":
-        # User is providing project description
         del user_state.awaiting_input[user_id]
         await create_project_from_description(update, text, str(user_id))
         return
 
     elif awaiting == "feedback_explanation":
-        # User is providing feedback explanation
         feedback_ctx = user_state.pending_feedback.get(user_id)
         if feedback_ctx:
-            # SAFETY: Validate explanation is provided
             is_valid, error_msg = safety.validate_feedback_has_explanation(
                 feedback_ctx["feedback_type"],
                 text
             )
             if not is_valid:
                 await update.message.reply_text(
-                    f"⚠️ {error_msg}\n\nPlease provide more details:"
+                    f"Warning: {error_msg}\n\nPlease provide more details:"
                 )
                 return
 
             del user_state.awaiting_input[user_id]
             del user_state.pending_feedback[user_id]
 
-            # SAFETY: Log the action
             safety.log_action(user_id, "submit_feedback", {
                 "project": feedback_ctx["project_name"],
                 "aspect": feedback_ctx["aspect"],
@@ -813,24 +1329,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(f"Error: {result.get('error')}")
                 return
 
-            emoji = {"bug": "🐞", "improvements": "✨", "reject": "❌"}.get(
-                feedback_ctx["feedback_type"], "📝"
-            )
+            emoji_map = {"bug": "Bug", "improvements": "Improvement", "reject": "Rejected"}
+            feedback_label = emoji_map.get(feedback_ctx["feedback_type"], "Feedback")
             await update.message.reply_text(
-                f"{emoji} *Feedback Submitted*\n\n"
+                f"*{feedback_label} Submitted*\n\n"
                 f"Project: {feedback_ctx['project_name']}\n"
                 f"Aspect: {feedback_ctx['aspect']}\n"
                 f"Type: {feedback_ctx['feedback_type']}\n"
                 f"Action: {result.get('action_taken', 'Processed')}\n\n"
-                f"Next steps:\n" + "\n".join(f"• {s}" for s in result.get('next_steps', [])),
+                f"Next steps:\n" + "\n".join(f"- {s}" for s in result.get('next_steps', [])),
+                parse_mode="Markdown"
+            )
+        return
+
+    elif awaiting == "rejection_explanation":
+        feedback_ctx = user_state.pending_feedback.get(user_id)
+        if feedback_ctx:
+            if len(text.strip()) < 10:
+                await update.message.reply_text(
+                    "Rejection reason must be at least 10 characters. Please explain:"
+                )
+                return
+
+            del user_state.awaiting_input[user_id]
+            del user_state.pending_feedback[user_id]
+
+            safety.log_action(user_id, "submit_rejection", {
+                "project": feedback_ctx["project_name"],
+                "aspect": feedback_ctx["aspect"],
+                "reason": feedback_ctx.get("rejection_reason", "other")
+            })
+
+            rejection_reason = feedback_ctx.get("rejection_reason", "other")
+            result = await controller.submit_feedback(
+                project_name=feedback_ctx["project_name"],
+                aspect=feedback_ctx["aspect"],
+                feedback_type=FeedbackType.REJECT.value,
+                user_id=str(user_id),
+                explanation=f"[{rejection_reason}] {text}"
+            )
+
+            if "error" in result:
+                await update.message.reply_text(f"Error: {result.get('error')}")
+                return
+
+            await update.message.reply_text(
+                f"*Rejected*\n\n"
+                f"Project: {feedback_ctx['project_name']}\n"
+                f"Aspect: {feedback_ctx['aspect']}\n"
+                f"Reason: {rejection_reason}\n"
+                f"Action: {result.get('action_taken', 'Processed')}\n\n"
+                f"Next steps:\n" + "\n".join(f"- {s}" for s in result.get('next_steps', [])),
                 parse_mode="Markdown"
             )
         return
 
     elif awaiting == "prod_justification":
-        # User is providing production approval justification
         feedback_ctx = user_state.pending_feedback.get(user_id)
         if feedback_ctx:
+            if len(text.strip()) < 20:
+                await update.message.reply_text(
+                    "Justification must be at least 20 characters. Please explain why:"
+                )
+                return
+
             feedback_ctx["justification"] = text
             feedback_ctx["step"] = "rollback_plan"
             user_state.awaiting_input[user_id] = "prod_rollback_plan"
@@ -841,18 +1403,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     elif awaiting == "prod_rollback_plan":
-        # User is providing rollback plan
         feedback_ctx = user_state.pending_feedback.get(user_id)
         if feedback_ctx:
-            del user_state.awaiting_input[user_id]
-            del user_state.pending_feedback[user_id]
+            if len(text.strip()) < 10:
+                await update.message.reply_text(
+                    "Rollback plan must be at least 10 characters. Please describe:"
+                )
+                return
 
-            # SAFETY: Log production approval attempt
+            del user_state.awaiting_input[user_id]
+
+            deployment_id = feedback_ctx.get("deployment_id")
+
             safety.log_action(user_id, "prod_approval_attempt", {
                 "project": feedback_ctx["project_name"],
-                "aspect": feedback_ctx["aspect"],
-                "has_justification": bool(feedback_ctx.get("justification")),
-                "has_rollback_plan": bool(text)
+                "aspect": feedback_ctx["aspect"]
             })
 
             result = await controller.approve_production(
@@ -865,23 +1430,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
             if "error" in result:
-                # SAFETY: Log failed approval
                 safety.log_action(user_id, "prod_approval_failed", {
                     "project": feedback_ctx["project_name"],
                     "error": result.get("error")
                 })
+                del user_state.pending_feedback[user_id]
                 await update.message.reply_text(f"Error: {result.get('error')}")
                 return
 
+            if deployment_id:
+                if deployment_id not in user_state.approval_history:
+                    user_state.approval_history[deployment_id] = []
+                user_state.approval_history[deployment_id].append({
+                    "user_id": user_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "type": "production_approval"
+                })
+
+            del user_state.pending_feedback[user_id]
+
             if result.get("approved"):
-                # SAFETY: Log successful approval
                 safety.log_action(user_id, "prod_approval_success", {
                     "project": feedback_ctx["project_name"],
                     "aspect": feedback_ctx["aspect"],
                     "approval_id": result.get("approval_id")
                 })
                 await update.message.reply_text(
-                    f"✅ *Production Deployment Approved*\n\n"
+                    f"*Production Deployment Approved*\n\n"
                     f"Project: {feedback_ctx['project_name']}\n"
                     f"Aspect: {feedback_ctx['aspect']}\n"
                     f"Status: {result.get('deployment_status', 'Processing')}\n"
@@ -890,26 +1465,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
             else:
                 await update.message.reply_text(
-                    f"❌ *Production Approval Failed*\n\n"
+                    f"*Production Approval Failed*\n\n"
                     f"{result.get('message', 'Unknown error')}",
                     parse_mode="Markdown"
                 )
         return
 
     # Default: Treat as project description
-    # Check if it looks like a project description
-    if len(text) > 20 and any(word in text.lower() for word in [
-        "build", "create", "make", "develop", "want", "need", "app", "website",
-        "system", "platform", "saas", "crm", "api", "service"
-    ]):
-        await create_project_from_description(update, text, str(user_id))
-    else:
-        await update.message.reply_text(
-            "I didn't understand that. You can:\n\n"
-            "• Describe a project to create (e.g., \"Build a SaaS CRM\")\n"
-            "• Use /help to see available commands\n"
-            "• Use /status to view projects"
-        )
+    user_role = get_user_role(user_id)
+    if user_role in [UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER]:
+        if len(text) > 20 and any(word in text.lower() for word in [
+            "build", "create", "make", "develop", "want", "need", "app", "website",
+            "system", "platform", "saas", "crm", "api", "service"
+        ]):
+            await create_project_from_description(update, text, str(user_id))
+            return
+
+    await update.message.reply_text(
+        "I did not understand that. You can:\n\n"
+        "- Describe a project to create\n"
+        "- Use /help to see available commands\n"
+        "- Use /projects to view projects\n"
+        "- Use /health to check system status"
+    )
 
 
 async def create_project_from_description(
@@ -921,7 +1499,7 @@ async def create_project_from_description(
     logger.info(f"Creating project from description: {description[:50]}...")
 
     await update.message.reply_text(
-        "🔄 Creating your project...\n\n"
+        "Creating your project...\n\n"
         "Claude is analyzing your requirements and generating the project structure."
     )
 
@@ -932,21 +1510,21 @@ async def create_project_from_description(
 
     if "error" in result:
         await update.message.reply_text(
-            f"❌ *Error creating project:*\n{result.get('error')}",
+            f"*Error creating project:*\n{result.get('error')}",
             parse_mode="Markdown"
         )
         return
 
-    aspects_list = "\n".join(f"• {a}" for a in result.get("aspects_initialized", []))
-    next_steps = "\n".join(f"• {s}" for s in result.get("next_steps", []))
+    aspects_list = "\n".join(f"- {a}" for a in result.get("aspects_initialized", []))
+    next_steps = "\n".join(f"- {s}" for s in result.get("next_steps", []))
 
     await update.message.reply_text(
-        f"✅ *Project Created!*\n\n"
+        f"*Project Created!*\n\n"
         f"*Name:* {result.get('project_name', 'Unknown')}\n"
-        f"*Contract ID:* `{result.get('contract_id', 'Unknown')}`\n\n"
+        f"*Contract ID:* {result.get('contract_id', 'Unknown')}\n\n"
         f"*Aspects Initialized:*\n{aspects_list}\n\n"
         f"*Next Steps:*\n{next_steps}\n\n"
-        f"Use /status {result.get('project_name', '')} to track progress.",
+        f"Use /projects to view all projects.",
         parse_mode="Markdown"
     )
 
@@ -960,6 +1538,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
 
     user_id = update.effective_user.id
+    user_role = get_user_role(user_id)
     data = query.data
     parts = data.split(":")
 
@@ -971,8 +1550,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     project_name = parts[1]
     aspect = parts[2]
 
+    # Check role for approval actions
+    if action in [CallbackAction.FEEDBACK_APPROVE, CallbackAction.PROD_APPROVE]:
+        if user_role not in [UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER]:
+            await query.edit_message_text("Access denied. Insufficient permissions.")
+            return
+
     if action == CallbackAction.FEEDBACK_APPROVE:
-        # Direct approval - no explanation needed
+        safety.log_action(user_id, "approve_via_button", {
+            "project": project_name,
+            "aspect": aspect
+        })
+
         result = await controller.submit_feedback(
             project_name=project_name,
             aspect=aspect,
@@ -985,11 +1574,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         await query.edit_message_text(
-            f"✅ *Approved!*\n\n"
+            f"*Approved!*\n\n"
             f"Project: {project_name}\n"
             f"Aspect: {aspect}\n"
             f"Action: {result.get('action_taken', 'Unknown')}\n\n"
-            f"Next steps:\n" + "\n".join(f"• {s}" for s in result.get('next_steps', [])),
+            f"Next steps:\n" + "\n".join(f"- {s}" for s in result.get('next_steps', [])),
             parse_mode="Markdown"
         )
 
@@ -998,7 +1587,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         CallbackAction.FEEDBACK_IMPROVEMENTS,
         CallbackAction.FEEDBACK_REJECT
     ]:
-        # These require explanation
         feedback_type_map = {
             CallbackAction.FEEDBACK_BUG: FeedbackType.BUG.value,
             CallbackAction.FEEDBACK_IMPROVEMENTS: FeedbackType.IMPROVEMENTS.value,
@@ -1006,7 +1594,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         }
         feedback_type = feedback_type_map[action]
 
-        # Store context for follow-up
+        if action == CallbackAction.FEEDBACK_REJECT:
+            # Show rejection reason options
+            await query.edit_message_text(
+                f"*Rejection for {project_name} - {aspect}*\n\n"
+                f"Please select the rejection reason:",
+                parse_mode="Markdown",
+                reply_markup=get_rejection_reason_keyboard(project_name, aspect)
+            )
+            return
+
         user_state.pending_feedback[user_id] = {
             "project_name": project_name,
             "aspect": aspect,
@@ -1020,7 +1617,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Project: {project_name}\n"
             f"Aspect: {aspect}\n\n"
             f"Please describe the issue or suggestion in detail.\n"
-            f"_(This explanation is mandatory)_",
+            f"(This explanation is mandatory)",
+            parse_mode="Markdown"
+        )
+
+    elif action in [
+        CallbackAction.REJECT_BUG,
+        CallbackAction.REJECT_IMPROVEMENT,
+        CallbackAction.REJECT_INVALID,
+        CallbackAction.REJECT_OTHER
+    ]:
+        reason_map = {
+            CallbackAction.REJECT_BUG: RejectionReason.BUG.value,
+            CallbackAction.REJECT_IMPROVEMENT: RejectionReason.IMPROVEMENT.value,
+            CallbackAction.REJECT_INVALID: RejectionReason.INVALID_REQUIREMENT.value,
+            CallbackAction.REJECT_OTHER: RejectionReason.OTHER.value,
+        }
+        rejection_reason = reason_map[action]
+
+        user_state.pending_feedback[user_id] = {
+            "project_name": project_name,
+            "aspect": aspect,
+            "feedback_type": FeedbackType.REJECT.value,
+            "rejection_reason": rejection_reason
+        }
+        user_state.awaiting_input[user_id] = "rejection_explanation"
+
+        await query.edit_message_text(
+            f"*Rejection: {rejection_reason.replace('_', ' ').title()}*\n\n"
+            f"Project: {project_name}\n"
+            f"Aspect: {aspect}\n\n"
+            f"Please explain the rejection reason in detail:",
             parse_mode="Markdown"
         )
 
@@ -1049,28 +1676,42 @@ def main():
 
     logger.info("Starting Telegram bot...")
     logger.info(f"Controller URL: {CONTROLLER_BASE_URL}")
+    logger.info(f"Bot Version: {BOT_VERSION}")
 
-    # Create application
+    # Log role configuration
+    for role, users in ROLE_CONFIG.items():
+        if users:
+            logger.info(f"Role {role.value}: {len(users)} users configured")
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Add command handlers
+    # Health & Status commands (Phase 13.3)
+    application.add_handler(CommandHandler("health", health_command))
+    application.add_handler(CommandHandler("status", bot_status_command))
+    application.add_handler(CommandHandler("projects", projects_command))
+    application.add_handler(CommandHandler("deployments", deployments_command))
+
+    # Core commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("new_project", new_project_command))
-    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("project_status", project_status_command))
     application.add_handler(CommandHandler("dashboard", dashboard_command))
+
+    # Approval workflow commands (Phase 13.5)
     application.add_handler(CommandHandler("approve", approve_command))
+    application.add_handler(CommandHandler("reject", reject_command))
     application.add_handler(CommandHandler("feedback", feedback_command))
     application.add_handler(CommandHandler("prod_approve", prod_approve_command))
     application.add_handler(CommandHandler("notifications", notifications_command))
 
-    # Add callback query handler for inline buttons
+    # Callback query handler for inline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))
 
-    # Add message handler for natural language input
+    # Message handler for natural language input
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Add error handler
+    # Error handler
     application.add_error_handler(error_handler)
 
     # Start polling

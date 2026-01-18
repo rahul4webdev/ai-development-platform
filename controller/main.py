@@ -53,6 +53,9 @@ import yaml
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+# Phase 12: Multi-Aspect Project Router
+from .phase12_router import router as phase12_router
+
 # -----------------------------------------------------------------------------
 # Logging Configuration
 # -----------------------------------------------------------------------------
@@ -1735,9 +1738,12 @@ def deploy_to_testing(project_name: str, task_id: str) -> str:
 # -----------------------------------------------------------------------------
 app = FastAPI(
     title="AI Development Platform - Task Controller",
-    description="Phase 6: Production Hardening & Explicit Go-Live Controls",
-    version="0.6.0"
+    description="Phase 12: Autonomous Multi-Aspect Project Orchestration",
+    version="0.12.0"
 )
+
+# Include Phase 12 router for multi-aspect projects
+app.include_router(phase12_router)
 
 
 # -----------------------------------------------------------------------------
@@ -1748,9 +1754,9 @@ async def root():
     """Health check endpoint."""
     return {
         "service": "AI Development Platform - Task Controller",
-        "phase": "Phase 6: Production Hardening & Explicit Go-Live Controls",
+        "phase": "Phase 12: Autonomous Multi-Aspect Project Orchestration",
         "status": "running",
-        "version": "0.6.0"
+        "version": "0.12.0"
     }
 
 
@@ -1765,7 +1771,7 @@ async def health_check():
             "projects_dir": PROJECTS_DIR.exists(),
             "docs_dir": DOCS_DIR.exists()
         },
-        "phase": "Phase 5",
+        "phase": "Phase 12",
         "capabilities": [
             "project_bootstrap",
             "task_lifecycle",
@@ -1780,7 +1786,15 @@ async def health_check():
             "commit_with_confirmation",
             "ci_trigger",
             "ci_result_ingestion",
-            "deploy_testing_with_confirmation"
+            "deploy_testing_with_confirmation",
+            # Phase 12: Multi-Aspect Projects
+            "multi_aspect_projects",
+            "internal_project_contract",
+            "aspect_lifecycle_management",
+            "structured_feedback_workflow",
+            "autonomous_ci_triggers",
+            "notification_system",
+            "project_dashboard"
         ],
         "constraints": [
             "NO_AUTONOMOUS_EXECUTION",
@@ -1794,7 +1808,11 @@ async def health_check():
             "NO_AUTOMATIC_MERGES",
             "NO_CI_WITHOUT_INTENT",
             "NO_BYPASS_TEST_FAILURES",
-            "NO_BACKGROUND_CI_RUNS"
+            "NO_BACKGROUND_CI_RUNS",
+            # Phase 12
+            "PRODUCTION_REQUIRES_APPROVAL",
+            "FEEDBACK_REQUIRES_EXPLANATION",
+            "CI_ON_PHASE_COMPLETE_ONLY"
         ]
     }
 
