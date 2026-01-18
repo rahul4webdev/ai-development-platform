@@ -72,7 +72,7 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.13.9"
+BOT_VERSION = "0.13.10"
 BOT_START_TIME = datetime.utcnow()
 
 # -----------------------------------------------------------------------------
@@ -101,7 +101,10 @@ def load_role_config() -> Dict[UserRole, List[int]]:
         env_key = f"ROLE_{role.value.upper()}S"
         ids_str = os.getenv(env_key, "")
         if ids_str:
-            config[role] = [int(uid.strip()) for uid in ids_str.split(",") if uid.strip()]
+            try:
+                config[role] = [int(uid.strip()) for uid in ids_str.split(",") if uid.strip()]
+            except ValueError as e:
+                logger.warning(f"Invalid user ID in {env_key}: {e}")
 
     return config
 
@@ -122,18 +125,23 @@ def role_required(*allowed_roles: UserRole):
     def decorator(func: Callable):
         @wraps(func)
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-            user_id = update.effective_user.id
-            user_role = get_user_role(user_id)
+            try:
+                user_id = update.effective_user.id
+                user_role = get_user_role(user_id)
 
-            if user_role not in allowed_roles:
-                await update.message.reply_text(
-                    f"Access denied. Required role: " + ", ".join(r.value for r in allowed_roles) + "\n"
-                    f"Your role: {user_role.value}"
-                )
-                logger.warning(f"Access denied for user {user_id} (role: {user_role}) to {func.__name__}")
-                return
+                if user_role not in allowed_roles:
+                    await update.message.reply_text(
+                        f"Access denied. Required role: " + ", ".join(r.value for r in allowed_roles) + "\n"
+                        f"Your role: {user_role.value}"
+                    )
+                    logger.warning(f"Access denied for user {user_id} (role: {user_role}) to {func.__name__}")
+                    return
 
-            return await func(update, context, *args, **kwargs)
+                return await func(update, context, *args, **kwargs)
+            except Exception as e:
+                logger.error(f"Error in {func.__name__}: {e}")
+                if update and update.message:
+                    await update.message.reply_text(f"Error: {str(e)}")
         return wrapper
     return decorator
 
@@ -524,23 +532,23 @@ def get_feedback_keyboard(project_name: str, aspect: str) -> InlineKeyboardMarku
         [
             InlineKeyboardButton(
                 "✅ Approve",
-                callback_data=f"{CallbackAction.FEEDBACK_APPROVE}:{project_name}:{aspect}"
+                callback_data=f"{CallbackAction.FEEDBACK_APPROVE.value}:{project_name}:{aspect}"
             )
         ],
         [
             InlineKeyboardButton(
                 "🐞 Bug",
-                callback_data=f"{CallbackAction.FEEDBACK_BUG}:{project_name}:{aspect}"
+                callback_data=f"{CallbackAction.FEEDBACK_BUG.value}:{project_name}:{aspect}"
             ),
             InlineKeyboardButton(
                 "✨ Improvements",
-                callback_data=f"{CallbackAction.FEEDBACK_IMPROVEMENTS}:{project_name}:{aspect}"
+                callback_data=f"{CallbackAction.FEEDBACK_IMPROVEMENTS.value}:{project_name}:{aspect}"
             )
         ],
         [
             InlineKeyboardButton(
                 "❌ Reject",
-                callback_data=f"{CallbackAction.FEEDBACK_REJECT}:{project_name}:{aspect}"
+                callback_data=f"{CallbackAction.FEEDBACK_REJECT.value}:{project_name}:{aspect}"
             )
         ]
     ]
@@ -553,25 +561,25 @@ def get_rejection_reason_keyboard(project_name: str, aspect: str) -> InlineKeybo
         [
             InlineKeyboardButton(
                 "🐞 Bug Found",
-                callback_data=f"{CallbackAction.REJECT_BUG}:{project_name}:{aspect}"
+                callback_data=f"{CallbackAction.REJECT_BUG.value}:{project_name}:{aspect}"
             )
         ],
         [
             InlineKeyboardButton(
                 "✨ Needs Improvement",
-                callback_data=f"{CallbackAction.REJECT_IMPROVEMENT}:{project_name}:{aspect}"
+                callback_data=f"{CallbackAction.REJECT_IMPROVEMENT.value}:{project_name}:{aspect}"
             )
         ],
         [
             InlineKeyboardButton(
                 "📋 Invalid Requirement",
-                callback_data=f"{CallbackAction.REJECT_INVALID}:{project_name}:{aspect}"
+                callback_data=f"{CallbackAction.REJECT_INVALID.value}:{project_name}:{aspect}"
             )
         ],
         [
             InlineKeyboardButton(
                 "📝 Other (explain)",
-                callback_data=f"{CallbackAction.REJECT_OTHER}:{project_name}:{aspect}"
+                callback_data=f"{CallbackAction.REJECT_OTHER.value}:{project_name}:{aspect}"
             )
         ]
     ]
@@ -687,7 +695,7 @@ def format_production_deployment_notification(notif: Dict[str, Any]) -> str:
     if details.get("rollback_command"):
         lines.append(f"  Command: `{details.get('rollback_command')}`")
     else:
-        lines.append("  Use /rollback command if issues detected")
+        lines.append("  Contact admin for rollback if issues detected")
     lines.append("")
 
     lines.append("Monitor for any issues and report via /feedback")
@@ -762,228 +770,311 @@ def format_notification(notif: Dict[str, Any]) -> Tuple[str, Optional[InlineKeyb
 
 
 # -----------------------------------------------------------------------------
-# Phase 13.3: Health & Status Commands (READ-ONLY)
+# Phase 13.3: Health & Status Commands (READ-ONLY, NO RBAC)
 # -----------------------------------------------------------------------------
+async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /whoami - Show current user identity and role (Phase 13.4)
+
+    ALWAYS responds - no RBAC restriction.
+    """
+    try:
+        user = update.effective_user
+        user_id = user.id
+        user_role = get_user_role(user_id)
+        username = user.username or "Not set"
+        full_name = user.full_name or "Not set"
+
+        safety.log_action(user_id, "whoami", {})
+
+        lines = [
+            "*Your Identity*",
+            "",
+            f"*User ID:* `{user_id}`",
+            f"*Username:* @{username}" if user.username else f"*Username:* {username}",
+            f"*Name:* {full_name}",
+            f"*Role:* {user_role.value}",
+            "",
+        ]
+
+        # Role capabilities
+        if user_role == UserRole.OWNER:
+            lines.append("✅ Full access (Owner)")
+            lines.append("  • All commands available")
+            lines.append("  • Production approvals")
+            lines.append("  • Break-glass operations")
+        elif user_role == UserRole.ADMIN:
+            lines.append("✅ Admin access")
+            lines.append("  • Project management")
+            lines.append("  • Production approvals")
+            lines.append("  • Testing feedback")
+        elif user_role == UserRole.TESTER:
+            lines.append("✅ Tester access")
+            lines.append("  • Submit feedback")
+            lines.append("  • Approve testing deployments")
+            lines.append("  • Create projects")
+        else:
+            lines.append("👁️ Viewer access (read-only)")
+            lines.append("  • View projects and status")
+            lines.append("  • View notifications")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in whoami_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
 async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /health - Check system health (Phase 13.3)
 
+    ALWAYS responds - no RBAC restriction.
     Shows:
     - Controller reachability
     - systemd status (controller + bot)
     - Last deployment timestamp
     """
-    user_id = update.effective_user.id
-    safety.log_action(user_id, "health_check", {})
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "health_check", {})
 
-    lines = ["*System Health Check*", ""]
+        lines = ["*System Health Check*", ""]
 
-    # Check controller health
-    controller_health = await controller.health_check()
-    if "error" in controller_health:
-        lines.append("❌ *Controller:* Unreachable")
-        lines.append(f"   Error: {controller_health.get('error')}")
-    else:
-        lines.append("✅ *Controller:* Healthy")
-        lines.append(f"   Phase: {controller_health.get('phase', 'unknown')}")
+        # Check controller health
+        controller_health = await controller.health_check()
+        if "error" in controller_health:
+            lines.append("❌ *Controller:* Unreachable")
+            lines.append(f"   Error: {controller_health.get('error')}")
+        else:
+            lines.append("✅ *Controller:* Healthy")
+            lines.append(f"   Phase: {controller_health.get('phase', 'unknown')}")
 
-    lines.append("")
+        lines.append("")
 
-    # Check systemd services
-    services = ["ai-testing-controller", "ai-telegram-bot"]
-    for svc in services:
-        status = get_systemd_status(svc)
-        emoji = "✅" if status.get("active") else "❌"
-        lines.append(f"{emoji} *{svc}:* {status.get('status')}")
-        if status.get("since") and status.get("since") != "unknown":
-            lines.append(f"   Since: {status.get('since')}")
+        # Check systemd services
+        services = ["ai-testing-controller", "ai-telegram-bot"]
+        for svc in services:
+            status = get_systemd_status(svc)
+            emoji = "✅" if status.get("active") else "❌"
+            lines.append(f"{emoji} *{svc}:* {status.get('status')}")
+            if status.get("since") and status.get("since") != "unknown":
+                lines.append(f"   Since: {status.get('since')}")
 
-    lines.append("")
+        lines.append("")
 
-    # Last deployment info (from dashboard)
-    dashboard = await controller.get_dashboard()
-    if "error" not in dashboard:
-        projects = dashboard.get("projects", [])
-        if projects:
-            latest_deploy = None
-            for proj in projects:
-                for aspect_data in proj.get("aspects", {}).values():
-                    deploy_time = aspect_data.get("last_deploy_at")
-                    if deploy_time:
-                        if not latest_deploy or deploy_time > latest_deploy:
-                            latest_deploy = deploy_time
+        # Last deployment info (from dashboard)
+        dashboard = await controller.get_dashboard()
+        if "error" not in dashboard:
+            projects = dashboard.get("projects", [])
+            if projects:
+                latest_deploy = None
+                for proj in projects:
+                    for aspect_data in proj.get("aspects", {}).values():
+                        deploy_time = aspect_data.get("last_deploy_at")
+                        if deploy_time:
+                            if not latest_deploy or deploy_time > latest_deploy:
+                                latest_deploy = deploy_time
 
-            if latest_deploy:
-                lines.append(f"📦 *Last Deployment:* {latest_deploy}")
-            else:
-                lines.append("📦 *Last Deployment:* None recorded")
+                if latest_deploy:
+                    lines.append(f"📦 *Last Deployment:* {latest_deploy}")
+                else:
+                    lines.append("📦 *Last Deployment:* None recorded")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in health_command: {e}")
+        await update.message.reply_text(f"❌ Error checking health: {str(e)}")
 
 
 async def bot_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /status - Bot status (Phase 13.3)
 
+    ALWAYS responds - no RBAC restriction.
     Shows:
     - Version
     - Environment
     - Uptime
     - Memory usage
     """
-    user_id = update.effective_user.id
-    safety.log_action(user_id, "bot_status", {})
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "bot_status", {})
 
-    sys_status = get_system_status()
-    user_role = get_user_role(user_id)
+        sys_status = get_system_status()
+        user_role = get_user_role(user_id)
 
-    environment = os.getenv("ENVIRONMENT", "testing")
+        environment = os.getenv("ENVIRONMENT", "testing")
 
-    lines = [
-        "*Bot Status*",
-        "",
-        f"*Version:* {sys_status['version']}",
-        f"*Environment:* {environment}",
-        f"*Uptime:* {sys_status['uptime_human']}",
-        f"*Memory:* ~{sys_status['memory_mb']} MB",
-        f"*Started:* {sys_status['start_time']}",
-        "",
-        f"*Your Role:* {user_role.value}",
-    ]
+        lines = [
+            "*Bot Status*",
+            "",
+            f"*Version:* {sys_status['version']}",
+            f"*Environment:* {environment}",
+            f"*Uptime:* {sys_status['uptime_human']}",
+            f"*Memory:* ~{sys_status['memory_mb']} MB",
+            f"*Started:* {sys_status['start_time']}",
+            "",
+            f"*Your Role:* {user_role.value}",
+        ]
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in bot_status_command: {e}")
+        await update.message.reply_text(f"❌ Error getting status: {str(e)}")
 
 
 async def projects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /projects - List all projects (Phase 13.3)
 
+    ALWAYS responds - no RBAC restriction (read-only).
     Shows:
     - Project list
     - Current phase per project
     """
-    user_id = update.effective_user.id
-    safety.log_action(user_id, "list_projects", {})
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "list_projects", {})
 
-    dashboard = await controller.get_dashboard()
+        dashboard = await controller.get_dashboard()
 
-    if "error" in dashboard:
-        await update.message.reply_text(f"❌ Error: {dashboard.get('error')}")
-        return
+        if "error" in dashboard:
+            await update.message.reply_text(f"❌ Error: {dashboard.get('error')}")
+            return
 
-    projects = dashboard.get("projects", [])
+        projects = dashboard.get("projects", [])
 
-    if not projects:
-        await update.message.reply_text("No projects found. Use /new_project to create one.")
-        return
+        if not projects:
+            await update.message.reply_text("No projects found. Use /new_project to create one.")
+            return
 
-    lines = [f"*Projects ({len(projects)})*", ""]
+        lines = [f"*Projects ({len(projects)})*", ""]
 
-    for proj in projects:
-        name = proj.get("project_name", "Unknown")
-        status = proj.get("overall_status", "unknown")
-        lines.append(f"📁 *{name}*")
-        lines.append(f"   Status: {status}")
+        for proj in projects:
+            name = proj.get("project_name", "Unknown")
+            status = proj.get("overall_status", "unknown")
+            lines.append(f"📁 *{name}*")
+            lines.append(f"   Status: {status}")
 
-        aspects = proj.get("aspects", {})
-        for aspect_name, aspect_data in aspects.items():
-            phase = aspect_data.get("current_phase", "unknown")
-            emoji = get_phase_emoji(phase)
-            lines.append(f"   {emoji} {aspect_name}: {phase.replace('_', ' ')}")
+            aspects = proj.get("aspects", {})
+            for aspect_name, aspect_data in aspects.items():
+                phase = aspect_data.get("current_phase", "unknown")
+                emoji = get_phase_emoji(phase)
+                lines.append(f"   {emoji} {aspect_name}: {phase.replace('_', ' ')}")
 
-        lines.append("")
+            lines.append("")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in projects_command: {e}")
+        await update.message.reply_text(f"❌ Error listing projects: {str(e)}")
 
 
 async def deployments_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /deployments - Show deployment history (Phase 13.3)
+
+    ALWAYS responds - no RBAC restriction (read-only).
     """
-    user_id = update.effective_user.id
-    safety.log_action(user_id, "list_deployments", {})
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "list_deployments", {})
 
-    dashboard = await controller.get_dashboard()
+        dashboard = await controller.get_dashboard()
 
-    if "error" in dashboard:
-        await update.message.reply_text(f"❌ Error: {dashboard.get('error')}")
-        return
+        if "error" in dashboard:
+            await update.message.reply_text(f"❌ Error: {dashboard.get('error')}")
+            return
 
-    projects = dashboard.get("projects", [])
+        projects = dashboard.get("projects", [])
 
-    if not projects:
-        await update.message.reply_text("No projects found.")
-        return
+        if not projects:
+            await update.message.reply_text("No projects found.")
+            return
 
-    lines = ["*Deployment History*", ""]
+        lines = ["*Deployment History*", ""]
 
-    has_deployments = False
-    for proj in projects:
-        name = proj.get("project_name", "Unknown")
+        has_deployments = False
+        for proj in projects:
+            name = proj.get("project_name", "Unknown")
 
-        for aspect_name, aspect_data in proj.get("aspects", {}).items():
-            testing_deployed = aspect_data.get("deploy_status") == "deployed_testing"
-            prod_deployed = aspect_data.get("deploy_status") == "deployed_production"
-            last_deploy = aspect_data.get("last_deploy_at")
+            for aspect_name, aspect_data in proj.get("aspects", {}).items():
+                testing_deployed = aspect_data.get("deploy_status") == "deployed_testing"
+                prod_deployed = aspect_data.get("deploy_status") == "deployed_production"
+                last_deploy = aspect_data.get("last_deploy_at")
 
-            if testing_deployed or prod_deployed or last_deploy:
-                has_deployments = True
-                env_emoji = "🌐" if prod_deployed else "🚀" if testing_deployed else "📦"
-                lines.append(f"{env_emoji} *{name}* / {aspect_name}")
+                if testing_deployed or prod_deployed or last_deploy:
+                    has_deployments = True
+                    env_emoji = "🌐" if prod_deployed else "🚀" if testing_deployed else "📦"
+                    lines.append(f"{env_emoji} *{name}* / {aspect_name}")
 
-                if last_deploy:
-                    lines.append(f"   Last: {last_deploy}")
-                if testing_deployed:
-                    lines.append("   Testing: ✅ Deployed")
-                if prod_deployed:
-                    lines.append("   Production: ✅ Deployed")
-                lines.append("")
+                    if last_deploy:
+                        lines.append(f"   Last: {last_deploy}")
+                    if testing_deployed:
+                        lines.append("   Testing: ✅ Deployed")
+                    if prod_deployed:
+                        lines.append("   Production: ✅ Deployed")
+                    lines.append("")
 
-    if not has_deployments:
-        lines.append("No deployments recorded yet.")
+        if not has_deployments:
+            lines.append("No deployments recorded yet.")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in deployments_command: {e}")
+        await update.message.reply_text(f"❌ Error listing deployments: {str(e)}")
 
 
 # -----------------------------------------------------------------------------
 # Core Command Handlers
 # -----------------------------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command - Register user."""
-    user = update.effective_user
-    user_role = get_user_role(user.id)
-    logger.info(f"User {user.id} ({user.username}) started bot, role: {user_role}")
+    """Handle /start command - Register user. ALWAYS responds."""
+    try:
+        user = update.effective_user
+        user_role = get_user_role(user.id)
+        logger.info(f"User {user.id} ({user.username}) started bot, role: {user_role}")
 
-    await update.message.reply_text(
-        f"Welcome to the AI Development Platform!\n\n"
-        f"I help you create and manage software projects using natural language.\n\n"
-        f"*Your Role:* {user_role.value}\n\n"
-        f"*Health & Status (Read-Only):*\n"
-        f"/health - System health check\n"
-        f"/status - Bot status\n"
-        f"/projects - List all projects\n"
-        f"/deployments - Deployment history\n\n"
-        f"*Project Management:*\n"
-        f"/new\\_project - Start a new project\n"
-        f"/dashboard - System overview\n\n"
-        f"*Testing & Approval:*\n"
-        f"/approve - Approve deployment\n"
-        f"/reject - Reject with reason\n"
-        f"/feedback - Submit feedback\n"
-        f"/prod\\_approve - Production approval\n\n"
-        f"/notifications - View pending actions\n"
-        f"/help - Show detailed help\n\n"
-        f"Or just describe your project in plain English!",
-        parse_mode="Markdown"
-    )
+        await update.message.reply_text(
+            f"Welcome to the AI Development Platform!\n\n"
+            f"I help you create and manage software projects using natural language.\n\n"
+            f"*Your Role:* {user_role.value}\n\n"
+            f"*Identity:*\n"
+            f"/whoami - Check your identity and permissions\n\n"
+            f"*Health & Status (Read-Only):*\n"
+            f"/health - System health check\n"
+            f"/status - Bot status\n"
+            f"/projects - List all projects\n"
+            f"/deployments - Deployment history\n\n"
+            f"*Project Management:*\n"
+            f"/new\\_project - Start a new project\n"
+            f"/dashboard - System overview\n\n"
+            f"*Testing & Approval:*\n"
+            f"/approve - Approve deployment\n"
+            f"/reject - Reject with reason\n"
+            f"/feedback - Submit feedback\n"
+            f"/prod\\_approve - Production approval\n\n"
+            f"/notifications - View pending actions\n"
+            f"/help - Show detailed help\n\n"
+            f"Or just describe your project in plain English!",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error in start_command: {e}")
+        await update.message.reply_text(f"Welcome! Error loading full message: {str(e)}")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /help command."""
-    user_role = get_user_role(update.effective_user.id)
+    """Handle /help command. ALWAYS responds."""
+    try:
+        user_role = get_user_role(update.effective_user.id)
 
-    base_help = """
+        base_help = """
 *AI Development Platform - Help*
+
+*Identity:*
+/whoami - Check your user ID and role
 
 *Health & Status (All Users):*
 /health - Check system health
@@ -1005,18 +1096,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 /notifications - View pending actions
 """
 
-    role_info = f"\n*Your Role:* {user_role.value}\n"
+        role_info = f"\n*Your Role:* {user_role.value}\n"
 
-    if user_role == UserRole.OWNER:
-        role_info += "_(Full access including break-glass operations)_"
-    elif user_role == UserRole.ADMIN:
-        role_info += "_(Can approve deployments and manage projects)_"
-    elif user_role == UserRole.TESTER:
-        role_info += "_(Can test and provide feedback)_"
-    else:
-        role_info += "_(Read-only access)_"
+        if user_role == UserRole.OWNER:
+            role_info += "_(Full access including break-glass operations)_"
+        elif user_role == UserRole.ADMIN:
+            role_info += "_(Can approve deployments and manage projects)_"
+        elif user_role == UserRole.TESTER:
+            role_info += "_(Can test and provide feedback)_"
+        else:
+            role_info += "_(Read-only access)_"
 
-    await update.message.reply_text(base_help + role_info, parse_mode="Markdown")
+        await update.message.reply_text(base_help + role_info, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in help_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
 
 
 @role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
@@ -1037,9 +1131,43 @@ async def new_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def project_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /project_status command - detailed project view."""
-    if not context.args:
+    """Handle /project_status command - detailed project view. ALWAYS responds."""
+    try:
+        if not context.args:
+            result = await controller.get_dashboard()
+            if "error" in result:
+                await update.message.reply_text(f"Error: {result.get('error')}")
+                return
+
+            await update.message.reply_text(
+                format_dashboard(result),
+                parse_mode="Markdown"
+            )
+        else:
+            project_name = context.args[0]
+            result = await controller.get_project(project_name)
+
+            if "error" in result:
+                await update.message.reply_text(f"Error: {result.get('error')}")
+                return
+
+            await update.message.reply_text(
+                format_project_status(result),
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.error(f"Error in project_status_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /dashboard command. ALWAYS responds."""
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_dashboard", {})
+
         result = await controller.get_dashboard()
+
         if "error" in result:
             await update.message.reply_text(f"Error: {result.get('error')}")
             return
@@ -1048,35 +1176,9 @@ async def project_status_command(update: Update, context: ContextTypes.DEFAULT_T
             format_dashboard(result),
             parse_mode="Markdown"
         )
-    else:
-        project_name = context.args[0]
-        result = await controller.get_project(project_name)
-
-        if "error" in result:
-            await update.message.reply_text(f"Error: {result.get('error')}")
-            return
-
-        await update.message.reply_text(
-            format_project_status(result),
-            parse_mode="Markdown"
-        )
-
-
-async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /dashboard command."""
-    user_id = update.effective_user.id
-    safety.log_action(user_id, "view_dashboard", {})
-
-    result = await controller.get_dashboard()
-
-    if "error" in result:
-        await update.message.reply_text(f"Error: {result.get('error')}")
-        return
-
-    await update.message.reply_text(
-        format_dashboard(result),
-        parse_mode="Markdown"
-    )
+    except Exception as e:
+        logger.error(f"Error in dashboard_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
 
 
 # -----------------------------------------------------------------------------
@@ -1244,40 +1346,44 @@ async def prod_approve_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /notifications command."""
-    user_id = update.effective_user.id
-    safety.log_action(user_id, "view_notifications", {})
+    """Handle /notifications command. ALWAYS responds."""
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_notifications", {})
 
-    project_name = context.args[0] if context.args else None
-    result = await controller.get_notifications(project_name)
+        project_name = context.args[0] if context.args else None
+        result = await controller.get_notifications(project_name)
 
-    if "error" in result:
-        await update.message.reply_text(f"Error: {result.get('error')}")
-        return
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
 
-    notifications = result.get("notifications", [])
-    if not notifications:
-        await update.message.reply_text("✅ No pending notifications.")
-        return
+        notifications = result.get("notifications", [])
+        if not notifications:
+            await update.message.reply_text("✅ No pending notifications.")
+            return
 
-    first_notif = notifications[0]
-    text, keyboard = format_notification(first_notif)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        first_notif = notifications[0]
+        text, keyboard = format_notification(first_notif)
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
-    if len(notifications) > 1:
-        lines = [f"\n*+{len(notifications) - 1} more notifications:*\n"]
-        for notif in notifications[1:10]:
-            emoji = "🔔"
-            if notif.get("notification_type") == "testing_ready":
-                emoji = "🎯"
-            elif notif.get("notification_type") == "approval_required":
-                emoji = "⚠️"
-            elif notif.get("notification_type") == "ci_result":
-                emoji = "🔧"
+        if len(notifications) > 1:
+            lines = [f"\n*+{len(notifications) - 1} more notifications:*\n"]
+            for notif in notifications[1:10]:
+                emoji = "🔔"
+                if notif.get("notification_type") == "testing_ready":
+                    emoji = "🎯"
+                elif notif.get("notification_type") == "approval_required":
+                    emoji = "⚠️"
+                elif notif.get("notification_type") == "ci_result":
+                    emoji = "🔧"
 
-            lines.append(f"{emoji} {notif.get('title', 'Notification')}")
+                lines.append(f"{emoji} {notif.get('title', 'Notification')}")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in notifications_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
 
 
 # -----------------------------------------------------------------------------
@@ -1285,209 +1391,214 @@ async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TY
 # -----------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle plain text messages - Natural language project creation."""
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
+    try:
+        user_id = update.effective_user.id
+        text = update.message.text.strip()
 
-    awaiting = user_state.awaiting_input.get(user_id)
+        awaiting = user_state.awaiting_input.get(user_id)
 
-    if awaiting == "project_description":
-        del user_state.awaiting_input[user_id]
-        await create_project_from_description(update, text, str(user_id))
-        return
-
-    elif awaiting == "feedback_explanation":
-        feedback_ctx = user_state.pending_feedback.get(user_id)
-        if feedback_ctx:
-            is_valid, error_msg = safety.validate_feedback_has_explanation(
-                feedback_ctx["feedback_type"],
-                text
-            )
-            if not is_valid:
-                await update.message.reply_text(
-                    f"Warning: {error_msg}\n\nPlease provide more details:"
-                )
-                return
-
+        if awaiting == "project_description":
             del user_state.awaiting_input[user_id]
-            del user_state.pending_feedback[user_id]
-
-            safety.log_action(user_id, "submit_feedback", {
-                "project": feedback_ctx["project_name"],
-                "aspect": feedback_ctx["aspect"],
-                "type": feedback_ctx["feedback_type"]
-            })
-
-            result = await controller.submit_feedback(
-                project_name=feedback_ctx["project_name"],
-                aspect=feedback_ctx["aspect"],
-                feedback_type=feedback_ctx["feedback_type"],
-                user_id=str(user_id),
-                explanation=text
-            )
-
-            if "error" in result:
-                await update.message.reply_text(f"Error: {result.get('error')}")
-                return
-
-            emoji_map = {"bug": "Bug", "improvements": "Improvement", "reject": "Rejected"}
-            feedback_label = emoji_map.get(feedback_ctx["feedback_type"], "Feedback")
-            await update.message.reply_text(
-                f"*{feedback_label} Submitted*\n\n"
-                f"Project: {feedback_ctx['project_name']}\n"
-                f"Aspect: {feedback_ctx['aspect']}\n"
-                f"Type: {feedback_ctx['feedback_type']}\n"
-                f"Action: {result.get('action_taken', 'Processed')}\n\n"
-                f"Next steps:\n" + "\n".join(f"- {s}" for s in result.get('next_steps', [])),
-                parse_mode="Markdown"
-            )
-        return
-
-    elif awaiting == "rejection_explanation":
-        feedback_ctx = user_state.pending_feedback.get(user_id)
-        if feedback_ctx:
-            if len(text.strip()) < 10:
-                await update.message.reply_text(
-                    "Rejection reason must be at least 10 characters. Please explain:"
-                )
-                return
-
-            del user_state.awaiting_input[user_id]
-            del user_state.pending_feedback[user_id]
-
-            safety.log_action(user_id, "submit_rejection", {
-                "project": feedback_ctx["project_name"],
-                "aspect": feedback_ctx["aspect"],
-                "reason": feedback_ctx.get("rejection_reason", "other")
-            })
-
-            rejection_reason = feedback_ctx.get("rejection_reason", "other")
-            result = await controller.submit_feedback(
-                project_name=feedback_ctx["project_name"],
-                aspect=feedback_ctx["aspect"],
-                feedback_type=FeedbackType.REJECT.value,
-                user_id=str(user_id),
-                explanation=f"[{rejection_reason}] {text}"
-            )
-
-            if "error" in result:
-                await update.message.reply_text(f"Error: {result.get('error')}")
-                return
-
-            await update.message.reply_text(
-                f"*Rejected*\n\n"
-                f"Project: {feedback_ctx['project_name']}\n"
-                f"Aspect: {feedback_ctx['aspect']}\n"
-                f"Reason: {rejection_reason}\n"
-                f"Action: {result.get('action_taken', 'Processed')}\n\n"
-                f"Next steps:\n" + "\n".join(f"- {s}" for s in result.get('next_steps', [])),
-                parse_mode="Markdown"
-            )
-        return
-
-    elif awaiting == "prod_justification":
-        feedback_ctx = user_state.pending_feedback.get(user_id)
-        if feedback_ctx:
-            if len(text.strip()) < 20:
-                await update.message.reply_text(
-                    "Justification must be at least 20 characters. Please explain why:"
-                )
-                return
-
-            feedback_ctx["justification"] = text
-            feedback_ctx["step"] = "rollback_plan"
-            user_state.awaiting_input[user_id] = "prod_rollback_plan"
-
-            await update.message.reply_text(
-                "Please provide your rollback plan in case of issues:"
-            )
-        return
-
-    elif awaiting == "prod_rollback_plan":
-        feedback_ctx = user_state.pending_feedback.get(user_id)
-        if feedback_ctx:
-            if len(text.strip()) < 10:
-                await update.message.reply_text(
-                    "Rollback plan must be at least 10 characters. Please describe:"
-                )
-                return
-
-            del user_state.awaiting_input[user_id]
-
-            deployment_id = feedback_ctx.get("deployment_id")
-
-            safety.log_action(user_id, "prod_approval_attempt", {
-                "project": feedback_ctx["project_name"],
-                "aspect": feedback_ctx["aspect"]
-            })
-
-            result = await controller.approve_production(
-                project_name=feedback_ctx["project_name"],
-                aspect=feedback_ctx["aspect"],
-                user_id=str(user_id),
-                justification=feedback_ctx["justification"],
-                risk_acknowledged=True,
-                rollback_plan=text
-            )
-
-            if "error" in result:
-                safety.log_action(user_id, "prod_approval_failed", {
-                    "project": feedback_ctx["project_name"],
-                    "error": result.get("error")
-                })
-                del user_state.pending_feedback[user_id]
-                await update.message.reply_text(f"Error: {result.get('error')}")
-                return
-
-            if deployment_id:
-                if deployment_id not in user_state.approval_history:
-                    user_state.approval_history[deployment_id] = []
-                user_state.approval_history[deployment_id].append({
-                    "user_id": user_id,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "type": "production_approval"
-                })
-
-            del user_state.pending_feedback[user_id]
-
-            if result.get("approved"):
-                safety.log_action(user_id, "prod_approval_success", {
-                    "project": feedback_ctx["project_name"],
-                    "aspect": feedback_ctx["aspect"],
-                    "approval_id": result.get("approval_id")
-                })
-                await update.message.reply_text(
-                    f"*Production Deployment Approved*\n\n"
-                    f"Project: {feedback_ctx['project_name']}\n"
-                    f"Aspect: {feedback_ctx['aspect']}\n"
-                    f"Status: {result.get('deployment_status', 'Processing')}\n"
-                    f"URL: {result.get('production_url', 'Pending')}",
-                    parse_mode="Markdown"
-                )
-            else:
-                await update.message.reply_text(
-                    f"*Production Approval Failed*\n\n"
-                    f"{result.get('message', 'Unknown error')}",
-                    parse_mode="Markdown"
-                )
-        return
-
-    # Default: Treat as project description
-    user_role = get_user_role(user_id)
-    if user_role in [UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER]:
-        if len(text) > 20 and any(word in text.lower() for word in [
-            "build", "create", "make", "develop", "want", "need", "app", "website",
-            "system", "platform", "saas", "crm", "api", "service"
-        ]):
             await create_project_from_description(update, text, str(user_id))
             return
 
-    await update.message.reply_text(
-        "I did not understand that. You can:\n\n"
-        "- Describe a project to create\n"
-        "- Use /help to see available commands\n"
-        "- Use /projects to view projects\n"
-        "- Use /health to check system status"
-    )
+        elif awaiting == "feedback_explanation":
+            feedback_ctx = user_state.pending_feedback.get(user_id)
+            if feedback_ctx:
+                is_valid, error_msg = safety.validate_feedback_has_explanation(
+                    feedback_ctx["feedback_type"],
+                    text
+                )
+                if not is_valid:
+                    await update.message.reply_text(
+                        f"Warning: {error_msg}\n\nPlease provide more details:"
+                    )
+                    return
+
+                del user_state.awaiting_input[user_id]
+                del user_state.pending_feedback[user_id]
+
+                safety.log_action(user_id, "submit_feedback", {
+                    "project": feedback_ctx["project_name"],
+                    "aspect": feedback_ctx["aspect"],
+                    "type": feedback_ctx["feedback_type"]
+                })
+
+                result = await controller.submit_feedback(
+                    project_name=feedback_ctx["project_name"],
+                    aspect=feedback_ctx["aspect"],
+                    feedback_type=feedback_ctx["feedback_type"],
+                    user_id=str(user_id),
+                    explanation=text
+                )
+
+                if "error" in result:
+                    await update.message.reply_text(f"Error: {result.get('error')}")
+                    return
+
+                emoji_map = {"bug": "Bug", "improvements": "Improvement", "reject": "Rejected"}
+                feedback_label = emoji_map.get(feedback_ctx["feedback_type"], "Feedback")
+                await update.message.reply_text(
+                    f"*{feedback_label} Submitted*\n\n"
+                    f"Project: {feedback_ctx['project_name']}\n"
+                    f"Aspect: {feedback_ctx['aspect']}\n"
+                    f"Type: {feedback_ctx['feedback_type']}\n"
+                    f"Action: {result.get('action_taken', 'Processed')}\n\n"
+                    f"Next steps:\n" + "\n".join(f"- {s}" for s in result.get('next_steps', [])),
+                    parse_mode="Markdown"
+                )
+            return
+
+        elif awaiting == "rejection_explanation":
+            feedback_ctx = user_state.pending_feedback.get(user_id)
+            if feedback_ctx:
+                if len(text.strip()) < 10:
+                    await update.message.reply_text(
+                        "Rejection reason must be at least 10 characters. Please explain:"
+                    )
+                    return
+
+                del user_state.awaiting_input[user_id]
+                del user_state.pending_feedback[user_id]
+
+                safety.log_action(user_id, "submit_rejection", {
+                    "project": feedback_ctx["project_name"],
+                    "aspect": feedback_ctx["aspect"],
+                    "reason": feedback_ctx.get("rejection_reason", "other")
+                })
+
+                rejection_reason = feedback_ctx.get("rejection_reason", "other")
+                result = await controller.submit_feedback(
+                    project_name=feedback_ctx["project_name"],
+                    aspect=feedback_ctx["aspect"],
+                    feedback_type=FeedbackType.REJECT.value,
+                    user_id=str(user_id),
+                    explanation=f"[{rejection_reason}] {text}"
+                )
+
+                if "error" in result:
+                    await update.message.reply_text(f"Error: {result.get('error')}")
+                    return
+
+                await update.message.reply_text(
+                    f"*Rejected*\n\n"
+                    f"Project: {feedback_ctx['project_name']}\n"
+                    f"Aspect: {feedback_ctx['aspect']}\n"
+                    f"Reason: {rejection_reason}\n"
+                    f"Action: {result.get('action_taken', 'Processed')}\n\n"
+                    f"Next steps:\n" + "\n".join(f"- {s}" for s in result.get('next_steps', [])),
+                    parse_mode="Markdown"
+                )
+            return
+
+        elif awaiting == "prod_justification":
+            feedback_ctx = user_state.pending_feedback.get(user_id)
+            if feedback_ctx:
+                if len(text.strip()) < 20:
+                    await update.message.reply_text(
+                        "Justification must be at least 20 characters. Please explain why:"
+                    )
+                    return
+
+                feedback_ctx["justification"] = text
+                feedback_ctx["step"] = "rollback_plan"
+                user_state.awaiting_input[user_id] = "prod_rollback_plan"
+
+                await update.message.reply_text(
+                    "Please provide your rollback plan in case of issues:"
+                )
+            return
+
+        elif awaiting == "prod_rollback_plan":
+            feedback_ctx = user_state.pending_feedback.get(user_id)
+            if feedback_ctx:
+                if len(text.strip()) < 10:
+                    await update.message.reply_text(
+                        "Rollback plan must be at least 10 characters. Please describe:"
+                    )
+                    return
+
+                del user_state.awaiting_input[user_id]
+
+                deployment_id = feedback_ctx.get("deployment_id")
+
+                safety.log_action(user_id, "prod_approval_attempt", {
+                    "project": feedback_ctx["project_name"],
+                    "aspect": feedback_ctx["aspect"]
+                })
+
+                result = await controller.approve_production(
+                    project_name=feedback_ctx["project_name"],
+                    aspect=feedback_ctx["aspect"],
+                    user_id=str(user_id),
+                    justification=feedback_ctx["justification"],
+                    risk_acknowledged=True,
+                    rollback_plan=text
+                )
+
+                if "error" in result:
+                    safety.log_action(user_id, "prod_approval_failed", {
+                        "project": feedback_ctx["project_name"],
+                        "error": result.get("error")
+                    })
+                    del user_state.pending_feedback[user_id]
+                    await update.message.reply_text(f"Error: {result.get('error')}")
+                    return
+
+                if deployment_id:
+                    if deployment_id not in user_state.approval_history:
+                        user_state.approval_history[deployment_id] = []
+                    user_state.approval_history[deployment_id].append({
+                        "user_id": user_id,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "type": "production_approval"
+                    })
+
+                del user_state.pending_feedback[user_id]
+
+                if result.get("approved"):
+                    safety.log_action(user_id, "prod_approval_success", {
+                        "project": feedback_ctx["project_name"],
+                        "aspect": feedback_ctx["aspect"],
+                        "approval_id": result.get("approval_id")
+                    })
+                    await update.message.reply_text(
+                        f"*Production Deployment Approved*\n\n"
+                        f"Project: {feedback_ctx['project_name']}\n"
+                        f"Aspect: {feedback_ctx['aspect']}\n"
+                        f"Status: {result.get('deployment_status', 'Processing')}\n"
+                        f"URL: {result.get('production_url', 'Pending')}",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"*Production Approval Failed*\n\n"
+                        f"{result.get('message', 'Unknown error')}",
+                        parse_mode="Markdown"
+                    )
+            return
+
+        # Default: Treat as project description
+        user_role = get_user_role(user_id)
+        if user_role in [UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER]:
+            if len(text) > 20 and any(word in text.lower() for word in [
+                "build", "create", "make", "develop", "want", "need", "app", "website",
+                "system", "platform", "saas", "crm", "api", "service"
+            ]):
+                await create_project_from_description(update, text, str(user_id))
+                return
+
+        await update.message.reply_text(
+            "I did not understand that. You can:\n\n"
+            "- Describe a project to create\n"
+            "- Use /help to see available commands\n"
+            "- Use /projects to view projects\n"
+            "- Use /health to check system status\n"
+            "- Use /whoami to check your identity"
+        )
+    except Exception as e:
+        logger.error(f"Error in handle_message: {e}")
+        await update.message.reply_text(f"Error processing message: {str(e)}")
 
 
 async def create_project_from_description(
@@ -1496,37 +1607,41 @@ async def create_project_from_description(
     user_id: str
 ) -> None:
     """Create a project from natural language description."""
-    logger.info(f"Creating project from description: {description[:50]}...")
+    try:
+        logger.info(f"Creating project from description: {description[:50]}...")
 
-    await update.message.reply_text(
-        "Creating your project...\n\n"
-        "Claude is analyzing your requirements and generating the project structure."
-    )
-
-    result = await controller.create_project(
-        description=description,
-        user_id=user_id
-    )
-
-    if "error" in result:
         await update.message.reply_text(
-            f"*Error creating project:*\n{result.get('error')}",
+            "Creating your project...\n\n"
+            "Claude is analyzing your requirements and generating the project structure."
+        )
+
+        result = await controller.create_project(
+            description=description,
+            user_id=user_id
+        )
+
+        if "error" in result:
+            await update.message.reply_text(
+                f"*Error creating project:*\n{result.get('error')}",
+                parse_mode="Markdown"
+            )
+            return
+
+        aspects_list = "\n".join(f"- {a}" for a in result.get("aspects_initialized", []))
+        next_steps = "\n".join(f"- {s}" for s in result.get("next_steps", []))
+
+        await update.message.reply_text(
+            f"*Project Created!*\n\n"
+            f"*Name:* {result.get('project_name', 'Unknown')}\n"
+            f"*Contract ID:* {result.get('contract_id', 'Unknown')}\n\n"
+            f"*Aspects Initialized:*\n{aspects_list}\n\n"
+            f"*Next Steps:*\n{next_steps}\n\n"
+            f"Use /projects to view all projects.",
             parse_mode="Markdown"
         )
-        return
-
-    aspects_list = "\n".join(f"- {a}" for a in result.get("aspects_initialized", []))
-    next_steps = "\n".join(f"- {s}" for s in result.get("next_steps", []))
-
-    await update.message.reply_text(
-        f"*Project Created!*\n\n"
-        f"*Name:* {result.get('project_name', 'Unknown')}\n"
-        f"*Contract ID:* {result.get('contract_id', 'Unknown')}\n\n"
-        f"*Aspects Initialized:*\n{aspects_list}\n\n"
-        f"*Next Steps:*\n{next_steps}\n\n"
-        f"Use /projects to view all projects.",
-        parse_mode="Markdown"
-    )
+    except Exception as e:
+        logger.error(f"Error in create_project_from_description: {e}")
+        await update.message.reply_text(f"Error creating project: {str(e)}")
 
 
 # -----------------------------------------------------------------------------
@@ -1534,135 +1649,148 @@ async def create_project_from_description(
 # -----------------------------------------------------------------------------
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline button callbacks."""
-    query = update.callback_query
-    await query.answer()
+    try:
+        query = update.callback_query
+        await query.answer()
 
-    user_id = update.effective_user.id
-    user_role = get_user_role(user_id)
-    data = query.data
-    parts = data.split(":")
+        user_id = update.effective_user.id
+        user_role = get_user_role(user_id)
+        data = query.data
+        parts = data.split(":")
 
-    if len(parts) < 3:
-        await query.edit_message_text("Invalid callback data.")
-        return
-
-    action = parts[0]
-    project_name = parts[1]
-    aspect = parts[2]
-
-    # Check role for approval actions
-    if action in [CallbackAction.FEEDBACK_APPROVE, CallbackAction.PROD_APPROVE]:
-        if user_role not in [UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER]:
-            await query.edit_message_text("Access denied. Insufficient permissions.")
+        if len(parts) < 3:
+            await query.edit_message_text("Invalid callback data.")
             return
 
-    if action == CallbackAction.FEEDBACK_APPROVE:
-        safety.log_action(user_id, "approve_via_button", {
-            "project": project_name,
-            "aspect": aspect
-        })
+        action = parts[0]
+        project_name = parts[1]
+        aspect = parts[2]
 
-        result = await controller.submit_feedback(
-            project_name=project_name,
-            aspect=aspect,
-            feedback_type=FeedbackType.APPROVE.value,
-            user_id=str(user_id)
-        )
+        # Check role for approval actions (compare string values)
+        if action in [CallbackAction.FEEDBACK_APPROVE.value, CallbackAction.PROD_APPROVE.value]:
+            if user_role not in [UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER]:
+                await query.edit_message_text("Access denied. Insufficient permissions.")
+                return
 
-        if "error" in result:
-            await query.edit_message_text(f"Error: {result.get('error')}")
-            return
+        if action == CallbackAction.FEEDBACK_APPROVE.value:
+            safety.log_action(user_id, "approve_via_button", {
+                "project": project_name,
+                "aspect": aspect
+            })
 
-        await query.edit_message_text(
-            f"*Approved!*\n\n"
-            f"Project: {project_name}\n"
-            f"Aspect: {aspect}\n"
-            f"Action: {result.get('action_taken', 'Unknown')}\n\n"
-            f"Next steps:\n" + "\n".join(f"- {s}" for s in result.get('next_steps', [])),
-            parse_mode="Markdown"
-        )
-
-    elif action in [
-        CallbackAction.FEEDBACK_BUG,
-        CallbackAction.FEEDBACK_IMPROVEMENTS,
-        CallbackAction.FEEDBACK_REJECT
-    ]:
-        feedback_type_map = {
-            CallbackAction.FEEDBACK_BUG: FeedbackType.BUG.value,
-            CallbackAction.FEEDBACK_IMPROVEMENTS: FeedbackType.IMPROVEMENTS.value,
-            CallbackAction.FEEDBACK_REJECT: FeedbackType.REJECT.value,
-        }
-        feedback_type = feedback_type_map[action]
-
-        if action == CallbackAction.FEEDBACK_REJECT:
-            # Show rejection reason options
-            await query.edit_message_text(
-                f"*Rejection for {project_name} - {aspect}*\n\n"
-                f"Please select the rejection reason:",
-                parse_mode="Markdown",
-                reply_markup=get_rejection_reason_keyboard(project_name, aspect)
+            result = await controller.submit_feedback(
+                project_name=project_name,
+                aspect=aspect,
+                feedback_type=FeedbackType.APPROVE.value,
+                user_id=str(user_id)
             )
-            return
 
-        user_state.pending_feedback[user_id] = {
-            "project_name": project_name,
-            "aspect": aspect,
-            "feedback_type": feedback_type
-        }
-        user_state.awaiting_input[user_id] = "feedback_explanation"
+            if "error" in result:
+                await query.edit_message_text(f"Error: {result.get('error')}")
+                return
 
-        type_label = feedback_type.replace("_", " ").title()
-        await query.edit_message_text(
-            f"*{type_label} Feedback*\n\n"
-            f"Project: {project_name}\n"
-            f"Aspect: {aspect}\n\n"
-            f"Please describe the issue or suggestion in detail.\n"
-            f"(This explanation is mandatory)",
-            parse_mode="Markdown"
-        )
+            await query.edit_message_text(
+                f"*Approved!*\n\n"
+                f"Project: {project_name}\n"
+                f"Aspect: {aspect}\n"
+                f"Action: {result.get('action_taken', 'Unknown')}\n\n"
+                f"Next steps:\n" + "\n".join(f"- {s}" for s in result.get('next_steps', [])),
+                parse_mode="Markdown"
+            )
 
-    elif action in [
-        CallbackAction.REJECT_BUG,
-        CallbackAction.REJECT_IMPROVEMENT,
-        CallbackAction.REJECT_INVALID,
-        CallbackAction.REJECT_OTHER
-    ]:
-        reason_map = {
-            CallbackAction.REJECT_BUG: RejectionReason.BUG.value,
-            CallbackAction.REJECT_IMPROVEMENT: RejectionReason.IMPROVEMENT.value,
-            CallbackAction.REJECT_INVALID: RejectionReason.INVALID_REQUIREMENT.value,
-            CallbackAction.REJECT_OTHER: RejectionReason.OTHER.value,
-        }
-        rejection_reason = reason_map[action]
+        elif action in [
+            CallbackAction.FEEDBACK_BUG.value,
+            CallbackAction.FEEDBACK_IMPROVEMENTS.value,
+            CallbackAction.FEEDBACK_REJECT.value
+        ]:
+            feedback_type_map = {
+                CallbackAction.FEEDBACK_BUG.value: FeedbackType.BUG.value,
+                CallbackAction.FEEDBACK_IMPROVEMENTS.value: FeedbackType.IMPROVEMENTS.value,
+                CallbackAction.FEEDBACK_REJECT.value: FeedbackType.REJECT.value,
+            }
+            feedback_type = feedback_type_map[action]
 
-        user_state.pending_feedback[user_id] = {
-            "project_name": project_name,
-            "aspect": aspect,
-            "feedback_type": FeedbackType.REJECT.value,
-            "rejection_reason": rejection_reason
-        }
-        user_state.awaiting_input[user_id] = "rejection_explanation"
+            if action == CallbackAction.FEEDBACK_REJECT.value:
+                # Show rejection reason options
+                await query.edit_message_text(
+                    f"*Rejection for {project_name} - {aspect}*\n\n"
+                    f"Please select the rejection reason:",
+                    parse_mode="Markdown",
+                    reply_markup=get_rejection_reason_keyboard(project_name, aspect)
+                )
+                return
 
-        await query.edit_message_text(
-            f"*Rejection: {rejection_reason.replace('_', ' ').title()}*\n\n"
-            f"Project: {project_name}\n"
-            f"Aspect: {aspect}\n\n"
-            f"Please explain the rejection reason in detail:",
-            parse_mode="Markdown"
-        )
+            user_state.pending_feedback[user_id] = {
+                "project_name": project_name,
+                "aspect": aspect,
+                "feedback_type": feedback_type
+            }
+            user_state.awaiting_input[user_id] = "feedback_explanation"
+
+            type_label = feedback_type.replace("_", " ").title()
+            await query.edit_message_text(
+                f"*{type_label} Feedback*\n\n"
+                f"Project: {project_name}\n"
+                f"Aspect: {aspect}\n\n"
+                f"Please describe the issue or suggestion in detail.\n"
+                f"(This explanation is mandatory)",
+                parse_mode="Markdown"
+            )
+
+        elif action in [
+            CallbackAction.REJECT_BUG.value,
+            CallbackAction.REJECT_IMPROVEMENT.value,
+            CallbackAction.REJECT_INVALID.value,
+            CallbackAction.REJECT_OTHER.value
+        ]:
+            reason_map = {
+                CallbackAction.REJECT_BUG.value: RejectionReason.BUG.value,
+                CallbackAction.REJECT_IMPROVEMENT.value: RejectionReason.IMPROVEMENT.value,
+                CallbackAction.REJECT_INVALID.value: RejectionReason.INVALID_REQUIREMENT.value,
+                CallbackAction.REJECT_OTHER.value: RejectionReason.OTHER.value,
+            }
+            rejection_reason = reason_map[action]
+
+            user_state.pending_feedback[user_id] = {
+                "project_name": project_name,
+                "aspect": aspect,
+                "feedback_type": FeedbackType.REJECT.value,
+                "rejection_reason": rejection_reason
+            }
+            user_state.awaiting_input[user_id] = "rejection_explanation"
+
+            await query.edit_message_text(
+                f"*Rejection: {rejection_reason.replace('_', ' ').title()}*\n\n"
+                f"Project: {project_name}\n"
+                f"Aspect: {aspect}\n\n"
+                f"Please explain the rejection reason in detail:",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text(f"Unknown action: {action}")
+    except Exception as e:
+        logger.error(f"Error in handle_callback: {e}")
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"Error: {str(e)}")
 
 
 # -----------------------------------------------------------------------------
 # Error Handler
 # -----------------------------------------------------------------------------
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle errors."""
+    """Handle errors - ALWAYS tries to respond."""
     logger.error(f"Update {update} caused error {context.error}")
 
-    if update and update.effective_message:
-        await update.effective_message.reply_text(
-            "An error occurred. Please try again later."
-        )
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "An error occurred. Please try again later.\n"
+                f"Error: {str(context.error)[:100]}"
+            )
+        elif update and update.callback_query:
+            await update.callback_query.answer(f"Error: {str(context.error)[:50]}")
+    except Exception as e:
+        logger.error(f"Failed to send error response: {e}")
 
 
 # -----------------------------------------------------------------------------
@@ -1684,6 +1812,9 @@ def main():
             logger.info(f"Role {role.value}: {len(users)} users configured")
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Identity command (Phase 13.4)
+    application.add_handler(CommandHandler("whoami", whoami_command))
 
     # Health & Status commands (Phase 13.3)
     application.add_handler(CommandHandler("health", health_command))
