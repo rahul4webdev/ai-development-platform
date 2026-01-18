@@ -529,6 +529,9 @@ None
 | Testing Domain | aitesting.mybd.in |
 | Production Domain | ai.mybd.in |
 | Hosting Provider | VPS - AlmaLinux 9 + CyberPanel + OpenLiteSpeed |
+| VPS IP Address | 82.25.110.109 |
+| VPS SSH Access | ssh root@82.25.110.109 |
+| VPS Web Root | /home/aitesting.mybd.in/public_html |
 | Tech Stack | Python + FastAPI (confirmed) |
 | Telegram Bot | Token to be created later |
 
