@@ -1,5 +1,5 @@
 """
-Telegram Bot - Phase 13.3-13.9
+Telegram Bot - Phase 13.3-13.12
 
 Production Control Plane for AI Development Platform.
 
@@ -11,6 +11,9 @@ Features:
 - CI trigger rules (13.7)
 - Dashboard API integration (13.8)
 - Multi-aspect project support (13.9)
+- Rate limiting (13.10)
+- Timeouts & retries (13.11)
+- Degraded mode handling (13.12)
 
 Safety:
 - Bot cannot trigger prod deploy directly
@@ -18,6 +21,8 @@ Safety:
 - Bot cannot self-approve
 - All actions logged
 - Dual approval rules enforced via controller
+- Rate limiting prevents abuse
+- Degraded mode protects system integrity
 """
 
 import asyncio
@@ -26,9 +31,11 @@ import os
 import sys
 import subprocess
 import resource
+from collections import defaultdict
 from datetime import datetime, timedelta
 from enum import Enum
 from functools import wraps
+from threading import Lock
 from typing import Optional, Dict, Any, List, Callable, Tuple
 
 import httpx
@@ -72,8 +79,23 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.13.10"
+BOT_VERSION = "0.13.12"
 BOT_START_TIME = datetime.utcnow()
+
+# -----------------------------------------------------------------------------
+# Phase 13.11: Timeout & Retry Configuration
+# -----------------------------------------------------------------------------
+API_TIMEOUT_DEFAULT = 30.0  # seconds
+API_TIMEOUT_CI_CHECK = 60.0  # CI checks may take longer
+API_MAX_RETRIES = 3
+API_RETRY_BACKOFF_BASE = 1.0  # seconds, doubles each retry
+# Actions that should NOT be retried (destructive/stateful)
+NO_RETRY_ACTIONS = frozenset([
+    "approve_production",
+    "submit_feedback",
+    "create_project",
+    "deploy",
+])
 
 # -----------------------------------------------------------------------------
 # Phase 13.4: Role System
@@ -251,10 +273,369 @@ safety = SafetyGuardrails()
 
 
 # -----------------------------------------------------------------------------
-# HTTP Client for Controller Communication
+# Phase 13.10: Rate Limiting
+# -----------------------------------------------------------------------------
+class RateLimiter:
+    """
+    Per-user, per-command rate limiting with role-based thresholds.
+    Uses in-memory TTL structure with automatic cleanup.
+    """
+
+    # Role-based rate limits: (requests, window_seconds)
+    ROLE_LIMITS: Dict[UserRole, Tuple[int, int]] = {
+        UserRole.OWNER: (100, 60),    # 100 requests per minute
+        UserRole.ADMIN: (60, 60),     # 60 requests per minute
+        UserRole.TESTER: (30, 60),    # 30 requests per minute
+        UserRole.VIEWER: (15, 60),    # 15 requests per minute
+    }
+
+    # Per-command limits (overrides role limit if stricter)
+    COMMAND_LIMITS: Dict[str, Tuple[int, int]] = {
+        "new_project": (5, 300),       # 5 per 5 minutes
+        "approve_production": (3, 300), # 3 per 5 minutes
+        "submit_feedback": (10, 60),    # 10 per minute
+        "create_project": (5, 300),     # 5 per 5 minutes
+    }
+
+    def __init__(self):
+        self._requests: Dict[int, List[datetime]] = defaultdict(list)
+        self._command_requests: Dict[Tuple[int, str], List[datetime]] = defaultdict(list)
+        self._lock = Lock()
+        self._last_cleanup = datetime.utcnow()
+        self._cleanup_interval = timedelta(minutes=5)
+
+    def _cleanup_old_entries(self) -> None:
+        """Remove expired entries to prevent memory growth."""
+        now = datetime.utcnow()
+        if now - self._last_cleanup < self._cleanup_interval:
+            return
+
+        cutoff = now - timedelta(minutes=10)
+
+        # Clean user requests
+        for user_id in list(self._requests.keys()):
+            self._requests[user_id] = [
+                t for t in self._requests[user_id] if t > cutoff
+            ]
+            if not self._requests[user_id]:
+                del self._requests[user_id]
+
+        # Clean command requests
+        for key in list(self._command_requests.keys()):
+            self._command_requests[key] = [
+                t for t in self._command_requests[key] if t > cutoff
+            ]
+            if not self._command_requests[key]:
+                del self._command_requests[key]
+
+        self._last_cleanup = now
+
+    def check_rate_limit(
+        self,
+        user_id: int,
+        user_role: UserRole,
+        command: Optional[str] = None
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Check if user is within rate limits.
+        Returns (allowed, error_message).
+        """
+        with self._lock:
+            self._cleanup_old_entries()
+            now = datetime.utcnow()
+
+            # Check role-based limit
+            max_requests, window_seconds = self.ROLE_LIMITS.get(
+                user_role, (15, 60)
+            )
+            window_start = now - timedelta(seconds=window_seconds)
+
+            # Filter to requests within window
+            self._requests[user_id] = [
+                t for t in self._requests[user_id] if t > window_start
+            ]
+
+            if len(self._requests[user_id]) >= max_requests:
+                safety.log_action(user_id, "rate_limit_exceeded", {
+                    "type": "role_limit",
+                    "role": user_role.value,
+                    "limit": max_requests,
+                    "window": window_seconds
+                })
+                return False, (
+                    f"Rate limit exceeded. "
+                    f"Please wait before making more requests. "
+                    f"(Limit: {max_requests} per {window_seconds}s)"
+                )
+
+            # Check command-specific limit if applicable
+            if command and command in self.COMMAND_LIMITS:
+                cmd_max, cmd_window = self.COMMAND_LIMITS[command]
+                cmd_start = now - timedelta(seconds=cmd_window)
+                key = (user_id, command)
+
+                self._command_requests[key] = [
+                    t for t in self._command_requests[key] if t > cmd_start
+                ]
+
+                if len(self._command_requests[key]) >= cmd_max:
+                    safety.log_action(user_id, "rate_limit_exceeded", {
+                        "type": "command_limit",
+                        "command": command,
+                        "limit": cmd_max,
+                        "window": cmd_window
+                    })
+                    return False, (
+                        f"Command rate limit exceeded for /{command}. "
+                        f"Please wait before trying again. "
+                        f"(Limit: {cmd_max} per {cmd_window}s)"
+                    )
+
+                self._command_requests[key].append(now)
+
+            # Record the request
+            self._requests[user_id].append(now)
+            return True, None
+
+
+rate_limiter = RateLimiter()
+
+
+def rate_limited(command_name: Optional[str] = None):
+    """Decorator to apply rate limiting to handlers."""
+    def decorator(func: Callable):
+        @wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            user_id = update.effective_user.id
+            user_role = get_user_role(user_id)
+
+            allowed, error_msg = rate_limiter.check_rate_limit(
+                user_id, user_role, command_name
+            )
+
+            if not allowed:
+                await update.message.reply_text(f"⏳ {error_msg}")
+                return
+
+            return await func(update, context, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
+# -----------------------------------------------------------------------------
+# Phase 13.12: System Mode & Degraded State Detection
+# -----------------------------------------------------------------------------
+class SystemMode(str, Enum):
+    """System operational modes."""
+    NORMAL = "normal"
+    DEGRADED = "degraded"
+    CRITICAL = "critical"
+
+
+class SystemStateManager:
+    """
+    Manages system state and degraded mode detection.
+    Auto-detects controller/CI availability and adjusts system mode.
+    """
+
+    def __init__(self):
+        self._mode = SystemMode.NORMAL
+        self._mode_lock = Lock()
+        self._last_controller_check: Optional[datetime] = None
+        self._controller_available = True
+        self._ci_available = True
+        self._degraded_reason: Optional[str] = None
+        self._owner_override_active = False
+        self._owner_override_justification: Optional[str] = None
+        self._owner_override_user: Optional[int] = None
+
+    @property
+    def mode(self) -> SystemMode:
+        """Get current system mode."""
+        with self._mode_lock:
+            return self._mode
+
+    @property
+    def degraded_reason(self) -> Optional[str]:
+        """Get reason for degraded state."""
+        with self._mode_lock:
+            return self._degraded_reason
+
+    def update_controller_status(self, available: bool, error: Optional[str] = None) -> None:
+        """Update controller availability status."""
+        with self._mode_lock:
+            self._controller_available = available
+            self._last_controller_check = datetime.utcnow()
+            self._recalculate_mode(error)
+
+    def update_ci_status(self, available: bool) -> None:
+        """Update CI availability status."""
+        with self._mode_lock:
+            self._ci_available = available
+            self._recalculate_mode()
+
+    def _recalculate_mode(self, error: Optional[str] = None) -> None:
+        """Recalculate system mode based on component availability."""
+        old_mode = self._mode
+
+        if not self._controller_available:
+            self._mode = SystemMode.CRITICAL
+            self._degraded_reason = f"Controller unavailable: {error or 'Connection failed'}"
+        elif not self._ci_available:
+            self._mode = SystemMode.DEGRADED
+            self._degraded_reason = "CI system unavailable"
+        else:
+            self._mode = SystemMode.NORMAL
+            self._degraded_reason = None
+            # Clear owner override when system returns to normal
+            if self._owner_override_active:
+                logger.info("System restored to NORMAL, clearing owner override")
+                self._owner_override_active = False
+                self._owner_override_justification = None
+                self._owner_override_user = None
+
+        if old_mode != self._mode:
+            logger.warning(
+                f"SYSTEM MODE CHANGE: {old_mode.value} -> {self._mode.value} "
+                f"(reason: {self._degraded_reason})"
+            )
+
+    def is_action_allowed(
+        self,
+        action: str,
+        user_id: int,
+        user_role: UserRole
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Check if an action is allowed in current system mode.
+        Returns (allowed, error_message).
+        """
+        with self._mode_lock:
+            # Read-only actions always allowed
+            read_only_actions = [
+                "health_check", "status", "projects_list", "dashboard",
+                "ledger", "whoami", "help", "start"
+            ]
+            if action in read_only_actions:
+                return True, None
+
+            # NORMAL mode: all actions allowed
+            if self._mode == SystemMode.NORMAL:
+                return True, None
+
+            # OWNER override check
+            if self._owner_override_active and user_role == UserRole.OWNER:
+                logger.warning(
+                    f"OWNER OVERRIDE: user={user_id} action={action} "
+                    f"justification={self._owner_override_justification}"
+                )
+                return True, None
+
+            # DEGRADED mode: block approvals and deployments
+            if self._mode == SystemMode.DEGRADED:
+                blocked_actions = [
+                    "approve_production", "deploy", "submit_feedback"
+                ]
+                if action in blocked_actions:
+                    return False, (
+                        f"⚠️ System is in DEGRADED mode ({self._degraded_reason}). "
+                        f"Action '{action}' is temporarily disabled. "
+                        f"Read-only commands are still available."
+                    )
+                return True, None
+
+            # CRITICAL mode: block all non-read actions
+            if self._mode == SystemMode.CRITICAL:
+                return False, (
+                    f"🚨 System is in CRITICAL mode ({self._degraded_reason}). "
+                    f"Only read-only commands are available. "
+                    f"Please wait for system recovery."
+                )
+
+            return True, None
+
+    def set_owner_override(
+        self,
+        user_id: int,
+        justification: str
+    ) -> Tuple[bool, str]:
+        """
+        Allow OWNER to override degraded mode restrictions.
+        Requires explicit justification.
+        """
+        with self._mode_lock:
+            if self._mode == SystemMode.NORMAL:
+                return False, "System is operating normally. No override needed."
+
+            if len(justification.strip()) < 20:
+                return False, "Override justification must be at least 20 characters."
+
+            self._owner_override_active = True
+            self._owner_override_justification = justification
+            self._owner_override_user = user_id
+
+            logger.warning(
+                f"OWNER OVERRIDE ACTIVATED: user={user_id} "
+                f"mode={self._mode.value} "
+                f"justification={justification}"
+            )
+
+            safety.log_action(user_id, "owner_override_activated", {
+                "mode": self._mode.value,
+                "reason": self._degraded_reason,
+                "justification": justification
+            })
+
+            return True, (
+                f"Override activated. You can now perform restricted actions. "
+                f"This has been logged for audit purposes."
+            )
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get current system state for /health display."""
+        with self._mode_lock:
+            return {
+                "mode": self._mode.value,
+                "controller_available": self._controller_available,
+                "ci_available": self._ci_available,
+                "degraded_reason": self._degraded_reason,
+                "owner_override_active": self._owner_override_active,
+                "last_check": self._last_controller_check.isoformat() if self._last_controller_check else None
+            }
+
+
+system_state = SystemStateManager()
+
+
+def check_system_mode(action: str):
+    """Decorator to check system mode before executing action."""
+    def decorator(func: Callable):
+        @wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            user_id = update.effective_user.id
+            user_role = get_user_role(user_id)
+
+            allowed, error_msg = system_state.is_action_allowed(
+                action, user_id, user_role
+            )
+
+            if not allowed:
+                await update.message.reply_text(error_msg)
+                return
+
+            return await func(update, context, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
+# -----------------------------------------------------------------------------
+# HTTP Client for Controller Communication (Phase 13.11: Timeouts & Retries)
 # -----------------------------------------------------------------------------
 class ControllerClient:
-    """HTTP client for communicating with the controller API."""
+    """
+    HTTP client for communicating with the controller API.
+    Phase 13.11: Includes timeout management and retry logic with exponential backoff.
+    """
 
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
@@ -266,33 +647,92 @@ class ControllerClient:
         method: str,
         endpoint: str,
         data: Optional[Dict] = None,
-        params: Optional[Dict] = None
+        params: Optional[Dict] = None,
+        action_name: Optional[str] = None,
+        timeout: Optional[float] = None
     ) -> Dict[str, Any]:
-        """Make HTTP request to controller."""
-        url = f"{self.base_url}{endpoint}"
-        try:
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                if method.upper() == "GET":
-                    response = await client.get(url, params=params)
-                elif method.upper() == "POST":
-                    response = await client.post(url, json=data)
-                else:
-                    raise ValueError(f"Unsupported method: {method}")
+        """
+        Make HTTP request to controller with retry logic (Phase 13.11).
 
-                response.raise_for_status()
-                return response.json()
-        except httpx.TimeoutException:
-            logger.error(f"Timeout connecting to controller: {url}")
-            return {"error": "Controller timeout", "status": "error"}
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error from controller: {e.response.status_code}")
+        Args:
+            method: HTTP method (GET/POST)
+            endpoint: API endpoint
+            data: Request body for POST
+            params: Query parameters for GET
+            action_name: Name of action for retry decision
+            timeout: Custom timeout (defaults to API_TIMEOUT_DEFAULT)
+        """
+        url = f"{self.base_url}{endpoint}"
+        request_timeout = timeout or API_TIMEOUT_DEFAULT
+
+        # Determine if retries are allowed for this action
+        allow_retries = action_name not in NO_RETRY_ACTIONS if action_name else True
+        max_attempts = API_MAX_RETRIES if allow_retries else 1
+
+        last_error = None
+
+        for attempt in range(max_attempts):
             try:
-                return e.response.json()
-            except Exception:
-                return {"error": str(e), "status": "error"}
-        except Exception as e:
-            logger.error(f"Error connecting to controller: {e}")
-            return {"error": str(e), "status": "error"}
+                async with httpx.AsyncClient(timeout=request_timeout) as client:
+                    if method.upper() == "GET":
+                        response = await client.get(url, params=params)
+                    elif method.upper() == "POST":
+                        response = await client.post(url, json=data)
+                    else:
+                        raise ValueError(f"Unsupported method: {method}")
+
+                    response.raise_for_status()
+                    result = response.json()
+
+                    # Update system state on successful controller contact
+                    system_state.update_controller_status(True)
+
+                    return result
+
+            except httpx.TimeoutException as e:
+                last_error = e
+                logger.warning(
+                    f"Timeout on attempt {attempt + 1}/{max_attempts} to {url}: {e}"
+                )
+                # Update system state
+                system_state.update_controller_status(False, "Timeout")
+
+            except httpx.ConnectError as e:
+                last_error = e
+                logger.warning(
+                    f"Connection error on attempt {attempt + 1}/{max_attempts} to {url}: {e}"
+                )
+                system_state.update_controller_status(False, "Connection refused")
+
+            except httpx.HTTPStatusError as e:
+                # Don't retry on HTTP errors (4xx, 5xx) - they're not transient
+                logger.error(f"HTTP error from controller: {e.response.status_code}")
+                system_state.update_controller_status(True)  # Controller is reachable
+                try:
+                    return e.response.json()
+                except Exception:
+                    return {"error": str(e), "status": "error"}
+
+            except Exception as e:
+                last_error = e
+                logger.error(f"Unexpected error on attempt {attempt + 1}/{max_attempts}: {e}")
+                system_state.update_controller_status(False, str(e))
+
+            # Exponential backoff before retry (if more attempts remain)
+            if attempt < max_attempts - 1 and allow_retries:
+                backoff = API_RETRY_BACKOFF_BASE * (2 ** attempt)
+                logger.info(f"Retrying in {backoff}s...")
+                await asyncio.sleep(backoff)
+
+        # All retries exhausted
+        error_msg = f"Controller unreachable after {max_attempts} attempts"
+        logger.error(f"{error_msg}: {last_error}")
+
+        return {
+            "error": error_msg,
+            "status": "error",
+            "details": str(last_error) if last_error else "Unknown error"
+        }
 
     async def health_check(self) -> Dict[str, Any]:
         """Check controller health with caching."""
@@ -314,14 +754,18 @@ class ControllerClient:
         requirements: List[str] = None,
         repo_url: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Create a new project from natural language."""
-        return await self._request("POST", "/v2/project/create", data={
-            "description": description,
-            "requirements": requirements or [],
-            "repo_url": repo_url,
-            "reference_urls": [],
-            "user_id": user_id
-        })
+        """Create a new project from natural language (no retries - destructive)."""
+        return await self._request(
+            "POST", "/v2/project/create",
+            data={
+                "description": description,
+                "requirements": requirements or [],
+                "repo_url": repo_url,
+                "reference_urls": [],
+                "user_id": user_id
+            },
+            action_name="create_project"
+        )
 
     async def get_project(self, project_name: str) -> Dict[str, Any]:
         """Get project details."""
@@ -340,15 +784,19 @@ class ControllerClient:
         explanation: Optional[str] = None,
         affected_features: List[str] = None
     ) -> Dict[str, Any]:
-        """Submit testing feedback."""
-        return await self._request("POST", f"/v2/project/{project_name}/aspect/{aspect}/feedback", data={
-            "project_name": project_name,
-            "aspect": aspect,
-            "feedback_type": feedback_type,
-            "explanation": explanation,
-            "affected_features": affected_features or [],
-            "user_id": user_id
-        })
+        """Submit testing feedback (no retries - stateful action)."""
+        return await self._request(
+            "POST", f"/v2/project/{project_name}/aspect/{aspect}/feedback",
+            data={
+                "project_name": project_name,
+                "aspect": aspect,
+                "feedback_type": feedback_type,
+                "explanation": explanation,
+                "affected_features": affected_features or [],
+                "user_id": user_id
+            },
+            action_name="submit_feedback"
+        )
 
     async def approve_production(
         self,
@@ -359,15 +807,19 @@ class ControllerClient:
         risk_acknowledged: bool,
         rollback_plan: str
     ) -> Dict[str, Any]:
-        """Approve production deployment."""
-        return await self._request("POST", f"/v2/project/{project_name}/aspect/{aspect}/approve-production", data={
-            "project_name": project_name,
-            "aspect": aspect,
-            "justification": justification,
-            "risk_acknowledged": risk_acknowledged,
-            "rollback_plan": rollback_plan,
-            "user_id": user_id
-        })
+        """Approve production deployment (no retries - critical action)."""
+        return await self._request(
+            "POST", f"/v2/project/{project_name}/aspect/{aspect}/approve-production",
+            data={
+                "project_name": project_name,
+                "aspect": aspect,
+                "justification": justification,
+                "risk_acknowledged": risk_acknowledged,
+                "rollback_plan": rollback_plan,
+                "user_id": user_id
+            },
+            action_name="approve_production"
+        )
 
     async def get_dashboard(self, project_name: Optional[str] = None) -> Dict[str, Any]:
         """Get dashboard data."""
@@ -826,10 +1278,11 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /health - Check system health (Phase 13.3)
+    /health - Check system health (Phase 13.3, updated 13.12)
 
     ALWAYS responds - no RBAC restriction.
     Shows:
+    - System mode (NORMAL/DEGRADED/CRITICAL) - Phase 13.12
     - Controller reachability
     - systemd status (controller + bot)
     - Last deployment timestamp
@@ -839,6 +1292,17 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         safety.log_action(user_id, "health_check", {})
 
         lines = ["*System Health Check*", ""]
+
+        # Phase 13.12: Show system mode prominently
+        sys_status = system_state.get_status()
+        mode = sys_status["mode"]
+        mode_emoji = {"normal": "🟢", "degraded": "🟡", "critical": "🔴"}.get(mode, "⚪")
+        lines.append(f"{mode_emoji} *System Mode:* {mode.upper()}")
+        if sys_status["degraded_reason"]:
+            lines.append(f"   Reason: {sys_status['degraded_reason']}")
+        if sys_status["owner_override_active"]:
+            lines.append("   ⚠️ Owner override is active")
+        lines.append("")
 
         # Check controller health
         controller_health = await controller.health_check()
@@ -855,7 +1319,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             # Safeguard: Check version/phase consistency
             # If bot is 13.x but controller reports phase < 13, log ERROR
             try:
-                bot_major = int(BOT_VERSION.split('.')[1])  # "0.13.10" -> 13
+                bot_major = int(BOT_VERSION.split('.')[1])  # "0.13.12" -> 13
                 # Extract phase number from "Phase 13.9" or "Phase 12"
                 phase_str = controller_phase.replace("Phase ", "").split(".")[0]
                 controller_major = int(phase_str)
@@ -883,6 +1347,10 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if status.get("since") and status.get("since") != "unknown":
                 lines.append(f"   Since: {status.get('since')}")
 
+        lines.append("")
+
+        # Bot info
+        lines.append(f"🤖 *Bot Version:* {BOT_VERSION}")
         lines.append("")
 
         # Last deployment info (from dashboard)
