@@ -3467,6 +3467,153 @@ async def trigger_deployment(request: DeployRequest):
 
 
 # -----------------------------------------------------------------------------
+# Phase 14: Claude CLI Job Endpoints
+# -----------------------------------------------------------------------------
+try:
+    from .claude_backend import (
+        create_job,
+        get_job_status,
+        list_jobs,
+        get_queue_status,
+        cancel_job,
+        check_claude_availability,
+        scheduler,
+        JobState,
+    )
+    CLAUDE_BACKEND_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Claude backend not available: {e}")
+    CLAUDE_BACKEND_AVAILABLE = False
+
+
+class ClaudeJobRequest(BaseModel):
+    """Request to create a Claude CLI job."""
+    project_name: str = Field(..., description="Project name")
+    task_description: str = Field(..., min_length=10, description="Task description")
+    task_type: str = Field(default="feature_development", description="Task type")
+
+
+class ClaudeJobResponse(BaseModel):
+    """Response for Claude job creation."""
+    job_id: str
+    project_name: str
+    task_type: str
+    state: str
+    created_at: str
+    message: str
+
+
+@app.post("/claude/job", response_model=ClaudeJobResponse)
+async def create_claude_job(request: ClaudeJobRequest):
+    """
+    Create a new Claude CLI job (Phase 14).
+
+    This queues a task for Claude CLI to execute autonomously.
+    The job will run in an isolated workspace with all policy documents.
+    """
+    if not CLAUDE_BACKEND_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Claude backend not available"
+        )
+
+    job = await create_job(
+        project_name=request.project_name,
+        task_description=request.task_description,
+        task_type=request.task_type,
+    )
+
+    return ClaudeJobResponse(
+        job_id=job.job_id,
+        project_name=job.project_name,
+        task_type=job.task_type,
+        state=job.state.value,
+        created_at=job.created_at.isoformat(),
+        message=f"Job {job.job_id} created and queued"
+    )
+
+
+@app.get("/claude/job/{job_id}")
+async def get_claude_job(job_id: str):
+    """Get Claude job status by ID."""
+    if not CLAUDE_BACKEND_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Claude backend not available")
+
+    job = await get_job_status(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    return job
+
+
+@app.get("/claude/jobs")
+async def list_claude_jobs(
+    state: Optional[str] = None,
+    project: Optional[str] = None,
+    limit: int = 50
+):
+    """List Claude jobs with optional filtering."""
+    if not CLAUDE_BACKEND_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Claude backend not available")
+
+    jobs = await list_jobs(state=state, project=project, limit=limit)
+    return {"jobs": jobs, "count": len(jobs)}
+
+
+@app.get("/claude/queue")
+async def get_claude_queue():
+    """Get Claude job queue status."""
+    if not CLAUDE_BACKEND_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Claude backend not available")
+
+    status = await get_queue_status()
+    return status
+
+
+@app.post("/claude/job/{job_id}/cancel")
+async def cancel_claude_job(job_id: str):
+    """Cancel a queued or running Claude job."""
+    if not CLAUDE_BACKEND_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Claude backend not available")
+
+    success = await cancel_job(job_id)
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not cancel job {job_id}. It may not exist or already completed."
+        )
+
+    return {"message": f"Job {job_id} cancelled", "job_id": job_id}
+
+
+@app.get("/claude/status")
+async def get_claude_status():
+    """
+    Check Claude CLI availability and status.
+
+    Returns information about:
+    - Claude CLI installation
+    - API key configuration
+    - Job scheduler status
+    """
+    if not CLAUDE_BACKEND_AVAILABLE:
+        return {
+            "available": False,
+            "error": "Claude backend module not loaded",
+            "queue": None
+        }
+
+    cli_status = await check_claude_availability()
+    queue_status = await get_queue_status()
+
+    return {
+        "available": cli_status["available"] and cli_status["api_key_configured"],
+        "cli": cli_status,
+        "queue": queue_status
+    }
+
+
+# -----------------------------------------------------------------------------
 # Error Handlers
 # -----------------------------------------------------------------------------
 @app.exception_handler(HTTPException)
@@ -3491,24 +3638,41 @@ async def http_exception_handler(request, exc):
 @app.on_event("startup")
 async def startup_event():
     """Initialize controller on startup."""
-    logger.info("Task Controller starting up (Phase 6)...")
+    logger.info("Task Controller starting up (Phase 14)...")
     logger.info(f"Projects directory: {PROJECTS_DIR}")
     logger.info(f"Docs directory: {DOCS_DIR}")
 
     # Ensure directories exist
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Task Controller ready (Phase 6: Production Hardening & Explicit Go-Live Controls)")
+    # Phase 14: Start Claude job scheduler if available
+    if CLAUDE_BACKEND_AVAILABLE:
+        try:
+            await scheduler.start()
+            logger.info("Claude job scheduler started")
+        except Exception as e:
+            logger.error(f"Failed to start Claude job scheduler: {e}")
+
+    logger.info("Task Controller ready (Phase 14: Claude CLI Integration)")
     logger.info("SAFETY: Production deployment requires DUAL APPROVAL (different users).")
     logger.info("SAFETY: All production actions logged to immutable audit trail.")
     logger.info("SAFETY: Production rollback always available (break-glass).")
     logger.info("SAFETY: Testing environment MUST be used before production.")
+    logger.info("PHASE 14: Claude CLI execution backend available (if API key configured).")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown."""
     logger.info("Task Controller shutting down...")
+
+    # Phase 14: Stop Claude job scheduler if running
+    if CLAUDE_BACKEND_AVAILABLE:
+        try:
+            await scheduler.stop()
+            logger.info("Claude job scheduler stopped")
+        except Exception as e:
+            logger.error(f"Error stopping Claude job scheduler: {e}")
 
 
 # -----------------------------------------------------------------------------

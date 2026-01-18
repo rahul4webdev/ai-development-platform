@@ -6,15 +6,15 @@ The AI agent MUST update this file after completing any task.
 ---
 
 ## Last Updated
-- **Timestamp**: 2026-01-16
-- **Task**: Phase 6 Production Hardening & Explicit Go-Live Controls - COMPLETE
-- **Status**: Completed
+- **Timestamp**: 2026-01-18
+- **Task**: Phase 14 Claude CLI Bootstrap & Full Integration - IN PROGRESS
+- **Status**: Blocked (ANTHROPIC_API_KEY required)
 
 ---
 
 ## Current Phase
 ```
-Phase: PHASE_6_COMPLETE
+Phase: PHASE_14_IN_PROGRESS
 Mode: development
 ```
 
@@ -48,6 +48,15 @@ Mode: development
 | Production Rollback | Implemented | controller/main.py | Phase 6: Break-glass (no dual approval for speed) |
 | Audit Trail | Implemented | controller/main.py | Phase 6: Immutable, append-only production.log |
 | Policy Hooks | Implemented | controller/main.py | Includes execution, CI, and production policy hooks |
+| Rate Limiting | Implemented | telegram_bot_v2/bot.py | Phase 13.10: Per-user, per-command rate limits |
+| Timeouts & Retries | Implemented | telegram_bot_v2/bot.py | Phase 13.11: Exponential backoff, no retries for destructive actions |
+| Degraded Mode | Implemented | telegram_bot_v2/bot.py | Phase 13.12: NORMAL/DEGRADED/CRITICAL modes, owner override |
+| Claude CLI | Installed | /usr/local/bin/claude | Phase 14.1: v2.1.12 on VPS |
+| Execution Wrapper | Implemented | scripts/run_claude_job.sh | Phase 14.2: Secure, sandboxed execution |
+| Claude Backend | Implemented | controller/claude_backend.py | Phase 14.3: Job queue, workspace manager, executor |
+| Job Workspace Model | Implemented | controller/claude_backend.py | Phase 14.4: Isolated workspaces with policy docs |
+| Claude API Endpoints | Implemented | controller/main.py | Phase 14.3: /claude/job, /claude/jobs, /claude/queue, /claude/status |
+| Bot Claude Integration | Implemented | telegram_bot_v2/bot.py | Phase 14.6: /health shows Claude status |
 
 ---
 

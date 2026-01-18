@@ -1,5 +1,5 @@
 """
-Telegram Bot - Phase 13.3-13.12
+Telegram Bot - Phase 13.3-14.0
 
 Production Control Plane for AI Development Platform.
 
@@ -14,6 +14,7 @@ Features:
 - Rate limiting (13.10)
 - Timeouts & retries (13.11)
 - Degraded mode handling (13.12)
+- Claude CLI job management (14.0)
 
 Safety:
 - Bot cannot trigger prod deploy directly
@@ -23,6 +24,7 @@ Safety:
 - Dual approval rules enforced via controller
 - Rate limiting prevents abuse
 - Degraded mode protects system integrity
+- Claude jobs run in isolated workspaces
 """
 
 import asyncio
@@ -79,7 +81,7 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.13.12"
+BOT_VERSION = "0.14.0"
 BOT_START_TIME = datetime.utcnow()
 
 # -----------------------------------------------------------------------------
@@ -840,6 +842,57 @@ class ControllerClient:
         """Get project ledger/audit trail."""
         return await self._request("GET", f"/v2/ledger/{project_name}")
 
+    # Phase 14: Claude CLI Job Methods
+    async def get_claude_status(self) -> Dict[str, Any]:
+        """Get Claude CLI availability and job queue status."""
+        return await self._request("GET", "/claude/status")
+
+    async def get_claude_queue(self) -> Dict[str, Any]:
+        """Get Claude job queue status."""
+        return await self._request("GET", "/claude/queue")
+
+    async def create_claude_job(
+        self,
+        project_name: str,
+        task_description: str,
+        task_type: str = "feature_development"
+    ) -> Dict[str, Any]:
+        """Create a new Claude CLI job."""
+        return await self._request(
+            "POST", "/claude/job",
+            data={
+                "project_name": project_name,
+                "task_description": task_description,
+                "task_type": task_type
+            },
+            action_name="create_claude_job"
+        )
+
+    async def get_claude_job(self, job_id: str) -> Dict[str, Any]:
+        """Get Claude job status by ID."""
+        return await self._request("GET", f"/claude/job/{job_id}")
+
+    async def list_claude_jobs(
+        self,
+        state: Optional[str] = None,
+        project: Optional[str] = None,
+        limit: int = 20
+    ) -> Dict[str, Any]:
+        """List Claude jobs with optional filtering."""
+        params = {"limit": limit}
+        if state:
+            params["state"] = state
+        if project:
+            params["project"] = project
+        return await self._request("GET", "/claude/jobs", params=params)
+
+    async def cancel_claude_job(self, job_id: str) -> Dict[str, Any]:
+        """Cancel a Claude job."""
+        return await self._request(
+            "POST", f"/claude/job/{job_id}/cancel",
+            action_name="cancel_claude_job"
+        )
+
 
 controller = ControllerClient(CONTROLLER_BASE_URL)
 
@@ -1370,6 +1423,29 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     lines.append(f"📦 *Last Deployment:* {latest_deploy}")
                 else:
                     lines.append("📦 *Last Deployment:* None recorded")
+
+        # Phase 14: Claude CLI Status
+        lines.append("")
+        claude_status = await controller.get_claude_status()
+        if "error" in claude_status:
+            lines.append("❓ *Claude CLI:* Status unknown")
+        else:
+            cli_info = claude_status.get("cli", {})
+            queue_info = claude_status.get("queue", {})
+
+            if claude_status.get("available"):
+                lines.append("✅ *Claude CLI:* Available")
+                lines.append(f"   Version: {cli_info.get('version', 'unknown')}")
+                if queue_info:
+                    running = queue_info.get('running', 0)
+                    queued = queue_info.get('queued', 0)
+                    lines.append(f"   Jobs: {running} running, {queued} queued")
+            else:
+                lines.append("⚠️ *Claude CLI:* Not available")
+                if not cli_info.get("available"):
+                    lines.append("   CLI not installed")
+                elif not cli_info.get("api_key_configured"):
+                    lines.append("   API key not configured")
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
