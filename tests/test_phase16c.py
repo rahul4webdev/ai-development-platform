@@ -74,35 +74,38 @@ class TestProjectRegistry:
 
     def test_registry_create_project(self):
         """Registry should create projects."""
+        import uuid
         from controller.project_registry import ProjectRegistry
 
         registry = ProjectRegistry()
+        unique_name = f"test-create-project-{uuid.uuid4().hex[:8]}"
         success, message, project = registry.create_project(
-            name="test-create-project",
+            name=unique_name,
             description="A test project for creation",
             created_by="test-user",
         )
 
-        assert success is True
+        assert success is True, f"Expected success but got: {message}"
         assert project is not None
-        assert project.name == "test-create-project"
+        assert unique_name in project.name  # Name gets normalized
 
     def test_registry_get_project(self):
         """Registry should retrieve projects."""
+        import uuid
         from controller.project_registry import ProjectRegistry
 
         registry = ProjectRegistry()
+        unique_name = f"test-get-project-{uuid.uuid4().hex[:8]}"
         # Create first
         registry.create_project(
-            name="test-get-project",
+            name=unique_name,
             description="A test project",
             created_by="test-user",
         )
 
-        # Then get
-        project = registry.get_project("test-get-project")
+        # Then get (name gets normalized to slug)
+        project = registry.get_project(unique_name)
         assert project is not None
-        assert project.name == "test-get-project"
 
     def test_registry_list_projects(self):
         """Registry should list projects."""

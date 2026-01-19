@@ -18,6 +18,7 @@ HARD CONSTRAINTS:
 
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -38,14 +39,28 @@ def _get_registry_dir() -> Path:
     try:
         if primary.parent.exists():
             primary.mkdir(parents=True, exist_ok=True)
-            return primary
-    except (OSError, PermissionError):
-        pass
+            # Verify we can actually write to this directory
+            test_file = primary / "_perm_test"
+            try:
+                test_file.touch()
+                test_file.unlink()
+                return primary
+            except (OSError, PermissionError) as e:
+                logger.warning(f"Cannot write to primary registry dir: {e}")
+    except (OSError, PermissionError) as e:
+        logger.warning(f"Cannot access primary registry dir: {e}")
 
     # Fallback to /tmp
     fallback = Path("/tmp/ai_platform/registry")
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+    except Exception as e:
+        logger.error(f"Cannot create fallback registry dir: {e}")
+        # Last resort - use current working directory
+        cwd_fallback = Path.cwd() / ".registry"
+        cwd_fallback.mkdir(parents=True, exist_ok=True)
+        return cwd_fallback
 
 
 REGISTRY_DIR = _get_registry_dir()
@@ -213,13 +228,33 @@ class ProjectRegistry:
 
     def _load_registry(self) -> None:
         """Load projects from persistent storage."""
+        # Ensure directory exists
+        try:
+            self._registry_file.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.error(f"Cannot create registry directory: {e}")
+            return
+
         if not self._registry_file.exists():
             logger.info("No existing registry file, starting fresh")
             return
 
         try:
-            with open(self._registry_file) as f:
-                data = json.load(f)
+            # Read file content
+            content = self._registry_file.read_text().strip()
+
+            # Handle empty file
+            if not content:
+                logger.warning("Registry file is empty, starting fresh")
+                return
+
+            # Parse JSON
+            data = json.loads(content)
+
+            # Validate structure
+            if not isinstance(data, dict):
+                logger.warning("Registry file has invalid format, starting fresh")
+                return
 
             for name, proj_data in data.get("projects", {}).items():
                 try:
@@ -228,14 +263,26 @@ class ProjectRegistry:
                     logger.warning(f"Failed to load project {name}: {e}")
 
             logger.info(f"Loaded {len(self._projects)} projects from registry")
+        except json.JSONDecodeError as e:
+            logger.error(f"Registry file contains invalid JSON: {e}")
+            # Backup corrupted file
+            backup_path = self._registry_file.with_suffix(".json.corrupted")
+            try:
+                self._registry_file.rename(backup_path)
+                logger.info(f"Corrupted registry backed up to {backup_path}")
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Failed to load registry: {e}")
 
     def _save_registry(self) -> None:
-        """Save projects to persistent storage."""
+        """Save projects to persistent storage with atomic writes."""
+        temp_file = None
         try:
+            # Ensure directory exists
             self._registry_file.parent.mkdir(parents=True, exist_ok=True)
 
+            # Prepare data
             data = {
                 "version": "1.0",
                 "updated_at": datetime.utcnow().isoformat(),
@@ -245,20 +292,60 @@ class ProjectRegistry:
                 }
             }
 
-            # Atomic write
+            # Serialize to JSON first to catch serialization errors early
+            json_content = json.dumps(data, indent=2)
+
+            # Atomic write using temp file + rename
             temp_file = self._registry_file.with_suffix(".tmp")
+
+            # Write to temp file
             with open(temp_file, "w") as f:
-                json.dump(data, f, indent=2)
+                f.write(json_content)
+                f.flush()
+                os.fsync(f.fileno())  # Ensure data is written to disk
+
+            # Atomic rename (works on POSIX systems)
             temp_file.rename(self._registry_file)
+            temp_file = None  # Mark as successfully moved
 
             logger.debug(f"Saved {len(self._projects)} projects to registry")
-        except Exception as e:
-            logger.error(f"Failed to save registry: {e}")
+
+        except TypeError as e:
+            # JSON serialization error
+            logger.error(f"Failed to serialize registry data: {e}", exc_info=True)
+            raise RegistryError(
+                code="SERIALIZATION_FAILED",
+                message="Failed to serialize project data. Please check for invalid characters.",
+                details={"error": str(e), "type": "serialization"}
+            )
+        except PermissionError as e:
+            logger.error(f"Permission denied saving registry: {e}")
+            raise RegistryError(
+                code="PERMISSION_DENIED",
+                message="Cannot save project: permission denied. Please contact administrator.",
+                details={"error": str(e), "path": str(self._registry_file), "type": "permission"}
+            )
+        except OSError as e:
+            logger.error(f"OS error saving registry: {e}", exc_info=True)
             raise RegistryError(
                 code="SAVE_FAILED",
-                message="Failed to save project registry",
-                details={"error": str(e)}
+                message=f"Cannot save project: {e.strerror}",
+                details={"error": str(e), "errno": e.errno, "type": "os_error"}
             )
+        except Exception as e:
+            logger.error(f"Unexpected error saving registry: {e}", exc_info=True)
+            raise RegistryError(
+                code="SAVE_FAILED",
+                message="Failed to save project. Please try again.",
+                details={"error": str(e), "type": type(e).__name__}
+            )
+        finally:
+            # Cleanup temp file if it still exists
+            if temp_file and temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception:
+                    pass
 
     # -------------------------------------------------------------------------
     # CRUD Operations
