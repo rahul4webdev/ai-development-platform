@@ -181,64 +181,113 @@ async def create_project_from_natural_language(
     """
     Create a new multi-aspect project from natural language description.
 
-    Claude will:
-    1. Interpret the natural language description
-    2. Generate an Internal Project Contract (IPC)
-    3. Initialize all aspects (Core, Backend, Frontend)
-    4. Begin autonomous planning phase
+    Phase 16C Enhanced:
+    1. Validate requirements (CHD layer)
+    2. Register project in Project Registry
+    3. Generate Internal Project Contract (IPC)
+    4. Initialize all aspects (Core, Backend, Frontend)
+    5. Begin autonomous planning phase
     """
-    # Normalize project name from description
-    project_name = _normalize_project_name(request.description)
+    try:
+        # Phase 16C: Validate requirements first
+        try:
+            from controller.chd_validator import validate_requirements
+            validation = validate_requirements(request.description)
+            if not validation.is_valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Validation failed",
+                        "errors": validation.errors,
+                        "suggestions": validation.suggestions,
+                    }
+                )
+        except ImportError:
+            logger.warning("CHD validator not available, skipping validation")
 
-    # Check if project already exists
-    if _load_ipc(project_name):
+        # Normalize project name from description
+        project_name = _normalize_project_name(request.description)
+
+        # Check if project already exists
+        if _load_ipc(project_name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Project '{project_name}' already exists"
+            )
+
+        # Phase 16C: Register in Project Registry FIRST
+        try:
+            from controller.project_registry import get_registry
+            registry = get_registry()
+            success, message, project = registry.create_project(
+                name=project_name,
+                description=request.description,
+                created_by=request.user_id,
+                requirements_raw="\n".join(request.requirements) if request.requirements else None,
+                requirements_source="api",
+            )
+            if not success:
+                raise HTTPException(status_code=400, detail=message)
+        except ImportError:
+            logger.warning("Project registry not available")
+
+        # Create IPC
+        ipc = create_default_ipc(
+            project_name=project_name,
+            description=request.description,
+            user_id=request.user_id,
+            repo_url=request.repo_url
+        )
+
+        # Add requirements
+        ipc.original_requirements = request.requirements
+        ipc.reference_urls = request.reference_urls
+
+        # Save IPC
+        _save_ipc(ipc)
+
+        # Phase 16C: Link IPC to registry
+        try:
+            registry.update_project(project_name, {"ipc_contract_id": ipc.contract_id})
+        except:
+            pass
+
+        # Get engine and start planning for each aspect
+        engine = _get_engine()
+        for aspect in ProjectAspect:
+            engine.transition_phase(
+                ipc=ipc,
+                aspect=aspect,
+                target_phase=AspectPhase.PLANNING,
+                actor=request.user_id,
+                reason="Project created"
+            )
+
+        _save_ipc(ipc)
+
+        logger.info(f"Created project: {project_name} with all aspects initialized")
+
+        return CreateProjectResponse(
+            project_name=project_name,
+            contract_id=ipc.contract_id,
+            aspects_initialized=[a.value for a in ProjectAspect],
+            next_steps=[
+                "Autonomous planning will begin",
+                "Development will proceed automatically",
+                "You will be notified when testing is ready",
+                "Approval required before production deployment"
+            ],
+            message=f"Project '{project_name}' created successfully. Autonomous development starting."
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating project: {e}", exc_info=True)
         raise HTTPException(
-            status_code=400,
-            detail=f"Project '{project_name}' already exists"
+            status_code=500,
+            detail=f"Internal error creating project: {str(e)}"
         )
-
-    # Create IPC
-    ipc = create_default_ipc(
-        project_name=project_name,
-        description=request.description,
-        user_id=request.user_id,
-        repo_url=request.repo_url
-    )
-
-    # Add requirements
-    ipc.original_requirements = request.requirements
-    ipc.reference_urls = request.reference_urls
-
-    # Save IPC
-    _save_ipc(ipc)
-
-    # Get engine and start planning for each aspect
-    engine = _get_engine()
-    for aspect in ProjectAspect:
-        engine.transition_phase(
-            ipc=ipc,
-            aspect=aspect,
-            target_phase=AspectPhase.PLANNING,
-            actor=request.user_id,
-            reason="Project created"
-        )
-
-    _save_ipc(ipc)
-
-    logger.info(f"Created project: {project_name} with all aspects initialized")
-
-    return CreateProjectResponse(
-        project_name=project_name,
-        contract_id=ipc.contract_id,
-        aspects_initialized=[a.value for a in ProjectAspect],
-        next_steps=[
-            "Autonomous planning will begin",
-            "Development will proceed automatically",
-            "You will be notified when testing is ready",
-            "Approval required before production deployment"
-        ],
-        message=f"Project '{project_name}' created successfully. Autonomous development starting."
-    )
 
 
 def _normalize_project_name(description: str) -> str:

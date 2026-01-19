@@ -84,7 +84,7 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.15.3"
+BOT_VERSION = "0.15.5"
 BOT_START_TIME = datetime.utcnow()
 
 # -----------------------------------------------------------------------------
@@ -109,6 +109,7 @@ class UserRole(str, Enum):
     """User roles for access control."""
     OWNER = "owner"
     ADMIN = "admin"
+    DEVELOPER = "developer"  # Phase 15.2: Added for change request commands
     TESTER = "tester"
     VIEWER = "viewer"
 
@@ -120,6 +121,7 @@ def load_role_config() -> Dict[UserRole, List[int]]:
     config = {
         UserRole.OWNER: [],
         UserRole.ADMIN: [],
+        UserRole.DEVELOPER: [],
         UserRole.TESTER: [],
         UserRole.VIEWER: [],
     }
@@ -141,7 +143,7 @@ ROLE_CONFIG = load_role_config()
 
 def get_user_role(user_id: int) -> UserRole:
     """Get the highest role for a user."""
-    for role in [UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER]:
+    for role in [UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER]:
         if user_id in ROLE_CONFIG.get(role, []):
             return role
     return UserRole.VIEWER
@@ -832,6 +834,18 @@ class ControllerClient:
             return await self._request("GET", f"/v2/dashboard/{project_name}")
         return await self._request("GET", "/v2/dashboard")
 
+    async def get_dashboard_summary(self) -> Dict[str, Any]:
+        """Get enhanced dashboard summary (Phase 16B)."""
+        return await self._request("GET", "/dashboard")
+
+    async def get_dashboard_jobs(self) -> Dict[str, Any]:
+        """Get Claude jobs activity (Phase 16B)."""
+        return await self._request("GET", "/dashboard/jobs")
+
+    async def get_dashboard_audit(self, limit: int = 10) -> Dict[str, Any]:
+        """Get recent audit events (Phase 16B)."""
+        return await self._request("GET", "/dashboard/audit", params={"limit": limit})
+
     async def get_notifications(self, project_name: Optional[str] = None) -> Dict[str, Any]:
         """Get pending notifications."""
         params = {"project_name": project_name} if project_name else None
@@ -1032,6 +1046,96 @@ def format_dashboard(dashboard: Dict[str, Any]) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def format_dashboard_enhanced(summary: Dict[str, Any]) -> str:
+    """
+    Format enhanced dashboard summary for Telegram (Phase 16B).
+
+    Returns: Summary counts, Active projects, Active jobs, System health snapshot.
+    """
+    lines = []
+
+    # System health status with emoji
+    health = summary.get("system_health", "unknown")
+    health_emoji = {
+        "healthy": "🟢",
+        "degraded": "🟡",
+        "unhealthy": "🔴",
+        "unknown": "⚪"
+    }.get(health, "⚪")
+
+    lines.append(f"📊 *Platform Dashboard*")
+    lines.append(f"━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"")
+    lines.append(f"{health_emoji} *System Health:* {health.upper()}")
+    lines.append(f"")
+
+    # Summary counts
+    lines.append(f"📈 *Summary Counts*")
+    lines.append(f"  Projects: {summary.get('total_projects', 0)}")
+    lines.append(f"  Active Lifecycles: {summary.get('total_lifecycles', 0)}")
+    lines.append(f"  Pending Jobs: {summary.get('pending_jobs', 0)}")
+    lines.append(f"  Active Workers: {summary.get('active_workers', 0)}/{summary.get('max_workers', 3)}")
+    lines.append(f"")
+
+    # Active projects (top 5)
+    active_projects = summary.get("active_projects", [])
+    if active_projects:
+        lines.append(f"🚀 *Active Projects* ({len(active_projects)})")
+        for proj in active_projects[:5]:
+            name = proj.get("project_name", "Unknown")
+            state = proj.get("lifecycle_state", "unknown")
+            state_emoji = get_lifecycle_state_emoji(state)
+            lines.append(f"  {state_emoji} {name}: {state.replace('_', ' ')}")
+        if len(active_projects) > 5:
+            lines.append(f"  ... and {len(active_projects) - 5} more")
+        lines.append(f"")
+
+    # Claude jobs activity
+    claude_activity = summary.get("claude_activity", {})
+    if claude_activity:
+        running = claude_activity.get("running_jobs", 0)
+        queued = claude_activity.get("queued_jobs", 0)
+        completed_24h = claude_activity.get("completed_24h", 0)
+
+        lines.append(f"🤖 *Claude Activity*")
+        lines.append(f"  Running: {running}")
+        lines.append(f"  Queued: {queued}")
+        lines.append(f"  Completed (24h): {completed_24h}")
+        lines.append(f"")
+
+    # Security alerts (if any)
+    security = summary.get("security", {})
+    gate_denials = security.get("recent_gate_denials", 0)
+    if gate_denials > 0:
+        lines.append(f"🔒 *Security Alerts*")
+        lines.append(f"  ⚠️ Gate Denials (24h): {gate_denials}")
+        lines.append(f"")
+
+    # Timestamp
+    timestamp = summary.get("timestamp", "")
+    if timestamp:
+        lines.append(f"⏱️ _Updated: {timestamp[:19]}_")
+
+    return "\n".join(lines)
+
+
+def get_lifecycle_state_emoji(state: str) -> str:
+    """Get emoji for lifecycle state."""
+    emoji_map = {
+        "created": "⬜",
+        "planning": "📝",
+        "development": "💻",
+        "testing": "🧪",
+        "awaiting_feedback": "💬",
+        "ready_for_production": "📦",
+        "production_approved": "✅",
+        "deployed": "🚀",
+        "archived": "📁",
+        "rejected": "❌"
+    }
+    return emoji_map.get(state.lower(), "❓")
 
 
 def get_feedback_keyboard(project_name: str, aspect: str) -> InlineKeyboardMarkup:
@@ -1427,28 +1531,40 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 else:
                     lines.append("📦 *Last Deployment:* None recorded")
 
-        # Phase 14: Claude CLI Status
+        # Phase 14/15.5: Claude CLI Status (updated for session-based auth)
         lines.append("")
         claude_status = await controller.get_claude_status()
         if "error" in claude_status:
             lines.append("❓ *Claude CLI:* Status unknown")
         else:
             cli_info = claude_status.get("cli", {})
-            queue_info = claude_status.get("queue", {})
+            scheduler_info = claude_status.get("scheduler", {})
 
             if claude_status.get("available"):
                 lines.append("✅ *Claude CLI:* Available")
                 lines.append(f"   Version: {cli_info.get('version', 'unknown')}")
-                if queue_info:
-                    running = queue_info.get('running', 0)
-                    queued = queue_info.get('queued', 0)
-                    lines.append(f"   Jobs: {running} running, {queued} queued")
+                # Phase 15.5: Show auth type
+                auth_type = cli_info.get("auth_type", "unknown")
+                if auth_type == "cli_session":
+                    lines.append("   Auth: Session (CLI login)")
+                elif auth_type == "api_key":
+                    lines.append("   Auth: API Key")
+                else:
+                    lines.append(f"   Auth: {auth_type}")
+                # Show scheduler info if available
+                if scheduler_info:
+                    active = scheduler_info.get('active_workers', 0)
+                    queued = scheduler_info.get('queued_jobs', 0)
+                    lines.append(f"   Jobs: {active} running, {queued} queued")
             else:
                 lines.append("⚠️ *Claude CLI:* Not available")
-                if not cli_info.get("available"):
+                # Phase 15.5: More specific error messages
+                if not cli_info.get("installed"):
                     lines.append("   CLI not installed")
-                elif not cli_info.get("api_key_configured"):
-                    lines.append("   API key not configured")
+                elif not cli_info.get("authenticated"):
+                    lines.append("   Not authenticated (run 'claude auth login')")
+                elif cli_info.get("error"):
+                    lines.append(f"   Error: {cli_info.get('error')[:50]}")
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
@@ -1738,11 +1854,29 @@ async def project_status_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /dashboard command. ALWAYS responds."""
+    """
+    Handle /dashboard command (Phase 16B Enhanced).
+
+    Returns: Summary counts, Active projects, Active jobs, System health snapshot.
+    ALWAYS responds.
+    """
     try:
         user_id = update.effective_user.id
         safety.log_action(user_id, "view_dashboard", {})
 
+        # Try enhanced dashboard first (Phase 16B)
+        try:
+            result = await controller.get_dashboard_summary()
+            if "error" not in result:
+                await update.message.reply_text(
+                    format_dashboard_enhanced(result),
+                    parse_mode="Markdown"
+                )
+                return
+        except Exception as e:
+            logger.warning(f"Enhanced dashboard unavailable, falling back: {e}")
+
+        # Fallback to legacy dashboard
         result = await controller.get_dashboard()
 
         if "error" in result:
@@ -2183,42 +2317,245 @@ async def create_project_from_description(
     description: str,
     user_id: str
 ) -> None:
-    """Create a project from natural language description."""
+    """
+    Create a project from natural language description (Phase 16C Enhanced).
+
+    Uses the unified ProjectService with:
+    - CHD validation
+    - Project registry
+    - Lifecycle creation
+    - Progress feedback
+    """
+    progress_message = None
+    last_step = ""
+
+    async def progress_callback(step: str, status: str, details: dict = None):
+        """Update progress message in Telegram."""
+        nonlocal progress_message, last_step
+
+        # Progress emojis
+        step_emojis = {
+            "input_received": "📥",
+            "parsing": "🧠",
+            "validating": "📋",
+            "creating_project": "📁",
+            "creating_lifecycles": "🔄",
+            "scheduling_planning": "🚀",
+            "completed": "✅",
+        }
+
+        step_labels = {
+            "input_received": "Input received",
+            "parsing": "Parsing requirements",
+            "validating": "Validating execution plan",
+            "creating_project": "Creating project",
+            "creating_lifecycles": "Initializing aspects",
+            "scheduling_planning": "Scheduling planning",
+            "completed": "Project created successfully",
+        }
+
+        emoji = step_emojis.get(step, "⏳")
+        label = step_labels.get(step, step)
+
+        if status == "failed":
+            emoji = "❌"
+            label = f"{label} - FAILED"
+
+        # Build progress text
+        lines = ["*Project Creation Progress*", ""]
+        for s, lbl in step_labels.items():
+            if s == step:
+                lines.append(f"{emoji} {lbl}")
+                last_step = s
+                if status == "completed" and s != "completed":
+                    lines[-1] = f"✅ {lbl}"
+            elif list(step_labels.keys()).index(s) < list(step_labels.keys()).index(step):
+                lines.append(f"✅ {lbl}")
+            else:
+                lines.append(f"⬜ {lbl}")
+
+        progress_text = "\n".join(lines)
+
+        try:
+            if progress_message:
+                await progress_message.edit_text(progress_text, parse_mode="Markdown")
+            else:
+                progress_message = await update.message.reply_text(progress_text, parse_mode="Markdown")
+        except Exception as e:
+            logger.debug(f"Could not update progress: {e}")
+
     try:
         logger.info(f"Creating project from description: {description[:50]}...")
 
+        # Send initial progress
+        await progress_callback("input_received", "in_progress", {"source": "text"})
+
+        # Try new ProjectService first (Phase 16C)
+        try:
+            from controller.project_service import create_project_from_text
+            result = await create_project_from_text(
+                description=description,
+                user_id=user_id,
+                progress_callback=progress_callback,
+            )
+        except ImportError:
+            # Fallback to legacy controller
+            logger.warning("ProjectService not available, using legacy controller")
+            result = await controller.create_project(
+                description=description,
+                user_id=user_id
+            )
+
+        if not result.get("success", False) and "error" in result:
+            error_msg = result.get("error", "Unknown error")
+            validation = result.get("validation_result", {})
+
+            error_lines = [f"*Error Creating Project*", "", f"❌ {error_msg}"]
+
+            if validation.get("suggestions"):
+                error_lines.append("")
+                error_lines.append("*Suggestions:*")
+                for suggestion in validation.get("suggestions", []):
+                    error_lines.append(f"  • {suggestion}")
+
+            await update.message.reply_text("\n".join(error_lines), parse_mode="Markdown")
+            return
+
+        # Success - format response
+        project_name = result.get("project_name", "Unknown")
+        project_id = result.get("project_id", "Unknown")
+        aspects = result.get("aspects", result.get("aspects_initialized", []))
+        next_steps = result.get("next_steps", [])
+
+        aspects_list = "\n".join(f"  • {a}" for a in aspects) if aspects else "  • None"
+        next_steps_list = "\n".join(f"  • {s}" for s in next_steps) if next_steps else ""
+
+        success_text = (
+            f"🎉 *Project Created Successfully!*\n\n"
+            f"*Name:* `{project_name}`\n"
+            f"*ID:* `{project_id[:8]}...`\n\n"
+            f"*Aspects:*\n{aspects_list}\n"
+        )
+
+        if next_steps_list:
+            success_text += f"\n*Next Steps:*\n{next_steps_list}\n"
+
+        success_text += f"\nUse /dashboard to view all projects."
+
+        await update.message.reply_text(success_text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in create_project_from_description: {e}", exc_info=True)
         await update.message.reply_text(
-            "Creating your project...\n\n"
-            "Claude is analyzing your requirements and generating the project structure."
+            f"❌ *Error creating project*\n\n"
+            f"An unexpected error occurred: {str(e)}\n\n"
+            f"Please try again or contact support.",
+            parse_mode="Markdown"
         )
 
-        result = await controller.create_project(
-            description=description,
-            user_id=user_id
-        )
 
-        if "error" in result:
+async def create_project_from_file(
+    update: Update,
+    filename: str,
+    file_content: bytes,
+    user_id: str
+) -> None:
+    """
+    Create a project from uploaded file (Phase 16C).
+
+    Supports .md and .txt files containing project requirements.
+    """
+    progress_message = None
+
+    async def progress_callback(step: str, status: str, details: dict = None):
+        """Update progress message."""
+        nonlocal progress_message
+
+        step_emojis = {
+            "input_received": "📥",
+            "parsing": "🧠",
+            "validating": "📋",
+            "creating_project": "📁",
+            "creating_lifecycles": "🔄",
+            "completed": "✅",
+        }
+
+        step_labels = {
+            "input_received": f"File received: {filename}",
+            "parsing": "Parsing requirements",
+            "validating": "Validating execution plan",
+            "creating_project": "Creating project",
+            "creating_lifecycles": "Initializing aspects",
+            "completed": "Project created successfully",
+        }
+
+        emoji = step_emojis.get(step, "⏳")
+        label = step_labels.get(step, step)
+
+        if status == "failed":
+            emoji = "❌"
+
+        lines = ["*Project Creation Progress*", ""]
+        for s, lbl in step_labels.items():
+            if s == step:
+                lines.append(f"{emoji} {lbl}")
+            elif list(step_labels.keys()).index(s) < list(step_labels.keys()).index(step):
+                lines.append(f"✅ {lbl}")
+            else:
+                lines.append(f"⬜ {lbl}")
+
+        try:
+            if progress_message:
+                await progress_message.edit_text("\n".join(lines), parse_mode="Markdown")
+            else:
+                progress_message = await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        except Exception:
+            pass
+
+    try:
+        logger.info(f"Creating project from file: {filename}")
+
+        try:
+            from controller.project_service import create_project_from_file as service_create_from_file
+            result = await service_create_from_file(
+                filename=filename,
+                file_content=file_content,
+                user_id=user_id,
+                progress_callback=progress_callback,
+            )
+        except ImportError:
             await update.message.reply_text(
-                f"*Error creating project:*\n{result.get('error')}",
+                "❌ File-based project creation is not available.\n"
+                "Please describe your project with /new_project instead."
+            )
+            return
+
+        if not result.get("success", False):
+            error_msg = result.get("error", "Unknown error")
+            await update.message.reply_text(
+                f"❌ *Error Creating Project*\n\n{error_msg}",
                 parse_mode="Markdown"
             )
             return
 
-        aspects_list = "\n".join(f"- {a}" for a in result.get("aspects_initialized", []))
-        next_steps = "\n".join(f"- {s}" for s in result.get("next_steps", []))
+        # Success
+        project_name = result.get("project_name", "Unknown")
+        aspects = result.get("aspects", [])
 
         await update.message.reply_text(
-            f"*Project Created!*\n\n"
-            f"*Name:* {result.get('project_name', 'Unknown')}\n"
-            f"*Contract ID:* {result.get('contract_id', 'Unknown')}\n\n"
-            f"*Aspects Initialized:*\n{aspects_list}\n\n"
-            f"*Next Steps:*\n{next_steps}\n\n"
-            f"Use /projects to view all projects.",
+            f"🎉 *Project Created from File!*\n\n"
+            f"*Name:* `{project_name}`\n"
+            f"*Aspects:* {', '.join(aspects)}\n\n"
+            f"Use /dashboard to view all projects.",
             parse_mode="Markdown"
         )
+
     except Exception as e:
-        logger.error(f"Error in create_project_from_description: {e}")
-        await update.message.reply_text(f"Error creating project: {str(e)}")
+        logger.error(f"Error creating project from file: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ Error processing file: {str(e)}",
+            parse_mode="Markdown"
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -3236,6 +3573,86 @@ async def ingestion_status_command(update: Update, context: ContextTypes.DEFAULT
 
 
 # -----------------------------------------------------------------------------
+# Phase 16C: Document Handler (File Upload Support)
+# -----------------------------------------------------------------------------
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle document uploads for project creation (Phase 16C).
+
+    Supports:
+    - .md files (Markdown)
+    - .txt files (Plain text)
+
+    The file content will be used as project requirements.
+    """
+    try:
+        document = update.message.document
+        if not document:
+            return
+
+        filename = document.file_name or "unknown"
+        user_id = str(update.effective_user.id)
+
+        # Check file extension
+        allowed_extensions = [".md", ".txt", ".text"]
+        ext = "." + filename.split(".")[-1].lower() if "." in filename else ""
+
+        if ext not in allowed_extensions:
+            await update.message.reply_text(
+                f"❌ *Unsupported file type*\n\n"
+                f"Received: `{ext}`\n"
+                f"Allowed: {', '.join(allowed_extensions)}\n\n"
+                f"Please upload a `.md` or `.txt` file with your project requirements.",
+                parse_mode="Markdown"
+            )
+            return
+
+        # Check file size (max 100KB)
+        if document.file_size > 100 * 1024:
+            await update.message.reply_text(
+                f"❌ *File too large*\n\n"
+                f"Size: {document.file_size // 1024}KB\n"
+                f"Maximum: 100KB\n\n"
+                f"Please use a smaller file or describe your project directly.",
+                parse_mode="Markdown"
+            )
+            return
+
+        # Download file
+        await update.message.reply_text(
+            f"📥 *File received*: `{filename}`\n\n"
+            f"Downloading and analyzing your project requirements...",
+            parse_mode="Markdown"
+        )
+
+        file = await document.get_file()
+        file_content = await file.download_as_bytearray()
+
+        safety.log_action(int(user_id), "upload_project_file", {
+            "filename": filename,
+            "size": len(file_content),
+        })
+
+        # Create project from file
+        await create_project_from_file(
+            update=update,
+            filename=filename,
+            file_content=bytes(file_content),
+            user_id=user_id,
+        )
+
+    except Exception as e:
+        logger.error(f"Error handling document: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ *Error processing file*\n\n"
+            f"Error: {str(e)}\n\n"
+            f"Please try again or use /new_project to describe your project.",
+            parse_mode="Markdown"
+        )
+
+
+# -----------------------------------------------------------------------------
 # Error Handler
 # -----------------------------------------------------------------------------
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3326,6 +3743,9 @@ def main():
 
     # Message handler for natural language input
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Phase 16C: Document handler for file-based project creation
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     # Error handler
     application.add_error_handler(error_handler)

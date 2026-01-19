@@ -1765,8 +1765,13 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check."""
-    return {
+    """
+    Detailed health check.
+
+    Phase 15.5: Added Claude CLI status with session-based auth support.
+    """
+    # Build base health response
+    health_response = {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "components": {
@@ -1820,6 +1825,29 @@ async def health_check():
             "CI_ON_PHASE_COMPLETE_ONLY"
         ]
     }
+
+    # Phase 15.5: Add Claude CLI status if backend is available
+    if CLAUDE_BACKEND_AVAILABLE:
+        try:
+            cli_status = await check_claude_availability()
+            health_response["components"]["claude_cli"] = {
+                "available": cli_status.get("available", False),
+                "installed": cli_status.get("installed", False),
+                "version": cli_status.get("version"),
+                "authenticated": cli_status.get("authenticated", False),
+                "auth_type": cli_status.get("auth_type", "none"),
+            }
+            # Add capability if Claude is available
+            if cli_status.get("available"):
+                health_response["capabilities"].append("claude_cli_execution")
+        except Exception as e:
+            logger.warning(f"Error checking Claude CLI status: {e}")
+            health_response["components"]["claude_cli"] = {
+                "available": False,
+                "error": str(e)
+            }
+
+    return health_response
 
 
 # -----------------------------------------------------------------------------
@@ -3595,10 +3623,15 @@ async def get_claude_status():
     """
     Check Claude CLI availability and status.
 
+    Phase 15.5: Updated to support session-based authentication.
+
     Returns information about:
-    - Claude CLI installation
-    - API key configuration
+    - Claude CLI installation and version
+    - Authentication status (CLI session OR API key)
     - Job scheduler status (Phase 14.10: multi-worker)
+
+    IMPORTANT: API key is NOT required if CLI session auth is present.
+    CLI session auth (via 'claude auth login') is treated as first-class.
     """
     if not CLAUDE_BACKEND_AVAILABLE:
         return {
@@ -3610,8 +3643,12 @@ async def get_claude_status():
     cli_status = await check_claude_availability()
     scheduler_status = await get_scheduler_status()
 
+    # Phase 15.5: Use the new 'authenticated' field instead of requiring api_key
+    # CLI is available if installed AND authenticated (via any method)
+    is_available = cli_status.get("available", False)
+
     return {
-        "available": cli_status["available"] and cli_status["api_key_configured"],
+        "available": is_available,
         "cli": cli_status,
         "scheduler": scheduler_status  # Phase 14.10: Enhanced multi-worker status
     }
@@ -4432,6 +4469,271 @@ async def ingestion_status_endpoint():
         "by_status": status_counts,
         "message": "Ingestion Engine operational",
     }
+
+
+# -----------------------------------------------------------------------------
+# Phase 16B: Dashboard & Observability Endpoints (READ-ONLY)
+# -----------------------------------------------------------------------------
+
+# Import dashboard backend
+try:
+    from .dashboard_backend import (
+        get_dashboard_summary,
+        get_all_projects as dashboard_get_projects,
+        get_project_detail,
+        get_claude_activity,
+        get_jobs_list as dashboard_get_jobs,
+        get_lifecycle_timeline,
+        get_all_lifecycles as dashboard_get_lifecycles,
+        get_audit_events,
+        get_security_summary,
+    )
+    DASHBOARD_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Dashboard backend not available: {e}")
+    DASHBOARD_AVAILABLE = False
+
+
+@app.get("/dashboard")
+async def dashboard_summary_endpoint():
+    """
+    Phase 16B: Get dashboard summary.
+
+    Returns top-level system overview including:
+    - System health status
+    - Project counts
+    - Lifecycle counts
+    - Job statistics
+    - Security summary
+    - Service health
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not DASHBOARD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Dashboard backend not available")
+
+    try:
+        summary = await get_dashboard_summary()
+        return {
+            "phase": "16B",
+            "endpoint": "dashboard",
+            "data": summary,
+        }
+    except Exception as e:
+        logger.error(f"Dashboard summary error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get dashboard: {str(e)}")
+
+
+@app.get("/dashboard/projects")
+async def dashboard_projects_endpoint():
+    """
+    Phase 16B: Get all projects overview.
+
+    Returns list of all projects with:
+    - Project ID and name
+    - Current lifecycle state
+    - Aspects and their states
+    - Active cycle number
+    - Current Claude job (if any)
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not DASHBOARD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Dashboard backend not available")
+
+    try:
+        projects = await dashboard_get_projects()
+        return {
+            "phase": "16B",
+            "endpoint": "dashboard/projects",
+            "count": len(projects),
+            "projects": projects,
+        }
+    except Exception as e:
+        logger.error(f"Dashboard projects error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get projects: {str(e)}")
+
+
+@app.get("/dashboard/project/{project_name}")
+async def dashboard_project_detail_endpoint(project_name: str):
+    """
+    Phase 16B: Get detailed view of a specific project.
+
+    Returns comprehensive project data including:
+    - All aspects with their states
+    - All associated lifecycles
+    - Total cycles across aspects
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not DASHBOARD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Dashboard backend not available")
+
+    try:
+        detail = await get_project_detail(project_name)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+        return {
+            "phase": "16B",
+            "endpoint": f"dashboard/project/{project_name}",
+            "data": detail,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Dashboard project detail error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get project: {str(e)}")
+
+
+@app.get("/dashboard/jobs")
+async def dashboard_jobs_endpoint(
+    state: Optional[str] = None,
+    project: Optional[str] = None,
+    limit: int = 50,
+):
+    """
+    Phase 16B: Get Claude jobs list.
+
+    Query parameters:
+    - state: Filter by job state (queued, running, completed, failed)
+    - project: Filter by project name
+    - limit: Maximum jobs to return (default 50)
+
+    Returns list of jobs with:
+    - Job ID and state
+    - Project and task info
+    - Timestamps
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not DASHBOARD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Dashboard backend not available")
+
+    try:
+        # Also get activity panel for summary
+        activity = await get_claude_activity()
+        jobs = await dashboard_get_jobs(state=state, project=project, limit=limit)
+        return {
+            "phase": "16B",
+            "endpoint": "dashboard/jobs",
+            "activity_summary": {
+                "active": activity.get("active_jobs", []),
+                "queued_count": len(activity.get("queued_jobs", [])),
+                "completed_today": activity.get("completed_jobs_today", 0),
+                "failed_today": activity.get("failed_jobs_today", 0),
+                "worker_utilization": activity.get("worker_utilization", {}),
+            },
+            "count": len(jobs),
+            "jobs": jobs,
+        }
+    except Exception as e:
+        logger.error(f"Dashboard jobs error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get jobs: {str(e)}")
+
+
+@app.get("/dashboard/lifecycles")
+async def dashboard_lifecycles_endpoint(
+    state: Optional[str] = None,
+    project: Optional[str] = None,
+    aspect: Optional[str] = None,
+):
+    """
+    Phase 16B: Get all lifecycles.
+
+    Query parameters:
+    - state: Filter by lifecycle state
+    - project: Filter by project name
+    - aspect: Filter by aspect (core, backend, etc.)
+
+    Returns list of lifecycles with their current state.
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not DASHBOARD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Dashboard backend not available")
+
+    try:
+        lifecycles = await dashboard_get_lifecycles(state=state, project=project, aspect=aspect)
+        return {
+            "phase": "16B",
+            "endpoint": "dashboard/lifecycles",
+            "count": len(lifecycles),
+            "lifecycles": lifecycles,
+        }
+    except Exception as e:
+        logger.error(f"Dashboard lifecycles error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get lifecycles: {str(e)}")
+
+
+@app.get("/dashboard/lifecycle/{lifecycle_id}")
+async def dashboard_lifecycle_timeline_endpoint(lifecycle_id: str):
+    """
+    Phase 16B: Get detailed lifecycle timeline.
+
+    Returns full history including:
+    - State transition history
+    - Approvals and rejections
+    - Feedback entries
+    - Cycle history
+    - Change summaries
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not DASHBOARD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Dashboard backend not available")
+
+    try:
+        timeline = await get_lifecycle_timeline(lifecycle_id)
+        if timeline is None:
+            raise HTTPException(status_code=404, detail=f"Lifecycle '{lifecycle_id}' not found")
+        return {
+            "phase": "16B",
+            "endpoint": f"dashboard/lifecycle/{lifecycle_id}",
+            "data": timeline,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Dashboard lifecycle timeline error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get timeline: {str(e)}")
+
+
+@app.get("/dashboard/audit")
+async def dashboard_audit_endpoint(
+    event_type: Optional[str] = None,
+    limit: int = 100,
+    since: Optional[str] = None,
+):
+    """
+    Phase 16B: Get audit events.
+
+    Query parameters:
+    - event_type: Filter by event type (DENIED, ALLOWED)
+    - limit: Maximum events to return (default 100)
+    - since: ISO timestamp to filter events after
+
+    Returns:
+    - Audit events
+    - Security summary
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not DASHBOARD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Dashboard backend not available")
+
+    try:
+        events = await get_audit_events(event_type=event_type, limit=limit, since=since)
+        security = await get_security_summary()
+        return {
+            "phase": "16B",
+            "endpoint": "dashboard/audit",
+            "security_summary": security,
+            "count": len(events),
+            "events": events,
+        }
+    except Exception as e:
+        logger.error(f"Dashboard audit error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get audit: {str(e)}")
 
 
 # -----------------------------------------------------------------------------

@@ -13,11 +13,20 @@ Phase 15: Autonomous Lifecycle Engine with Continuous Change Cycles
 - Phase 15.2: Continuous change cycles with DEPLOYED -> AWAITING_FEEDBACK loops
 - Phase 15.3: Existing project ingestion & adoption engine
 - Phase 15.4: Roadmap intelligence with epics and milestones
+- Phase 15.5: Claude CLI session-based auth support (API key optional)
+- Phase 15.6: Execution Gate Model for lifecycle-based permission enforcement
+- Phase 15.7: Real Execution Verification - Claude CLI must execute, not just exist
+- Phase 15.8: Runtime Truth Validation - Telegram bot validated via runtime health
+
+Phase 16: Claude Execution & Observability
+- Phase 16A: Claude Execution Smoke Test - Real end-to-end job execution proof
+- Phase 16B: Platform Dashboard & Observability Layer - Read-only control plane
+- Phase 16C: Real Project Execution Stabilization - Project Registry, CHD validation, file upload
 """
 
-__version__ = "0.15.4"
+__version__ = "0.16.2"
 
 # Single source of truth for phase metadata
-CURRENT_PHASE = "15.4"
-CURRENT_PHASE_NAME = "Roadmap Intelligence"
+CURRENT_PHASE = "16C"
+CURRENT_PHASE_NAME = "Real Project Execution Stabilization"
 CURRENT_PHASE_FULL = f"Phase {CURRENT_PHASE}: {CURRENT_PHASE_NAME}"

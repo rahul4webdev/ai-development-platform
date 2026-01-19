@@ -177,6 +177,13 @@ class ClaudeJob:
     result_summary: Optional[str] = None
     # Phase 15.2: Aspect isolation
     aspect: str = "core"  # Project aspect for scheduler isolation
+    # Phase 15.6: Execution Gate integration
+    lifecycle_id: Optional[str] = None  # Associated lifecycle ID
+    lifecycle_state: str = "development"  # Current lifecycle state for gate check
+    requested_action: str = "write_code"  # Action being requested
+    user_role: str = "developer"  # Role of requesting user
+    gate_allowed: Optional[bool] = None  # Result of execution gate check
+    gate_denied_reason: Optional[str] = None  # Reason if gate denied
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -200,6 +207,13 @@ class ClaudeJob:
             "result_summary": self.result_summary,
             # Phase 15.2: Aspect isolation
             "aspect": self.aspect,
+            # Phase 15.6: Execution Gate fields
+            "lifecycle_id": self.lifecycle_id,
+            "lifecycle_state": self.lifecycle_state,
+            "requested_action": self.requested_action,
+            "user_role": self.user_role,
+            "gate_allowed": self.gate_allowed,
+            "gate_denied_reason": self.gate_denied_reason,
         }
 
     def get_wait_time_seconds(self) -> float:
@@ -813,11 +827,26 @@ class ClaudeWorker:
         """
         Execute a Claude CLI job with resource limits.
 
+        Phase 15.6: Now includes ExecutionGate check before execution.
+        Execution will HARD FAIL if gate denies permission.
+
         Returns the updated job with execution results.
         """
         self._current_job = job
         self._running = True
         logger.info(f"Worker {self.worker_id}: Executing job {job.job_id}")
+
+        # Import execution gate (lazy to avoid circular imports)
+        try:
+            from .execution_gate import (
+                execution_gate,
+                ExecutionRequest,
+                get_execution_constraints_for_job,
+            )
+            gate_available = True
+        except ImportError as e:
+            logger.warning(f"ExecutionGate not available: {e}")
+            gate_available = False
 
         try:
             # Validate wrapper script
@@ -833,18 +862,68 @@ class ClaudeWorker:
                     job.job_id, job.project_name
                 )
 
-            # Create task file
+            # Phase 15.6: EXECUTION GATE CHECK
+            if gate_available:
+                request = ExecutionRequest(
+                    job_id=job.job_id,
+                    project_name=job.project_name,
+                    aspect=job.aspect,
+                    lifecycle_id=job.lifecycle_id or f"auto-{job.job_id}",
+                    lifecycle_state=job.lifecycle_state,
+                    requested_action=job.requested_action,
+                    requesting_user_id=job.created_by or "system",
+                    requesting_user_role=job.user_role,
+                    workspace_path=str(job.workspace_dir),
+                    task_description=job.task_description,
+                )
+
+                decision = execution_gate.evaluate(request)
+                job.gate_allowed = decision.allowed
+                job.gate_denied_reason = decision.denied_reason
+
+                if not decision.allowed:
+                    # HARD FAIL - execution gate denied
+                    job.state = JobState.FAILED
+                    job.error_message = f"EXECUTION GATE DENIED: {decision.denied_reason}"
+                    job.completed_at = datetime.utcnow()
+                    logger.error(
+                        f"Worker {self.worker_id}: Job {job.job_id} GATE DENIED - "
+                        f"{decision.denied_reason}"
+                    )
+                    await persistent_store.save_job(job)
+                    return job
+
+                logger.info(
+                    f"Worker {self.worker_id}: Job {job.job_id} GATE ALLOWED - "
+                    f"action={job.requested_action}, state={job.lifecycle_state}"
+                )
+
+                # Get execution constraints to pass to Claude
+                execution_constraints = get_execution_constraints_for_job(
+                    job.lifecycle_state,
+                    job.user_role,
+                )
+            else:
+                execution_constraints = None
+
+            # Create task file with execution constraints
+            task_metadata = {
+                "job_id": job.job_id,
+                "project_name": job.project_name,
+                "created_at": job.created_at.isoformat(),
+                "created_by": job.created_by,
+                "worker_id": self.worker_id,
+            }
+
+            # Phase 15.6: Add execution constraints to metadata
+            if execution_constraints:
+                task_metadata["execution_constraints"] = execution_constraints
+
             task_file = WorkspaceManager.create_task_file(
                 job.workspace_dir,
                 job.task_description,
                 job.task_type,
-                {
-                    "job_id": job.job_id,
-                    "project_name": job.project_name,
-                    "created_at": job.created_at.isoformat(),
-                    "created_by": job.created_by,
-                    "worker_id": self.worker_id,
-                }
+                task_metadata,
             )
 
             # Update job state
@@ -881,6 +960,9 @@ class ClaudeWorker:
                 job.error_message = f"Job timed out after {JOB_TIMEOUT}s"
                 job.completed_at = datetime.utcnow()
                 logger.warning(f"Worker {self.worker_id}: Job {job.job_id} timed out")
+                # Log outcome to execution gate audit
+                if gate_available:
+                    execution_gate.log_execution_outcome(request, "TIMEOUT", job.error_message)
                 return job
 
             job.exit_code = process.returncode
@@ -896,17 +978,29 @@ class ClaudeWorker:
                 if result_file.exists():
                     job.result_summary = result_file.read_text()[:1000]
                 logger.info(f"Worker {self.worker_id}: Job {job.job_id} completed successfully")
+                # Log success outcome
+                if gate_available:
+                    execution_gate.log_execution_outcome(request, "SUCCESS")
             else:
                 job.state = JobState.FAILED
                 job.error_message = f"Exit code: {job.exit_code}"
                 if stderr:
                     job.error_message += f"\nStderr: {stderr.decode()[:500]}"
                 logger.error(f"Worker {self.worker_id}: Job {job.job_id} failed: {job.error_message}")
+                # Log failure outcome
+                if gate_available:
+                    execution_gate.log_execution_outcome(request, "FAILURE", job.error_message)
 
         except Exception as e:
             logger.error(f"Worker {self.worker_id}: Job execution error: {e}")
             job.state = JobState.FAILED
             job.error_message = str(e)
+            # Log exception outcome
+            if gate_available:
+                try:
+                    execution_gate.log_execution_outcome(request, "FAILURE", str(e))
+                except:
+                    pass
 
         finally:
             job.completed_at = datetime.utcnow()
@@ -1381,6 +1475,11 @@ async def create_job(
     created_by: Optional[str] = None,
     priority: int = JobPriority.NORMAL.value,
     aspect: str = "core",
+    # Phase 15.6: Execution Gate parameters
+    lifecycle_id: Optional[str] = None,
+    lifecycle_state: str = "development",
+    requested_action: str = "write_code",
+    user_role: str = "developer",
 ) -> ClaudeJob:
     """
     Create and enqueue a new Claude CLI job.
@@ -1388,6 +1487,7 @@ async def create_job(
     Phase 14.10: Now uses multi-worker scheduler with persistent state.
     Phase 14.11: Added priority parameter for scheduling.
     Phase 15.2: Added aspect parameter for scheduler isolation.
+    Phase 15.6: Added lifecycle and execution gate parameters.
 
     Args:
         project_name: Name of the project
@@ -1396,6 +1496,10 @@ async def create_job(
         created_by: User ID or identifier of creator
         priority: Job priority (default: NORMAL=50). Use JobPriority enum values.
         aspect: Project aspect for scheduler isolation (core, backend, frontend_web, etc.)
+        lifecycle_id: Associated lifecycle ID for the project/aspect
+        lifecycle_state: Current lifecycle state (development, testing, etc.)
+        requested_action: Action being requested (read_code, write_code, run_tests, etc.)
+        user_role: Role of requesting user (owner, admin, developer, tester, viewer)
 
     Returns:
         The created ClaudeJob
@@ -1407,6 +1511,19 @@ async def create_job(
     valid_aspects = ["core", "backend", "frontend_web", "frontend_mobile", "admin", "custom"]
     validated_aspect = aspect if aspect in valid_aspects else "core"
 
+    # Phase 15.6: Validate lifecycle state and action
+    valid_lifecycle_states = [
+        "created", "planning", "development", "testing", "awaiting_feedback",
+        "fixing", "ready_for_production", "deployed", "rejected", "archived"
+    ]
+    validated_lifecycle_state = lifecycle_state if lifecycle_state in valid_lifecycle_states else "development"
+
+    valid_actions = ["read_code", "write_code", "run_tests", "commit", "push", "deploy_test", "deploy_prod"]
+    validated_action = requested_action if requested_action in valid_actions else "write_code"
+
+    valid_roles = ["owner", "admin", "developer", "tester", "viewer"]
+    validated_role = user_role if user_role in valid_roles else "developer"
+
     job = ClaudeJob(
         job_id=str(uuid.uuid4()),
         project_name=project_name,
@@ -1417,6 +1534,11 @@ async def create_job(
         created_by=created_by,
         priority=validated_priority,
         aspect=validated_aspect,
+        # Phase 15.6: Execution Gate fields
+        lifecycle_id=lifecycle_id,
+        lifecycle_state=validated_lifecycle_state,
+        requested_action=validated_action,
+        user_role=validated_role,
     )
 
     # Create workspace early so it's ready
@@ -1528,26 +1650,50 @@ async def stop_scheduler() -> None:
 
 async def check_claude_availability() -> Dict[str, Any]:
     """
-    Check if Claude CLI is available and configured.
+    Check if Claude CLI is available, authenticated, AND can execute prompts.
+
+    Phase 15.7: Updated to perform REAL execution test.
+
+    CRITICAL DISTINCTION:
+    - `claude --version` only checks if CLI binary is installed
+    - Actual prompt execution requires valid authentication (API key or setup-token)
+    - OAuth session from `~/.claude.json` does NOT work for `--print` mode
+    - This function now performs a REAL execution test to verify end-to-end functionality
+
+    Authentication States:
+    1. NOT_INSTALLED: CLI binary not found
+    2. INSTALLED_NOT_AUTHENTICATED: CLI installed, version works, but execution fails
+    3. AUTHENTICATED_FOR_AUTOMATION: CLI can execute prompts with --print
 
     Returns status dict with:
-    - available: bool
+    - available: bool (True ONLY if CLI can execute real prompts)
+    - installed: bool (True if CLI binary exists)
     - version: str or None
+    - authenticated: bool (True ONLY if real execution test passes)
+    - can_execute: bool (CRITICAL: True only if real prompt execution works)
+    - auth_type: str ('api_key', 'setup_token', 'none')
     - api_key_configured: bool
+    - wrapper_exists: bool
     - error: str or None
+    - execution_test_output: str or None (output from real test)
     """
     result = {
         "available": False,
+        "installed": False,
         "version": None,
+        "authenticated": False,
+        "can_execute": False,  # Phase 15.7: Critical new field
+        "auth_type": "none",
         "api_key_configured": False,
         "wrapper_exists": False,
         "error": None,
+        "execution_test_output": None,
     }
 
     # Check wrapper script
     result["wrapper_exists"] = WRAPPER_SCRIPT.exists()
 
-    # Check Claude CLI
+    # Step 1: Check if Claude CLI binary exists and get version
     try:
         process = await asyncio.create_subprocess_exec(
             "claude", "--version",
@@ -1557,17 +1703,98 @@ async def check_claude_availability() -> Dict[str, Any]:
         stdout, stderr = await process.communicate()
 
         if process.returncode == 0:
-            result["available"] = True
+            result["installed"] = True
             result["version"] = stdout.decode().strip()
+            logger.info(f"Claude CLI detected: {result['version']}")
         else:
-            result["error"] = f"Claude CLI error: {stderr.decode()}"
+            error_msg = stderr.decode().strip()
+            result["error"] = f"Claude CLI error: {error_msg}"
+            logger.warning(f"Claude CLI returned error: {error_msg}")
+            return result
 
     except FileNotFoundError:
         result["error"] = "Claude CLI not installed"
+        logger.warning("Claude CLI not found in PATH")
+        return result
     except Exception as e:
         result["error"] = str(e)
+        logger.error(f"Error checking Claude CLI: {e}")
+        return result
 
-    # Check API key (from environment)
-    result["api_key_configured"] = bool(os.getenv("ANTHROPIC_API_KEY"))
+    # Step 2: Check for API key (environment variable)
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if api_key and len(api_key) > 10:
+        result["api_key_configured"] = True
+        logger.info("ANTHROPIC_API_KEY environment variable is set")
+
+    # Step 3: REAL EXECUTION TEST (Phase 15.7)
+    # This is the ONLY way to know if Claude CLI can actually work
+    # `--version` passing means nothing for actual execution
+    try:
+        logger.info("Running real execution test...")
+
+        # Use a simple prompt that should return a predictable response
+        test_prompt = "respond with exactly: CLAUDE_CLI_OK"
+
+        process = await asyncio.create_subprocess_exec(
+            "claude", "--print", test_prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=30  # 30 second timeout for test
+            )
+        except asyncio.TimeoutError:
+            result["error"] = "Execution test timed out after 30 seconds"
+            logger.warning("Claude CLI execution test timed out")
+            return result
+
+        stdout_text = stdout.decode().strip()
+        stderr_text = stderr.decode().strip()
+
+        result["execution_test_output"] = stdout_text[:200] if stdout_text else stderr_text[:200]
+
+        if process.returncode == 0 and "CLAUDE_CLI_OK" in stdout_text:
+            # SUCCESS! Claude CLI can execute prompts
+            result["can_execute"] = True
+            result["authenticated"] = True
+            result["available"] = True
+
+            # Determine auth type
+            if result["api_key_configured"]:
+                result["auth_type"] = "api_key"
+            else:
+                result["auth_type"] = "setup_token"  # Must be setup-token auth
+
+            logger.info(
+                f"Claude CLI VERIFIED EXECUTABLE: version={result['version']}, "
+                f"auth_type={result['auth_type']}"
+            )
+            return result
+
+        # Execution failed - parse the error
+        if "Invalid API key" in stderr_text or "Invalid API key" in stdout_text:
+            result["error"] = (
+                "Claude CLI NOT AUTHENTICATED for automation. "
+                "Options: 1) Set ANTHROPIC_API_KEY environment variable, "
+                "2) Run 'claude setup-token' interactively"
+            )
+            logger.warning("Claude CLI installed but not authenticated for automation")
+        elif "Please run /login" in stderr_text or "Please run /login" in stdout_text:
+            result["error"] = (
+                "Claude CLI requires authentication. "
+                "Run 'claude setup-token' to configure long-lived auth for automation."
+            )
+            logger.warning("Claude CLI requires login for automation")
+        else:
+            result["error"] = f"Execution test failed: exit_code={process.returncode}, stderr={stderr_text[:200]}"
+            logger.warning(f"Claude CLI execution test failed: {result['error']}")
+
+    except Exception as e:
+        result["error"] = f"Execution test error: {str(e)}"
+        logger.error(f"Error during execution test: {e}")
 
     return result

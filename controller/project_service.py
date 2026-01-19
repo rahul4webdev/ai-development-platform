@@ -1,0 +1,428 @@
+"""
+Phase 16C: Project Service
+
+Unified service for project creation that:
+1. Validates requirements (CHD layer)
+2. Creates project in registry
+3. Creates lifecycle instances
+4. Triggers Claude planning job
+5. Provides progress callbacks
+
+This is the single entry point for project creation.
+"""
+
+import asyncio
+import logging
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, Any, List, Optional, Callable, Awaitable
+
+from controller.project_registry import (
+    get_registry,
+    Project,
+    ProjectStatus,
+    RegistryError,
+)
+from controller.chd_validator import (
+    validate_requirements,
+    validate_file,
+    ValidationResult,
+)
+
+logger = logging.getLogger("project_service")
+
+# Try to import lifecycle module
+try:
+    from controller.lifecycle_v2 import (
+        LifecycleEngine,
+        LifecycleMode,
+        ProjectAspect,
+        TransitionTrigger,
+        UserRole,
+    )
+    LIFECYCLE_AVAILABLE = True
+except ImportError:
+    LIFECYCLE_AVAILABLE = False
+    logger.warning("lifecycle_v2 module not available")
+
+
+# -----------------------------------------------------------------------------
+# Progress Callback Types
+# -----------------------------------------------------------------------------
+ProgressCallback = Callable[[str, str, Optional[Dict[str, Any]]], Awaitable[None]]
+
+
+@dataclass
+class ProjectCreationProgress:
+    """Progress state for project creation."""
+    step: str
+    status: str  # "pending", "in_progress", "completed", "failed"
+    message: str
+    details: Optional[Dict[str, Any]] = None
+
+
+# Progress steps
+PROGRESS_STEPS = [
+    ("input_received", "Input received"),
+    ("parsing", "Parsing requirements"),
+    ("validating", "Validating execution plan"),
+    ("creating_project", "Creating project"),
+    ("creating_lifecycles", "Initializing aspects"),
+    ("scheduling_planning", "Scheduling planning job"),
+    ("completed", "Project created successfully"),
+]
+
+
+# -----------------------------------------------------------------------------
+# Project Service
+# -----------------------------------------------------------------------------
+class ProjectService:
+    """
+    Unified service for project creation.
+
+    Handles the full flow:
+    1. Input validation (text or file)
+    2. Requirements parsing
+    3. CHD validation
+    4. Project registry creation
+    5. Lifecycle instance creation
+    6. Claude job scheduling
+    """
+
+    def __init__(self):
+        self._registry = get_registry()
+        self._lifecycle_engine: Optional["LifecycleEngine"] = None
+
+    def _get_lifecycle_engine(self) -> Optional["LifecycleEngine"]:
+        """Get or create lifecycle engine."""
+        if not LIFECYCLE_AVAILABLE:
+            return None
+
+        if self._lifecycle_engine is None:
+            try:
+                self._lifecycle_engine = LifecycleEngine()
+            except Exception as e:
+                logger.error(f"Failed to create lifecycle engine: {e}")
+                return None
+
+        return self._lifecycle_engine
+
+    # -------------------------------------------------------------------------
+    # Main Entry Points
+    # -------------------------------------------------------------------------
+
+    async def create_project_from_text(
+        self,
+        description: str,
+        user_id: str,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create project from text description.
+
+        Returns structured result with success/error.
+        """
+        return await self._create_project(
+            description=description,
+            requirements_raw=description,
+            requirements_source="text",
+            user_id=user_id,
+            progress_callback=progress_callback,
+        )
+
+    async def create_project_from_file(
+        self,
+        filename: str,
+        file_content: bytes,
+        user_id: str,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create project from uploaded file.
+
+        Returns structured result with success/error.
+        """
+        # Step 1: Validate and parse file
+        if progress_callback:
+            await progress_callback("input_received", "in_progress", {"filename": filename})
+
+        is_valid, error, content = validate_file(filename, file_content)
+        if not is_valid:
+            return {
+                "success": False,
+                "error": error,
+                "code": "FILE_VALIDATION_FAILED",
+            }
+
+        if progress_callback:
+            await progress_callback("input_received", "completed", {"filename": filename, "size": len(content)})
+
+        return await self._create_project(
+            description=content[:500],  # First 500 chars as description
+            requirements_raw=content,
+            requirements_source="file",
+            user_id=user_id,
+            progress_callback=progress_callback,
+        )
+
+    # -------------------------------------------------------------------------
+    # Core Implementation
+    # -------------------------------------------------------------------------
+
+    async def _create_project(
+        self,
+        description: str,
+        requirements_raw: str,
+        requirements_source: str,
+        user_id: str,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> Dict[str, Any]:
+        """
+        Core project creation logic.
+
+        Steps:
+        1. Parse and validate requirements
+        2. Create project in registry
+        3. Create lifecycle instances
+        4. Schedule planning job
+        """
+        result = {
+            "success": False,
+            "project_name": None,
+            "project_id": None,
+            "aspects": [],
+            "lifecycle_ids": [],
+            "next_steps": [],
+            "error": None,
+            "code": None,
+            "validation_result": None,
+        }
+
+        try:
+            # Step 1: Parse requirements
+            if progress_callback:
+                await progress_callback("parsing", "in_progress", None)
+
+            # Step 2: Validate requirements
+            if progress_callback:
+                await progress_callback("validating", "in_progress", None)
+
+            validation = validate_requirements(description, requirements_raw)
+            result["validation_result"] = validation.to_dict()
+
+            if not validation.is_valid:
+                if progress_callback:
+                    await progress_callback("validating", "failed", {"errors": validation.errors})
+                result["error"] = validation.get_user_message()
+                result["code"] = "VALIDATION_FAILED"
+                return result
+
+            if progress_callback:
+                await progress_callback("validating", "completed", {
+                    "aspects": validation.extracted_aspects,
+                    "tech": validation.extracted_tech,
+                })
+
+            # Step 3: Create project in registry
+            if progress_callback:
+                await progress_callback("creating_project", "in_progress", None)
+
+            success, message, project = self._registry.create_project(
+                name=description,
+                description=description,
+                created_by=user_id,
+                requirements_raw=requirements_raw,
+                requirements_source=requirements_source,
+                tech_stack=validation.extracted_tech,
+                aspects=validation.extracted_aspects,
+            )
+
+            if not success:
+                if progress_callback:
+                    await progress_callback("creating_project", "failed", {"message": message})
+                result["error"] = message
+                result["code"] = "PROJECT_CREATION_FAILED"
+                return result
+
+            result["project_name"] = project.name
+            result["project_id"] = project.project_id
+            result["aspects"] = list(project.aspects.keys())
+
+            if progress_callback:
+                await progress_callback("creating_project", "completed", {
+                    "project_name": project.name,
+                    "project_id": project.project_id,
+                })
+
+            # Step 4: Create lifecycle instances
+            if progress_callback:
+                await progress_callback("creating_lifecycles", "in_progress", None)
+
+            lifecycle_ids = await self._create_lifecycles(
+                project=project,
+                aspects=validation.extracted_aspects,
+                user_id=user_id,
+            )
+            result["lifecycle_ids"] = lifecycle_ids
+
+            # Update project with lifecycle IDs
+            for lc_id in lifecycle_ids:
+                self._registry.add_lifecycle_id(project.name, lc_id)
+
+            if progress_callback:
+                await progress_callback("creating_lifecycles", "completed", {
+                    "lifecycle_ids": lifecycle_ids,
+                })
+
+            # Step 5: Update aspect statuses to PLANNING
+            for aspect in project.aspects.keys():
+                self._registry.update_aspect_status(
+                    project.name,
+                    aspect,
+                    ProjectStatus.PLANNING.value,
+                )
+
+            # Step 6: Completion
+            if progress_callback:
+                await progress_callback("completed", "completed", {
+                    "project_name": project.name,
+                    "aspects": list(project.aspects.keys()),
+                })
+
+            result["success"] = True
+            result["next_steps"] = [
+                "Claude is analyzing your requirements",
+                "Planning phase will begin automatically",
+                "You will be notified when review is needed",
+                "Use /project_status to check progress",
+            ]
+
+            logger.info(f"Project created successfully: {project.name}")
+            return result
+
+        except RegistryError as e:
+            logger.error(f"Registry error creating project: {e}")
+            result["error"] = e.message
+            result["code"] = e.code
+            if progress_callback:
+                await progress_callback("creating_project", "failed", {"error": str(e)})
+            return result
+
+        except Exception as e:
+            logger.error(f"Unexpected error creating project: {e}", exc_info=True)
+            result["error"] = f"Unexpected error: {str(e)}"
+            result["code"] = "INTERNAL_ERROR"
+            if progress_callback:
+                await progress_callback("creating_project", "failed", {"error": str(e)})
+            return result
+
+    async def _create_lifecycles(
+        self,
+        project: Project,
+        aspects: List[str],
+        user_id: str,
+    ) -> List[str]:
+        """Create lifecycle instances for each aspect."""
+        lifecycle_ids = []
+
+        engine = self._get_lifecycle_engine()
+        if not engine:
+            logger.warning("Lifecycle engine not available, skipping lifecycle creation")
+            return lifecycle_ids
+
+        for aspect_name in aspects:
+            try:
+                # Map string to enum
+                aspect_enum = self._map_aspect_to_enum(aspect_name)
+                if not aspect_enum:
+                    continue
+
+                success, message, lifecycle = await engine.create_lifecycle(
+                    project_name=project.name,
+                    mode=LifecycleMode.PROJECT_MODE,
+                    aspect=aspect_enum,
+                    created_by=user_id,
+                    description=project.description[:200],
+                )
+
+                if success and lifecycle:
+                    lifecycle_ids.append(lifecycle.lifecycle_id)
+
+                    # Transition to PLANNING
+                    await engine.transition_lifecycle(
+                        lifecycle_id=lifecycle.lifecycle_id,
+                        trigger=TransitionTrigger.SYSTEM_INIT,
+                        triggered_by=user_id,
+                        user_role=UserRole.OWNER,
+                        reason="Initial project planning",
+                    )
+
+                    logger.info(f"Created lifecycle {lifecycle.lifecycle_id} for {project.name}/{aspect_name}")
+                else:
+                    logger.warning(f"Failed to create lifecycle for {aspect_name}: {message}")
+
+            except Exception as e:
+                logger.error(f"Error creating lifecycle for {aspect_name}: {e}")
+
+        return lifecycle_ids
+
+    def _map_aspect_to_enum(self, aspect_name: str) -> Optional["ProjectAspect"]:
+        """Map aspect name string to ProjectAspect enum."""
+        if not LIFECYCLE_AVAILABLE:
+            return None
+
+        mapping = {
+            "api": ProjectAspect.CORE,  # API goes to core
+            "backend": ProjectAspect.BACKEND,
+            "frontend": ProjectAspect.FRONTEND_WEB,
+            "admin": ProjectAspect.ADMIN,
+            "core": ProjectAspect.CORE,
+        }
+
+        return mapping.get(aspect_name.lower())
+
+
+# -----------------------------------------------------------------------------
+# Global Service Instance
+# -----------------------------------------------------------------------------
+_service: Optional[ProjectService] = None
+
+
+def get_project_service() -> ProjectService:
+    """Get the global project service instance."""
+    global _service
+    if _service is None:
+        _service = ProjectService()
+    return _service
+
+
+# -----------------------------------------------------------------------------
+# Module-Level Convenience Functions
+# -----------------------------------------------------------------------------
+async def create_project_from_text(
+    description: str,
+    user_id: str,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Dict[str, Any]:
+    """Create project from text description."""
+    return await get_project_service().create_project_from_text(
+        description=description,
+        user_id=user_id,
+        progress_callback=progress_callback,
+    )
+
+
+async def create_project_from_file(
+    filename: str,
+    file_content: bytes,
+    user_id: str,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Dict[str, Any]:
+    """Create project from uploaded file."""
+    return await get_project_service().create_project_from_file(
+        filename=filename,
+        file_content=file_content,
+        user_id=user_id,
+        progress_callback=progress_callback,
+    )

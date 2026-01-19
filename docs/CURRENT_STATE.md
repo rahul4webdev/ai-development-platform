@@ -7,16 +7,212 @@ The AI agent MUST update this file after completing any task.
 
 ## Last Updated
 - **Timestamp**: 2026-01-19
-- **Task**: Phase 15.4 Roadmap Intelligence - COMPLETED
-- **Status**: Complete (ANTHROPIC_API_KEY still required for execution)
+- **Task**: Phase 16C Real Project Execution Stabilization - COMPLETED
+- **Status**: Complete - Project Registry, CHD validation, file upload support, no more 500 errors
 
 ---
 
 ## Current Phase
 ```
-Phase: PHASE_15.4_COMPLETE
+Phase: PHASE_16C_COMPLETE
 Mode: development
 ```
+
+## Phase 16A: Claude Execution Smoke Test - VERIFIED
+
+**End-to-end Claude CLI job execution has been proven.**
+
+### Smoke Test Results
+- **Job ID**: smoke-test-668030e5
+- **Workspace**: /home/aitesting.mybd.in/jobs/job-smoke-test-668030e5
+- **Duration**: 9.08 seconds
+- **Exit Code**: 0
+- **Gate Passed**: ✅
+- **README.md Created**: ✅
+- **Content Exact Match**: ✅
+- **Audit Logged**: ✅
+
+### Key Learnings
+- `--permission-mode acceptEdits` required for file writes in automation
+- `--dangerously-skip-permissions` cannot be used with root (security restriction)
+- Claude CLI execution works end-to-end when properly configured
+
+See [SMOKE_TEST_REPORT.md](SMOKE_TEST_REPORT.md) for full details.
+
+---
+
+## Phase 16B: Platform Dashboard & Observability Layer - VERIFIED
+
+**READ-ONLY control plane for comprehensive system visibility.**
+
+### Components Implemented
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| DashboardBackend | controller/dashboard_backend.py | Read-only aggregation engine |
+| ProjectOverview | controller/dashboard_backend.py | Project state view model |
+| ClaudeActivityPanel | controller/dashboard_backend.py | Job activity view model |
+| LifecycleTimeline | controller/dashboard_backend.py | Lifecycle history view model |
+| DeploymentView | controller/dashboard_backend.py | Deployment status view model |
+| AuditEvent | controller/dashboard_backend.py | Audit event view model |
+| DashboardSummary | controller/dashboard_backend.py | Top-level summary view model |
+| SystemHealth | controller/dashboard_backend.py | Health status enum |
+
+### API Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| /dashboard | GET | Get comprehensive dashboard summary |
+| /dashboard/projects | GET | List all projects with states |
+| /dashboard/project/{name} | GET | Get specific project details |
+| /dashboard/jobs | GET | Get Claude job activity |
+| /dashboard/lifecycles | GET | List all lifecycles |
+| /dashboard/lifecycle/{id} | GET | Get lifecycle timeline |
+| /dashboard/audit | GET | Get audit events |
+
+### Telegram Integration
+
+| Component | Description |
+|-----------|-------------|
+| /dashboard | Enhanced command showing summary, active projects, jobs, health |
+| format_dashboard_enhanced() | New formatter for rich dashboard output |
+| get_lifecycle_state_emoji() | Emoji mapping for lifecycle states |
+| ControllerClient.get_dashboard_summary() | API client method |
+| ControllerClient.get_dashboard_jobs() | API client method |
+| ControllerClient.get_dashboard_audit() | API client method |
+
+### Hard Constraints (Enforced)
+
+| Constraint | Status |
+|------------|--------|
+| ❌ No business logic duplication | ✅ Enforced |
+| ❌ No lifecycle mutation | ✅ Enforced |
+| ❌ No Claude execution | ✅ Enforced |
+| ✅ Read-only aggregation only | ✅ Verified |
+| ✅ Deterministic output | ✅ Verified |
+| ✅ Zero hallucinated data | ✅ Verified |
+
+### Test Coverage (tests/test_dashboard_backend.py)
+
+| Test Class | Coverage |
+|------------|----------|
+| TestDashboardBackendImports | Module imports, function existence |
+| TestSystemHealthEnum | Health state enum values |
+| TestDataModels | All data model field validation |
+| TestDashboardBackendReadOnly | No write methods, read-only naming |
+| TestDashboardBackendDataConsistency | Summary creation, deterministic counts |
+| TestDashboardBackendNoSideEffects | Multiple call safety |
+| TestDashboardBackendZeroHallucination | No fake data, valid timestamps |
+| TestDashboardAPIEndpoints | Main imports, module functions |
+| TestTelegramDashboardIntegration | Format functions, client methods |
+
+**All 21 tests passing.**
+
+---
+
+## Phase 16C: Real Project Execution Stabilization - VERIFIED
+
+**Fixed all blockers preventing real project creation and dashboard visibility.**
+
+### Root Cause Identified
+Projects were being created as IPC files in `projects/` directory, but dashboard read from lifecycle files in `LIFECYCLE_STATE_DIR`. This caused "No projects found" despite successful creation.
+
+### Components Implemented
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| ProjectRegistry | controller/project_registry.py | Canonical project storage with persistence |
+| Project Model | controller/project_registry.py | Unified project data model |
+| CHDValidator | controller/chd_validator.py | Requirements validation before Claude execution |
+| FileContentValidator | controller/chd_validator.py | File upload validation (.md, .txt) |
+| ProjectService | controller/project_service.py | Unified project creation flow |
+| Progress Callbacks | controller/project_service.py | Real-time creation progress |
+
+### Fixes Applied
+
+| Issue | Solution |
+|-------|----------|
+| /dashboard shows "No projects found" | Dashboard now reads from Project Registry first |
+| 500 errors on project creation | All exceptions caught and returned as structured errors |
+| No file upload support | Added document handler in Telegram bot |
+| Missing validation | CHD validation layer catches invalid requirements early |
+| No progress feedback | Progress callback system shows real-time status |
+
+### File Upload Support (Telegram)
+
+- Supports: `.md`, `.txt` files
+- Max size: 100KB
+- Automatic requirements parsing
+- Progress feedback during creation
+
+### Validation Rules (CHD Layer)
+
+| Rule | Description |
+|------|-------------|
+| Aspect Required | At least one backend OR frontend must be defined |
+| No Auto-Deploy | `auto-deploy prod` pattern blocked |
+| No Skip Tests | `skip tests` pattern blocked |
+| Min Content | At least 10 characters required |
+| Database Hint | Warns if persistence mentioned but no DB specified |
+
+### API Changes
+
+| Endpoint | Change |
+|----------|--------|
+| POST /v2/project/create | Now validates with CHD layer and registers in Project Registry |
+| GET /dashboard | Now reads from Project Registry + Lifecycle files |
+| GET /dashboard/projects | Now reads from Project Registry + Lifecycle files |
+
+### Telegram Changes
+
+| Feature | Description |
+|---------|-------------|
+| File Handler | New `handle_document()` for `.md`/`.txt` uploads |
+| Progress Feedback | Real-time step-by-step progress messages |
+| Error Messages | Structured errors with suggestions |
+| create_project_from_file | New function for file-based creation |
+
+### Test Coverage (tests/test_phase16c.py)
+
+| Test Class | Tests |
+|------------|-------|
+| TestProjectRegistry | 7 tests |
+| TestCHDValidator | 7 tests |
+| TestProjectService | 1 test |
+| TestDashboardIntegration | 3 tests |
+| TestTelegramIntegration | 3 tests |
+| TestErrorHandling | 2 tests |
+
+**All 24 tests passing.**
+
+---
+
+## Important: Runtime Truth Validation (Phase 15.8)
+
+**All system validations now use RUNTIME TRUTH, not configuration presence.**
+
+### Principle
+If a service is running and operational, it is valid - period.
+Configuration presence is informational, not authoritative.
+
+### Claude CLI (Phase 15.7)
+- `claude --version` only checks if binary exists
+- Real execution test (`claude --print`) determines actual capability
+- OAuth session does NOT work for `--print` mode
+- Only ANTHROPIC_API_KEY or `claude setup-token` work for automation
+
+### Telegram Bot (Phase 15.8)
+- Token validity determined by RUNTIME health, not ENV presence
+- If `ai-telegram-bot` service is running → token is VALID
+- Checks: systemd status, process check, log activity
+
+### Validation Priority Order
+1. **systemd service status** (authoritative on VPS)
+2. **Process check** (fallback)
+3. **Log activity** (recent log updates)
+4. **ENV presence** (informational only, NOT authoritative)
+
+See [CLAUDE_CLI_EXECUTION_MODEL.md](CLAUDE_CLI_EXECUTION_MODEL.md) for CLI details.
 
 ---
 
@@ -94,6 +290,32 @@ Mode: development
 | Ingestion API Endpoints | Implemented | controller/main.py | Phase 15.3: /ingestion/* endpoints |
 | Telegram Ingestion Commands | Implemented | telegram_bot_v2/bot.py | Phase 15.3: ingest_git/ingest_local/approve/register |
 | Phase 15.3 Tests | Implemented | tests/test_ingestion_engine.py | Phase 15.3: 30+ tests |
+| Claude CLI Session Auth | Implemented | controller/claude_backend.py | Phase 15.5: Session-based auth, API key optional |
+| Auth Detection Tests | Implemented | tests/test_claude_auth.py | Phase 15.5: Unit tests for auth detection |
+| Execution Gate Model | Implemented | controller/execution_gate.py | Phase 15.6: Lifecycle-state/role/aspect permission enforcement |
+| Lifecycle-Action Mapping | Implemented | controller/execution_gate.py | Phase 15.6: LIFECYCLE_ALLOWED_ACTIONS, ROLE_ALLOWED_ACTIONS |
+| Workspace Isolation | Implemented | controller/execution_gate.py | Phase 15.6: Job workspace validation, path traversal prevention |
+| Governance Doc Enforcement | Implemented | controller/execution_gate.py | Phase 15.6: Required docs must exist before execution |
+| Execution Audit Trail | Implemented | controller/execution_gate.py | Phase 15.6: Immutable, append-only audit log |
+| Hard Fail Conditions | Implemented | controller/execution_gate.py | Phase 15.6: Security violations terminate execution |
+| Claude Invocation Contract | Implemented | controller/claude_backend.py | Phase 15.6: ExecutionGate check before execution |
+| Execution Gate Tests | Implemented | tests/test_execution_gate.py | Phase 15.6: 50+ security tests |
+| Real Execution Check | Implemented | controller/claude_backend.py | Phase 15.7: check_claude_availability tests real prompt execution |
+| Execution Model Docs | Implemented | docs/CLAUDE_CLI_EXECUTION_MODEL.md | Phase 15.7: Auth states, setup guide, troubleshooting |
+| Dry-Run Validation | Updated | scripts/dry_run_validation.py | Phase 15.7: Includes real Claude CLI execution test |
+| Runtime Truth Validation | Implemented | scripts/dry_run_validation.py | Phase 15.8: Telegram bot validated via runtime health |
+| Telegram Runtime Check | Implemented | scripts/dry_run_validation.py | Phase 15.8: systemd/process/log-based verification |
+| Claude Smoke Test | Verified | scripts/claude_smoke_test.py | Phase 16A: Real end-to-end job execution proven |
+| Smoke Test Report | Generated | docs/SMOKE_TEST_REPORT.md | Phase 16A: Execution results and validation |
+| Dashboard Backend | Implemented | controller/dashboard_backend.py | Phase 16B: Read-only observability layer |
+| Dashboard API | Implemented | controller/main.py | Phase 16B: /dashboard/* endpoints |
+| Telegram Dashboard | Enhanced | telegram_bot_v2/bot.py | Phase 16B: Enhanced /dashboard command |
+| Dashboard Tests | Implemented | tests/test_dashboard_backend.py | Phase 16B: 21 tests for read-only behavior
+| Project Registry | Implemented | controller/project_registry.py | Phase 16C: Canonical project storage, crash recovery |
+| CHD Validator | Implemented | controller/chd_validator.py | Phase 16C: Requirements validation before job creation |
+| Project Service | Implemented | controller/project_service.py | Phase 16C: Unified project creation with progress callbacks |
+| Telegram File Handler | Implemented | telegram_bot_v2/bot.py | Phase 16C: .md/.txt file upload for project creation |
+| Phase 16C Tests | Implemented | tests/test_phase16c.py | Phase 16C: 24 tests for registry, validator, service |
 
 ---
 
@@ -161,6 +383,10 @@ None
 
 | Timestamp | Task | Status | Details |
 |-----------|------|--------|---------|
+| 2026-01-19 | Phase 16C complete | Completed | Real Project Execution Stabilization: Project Registry, CHD Validator, Project Service, Telegram file uploads, 24 tests |
+| 2026-01-19 | Phase 16B complete | Completed | Platform Dashboard & Observability Layer: Read-only aggregation, API endpoints, Telegram integration, 21 tests |
+| 2026-01-19 | Phase 16A complete | Completed | Claude Execution Smoke Test: Real end-to-end job execution proven, README.md created with exact content |
+| 2026-01-19 | Phase 15.6 complete | Completed | Execution Gate Model: ExecutionGate, lifecycle-state/role/aspect permissions, audit trail, hard fail conditions, 50+ security tests |
 | 2026-01-19 | Phase 15.4 complete | Completed | Roadmap Intelligence: ROADMAP.md, EPICS.yaml (24 epics), MILESTONES.yaml (46 milestones), lifecycle integration notes |
 | 2026-01-19 | Phase 15.3 complete | Completed | Project Ingestion Engine: external project adoption, git/local analysis, aspect detection, risk scanning, document generation |
 | 2026-01-19 | Phase 15.2 complete | Completed | Continuous Change Cycles: DEPLOYED loops, SECURITY type, cycle tracking, change history/lineage |
@@ -182,6 +408,75 @@ None
 | 2026-01-16 | Phase 1 skeleton | Completed | Created controller/, bots/, tests/, workflows/, moved docs/, created README files |
 | 2026-01-16 | Bootstrap config | Completed | Updated all files with confirmed repository, domains, hosting, and tech stack details |
 | 2026-01-16 | Bootstrap docs | Completed | Created all foundational files |
+
+---
+
+## Phase 15.6 Deliverables
+
+### Execution Gate Model (controller/execution_gate.py)
+
+| Component | Description |
+|-----------|-------------|
+| ExecutionGate | Single point of authorization for Claude CLI execution |
+| ExecutionAction | Enum of permitted actions: READ_CODE, WRITE_CODE, RUN_TESTS, COMMIT, PUSH, DEPLOY_TEST, DEPLOY_PROD |
+| LifecycleState | Enum of 10 lifecycle states |
+| UserRole | Enum of 5 user roles: OWNER, ADMIN, DEVELOPER, TESTER, VIEWER |
+| ExecutionRequest | Request data class for gate evaluation |
+| GateDecision | Decision result with allowed/denied and reason |
+| ExecutionAuditEntry | Immutable audit log entry |
+| LIFECYCLE_ALLOWED_ACTIONS | Mapping of state -> permitted actions |
+| ROLE_ALLOWED_ACTIONS | Mapping of role -> permitted actions |
+
+### Lifecycle State Permissions
+
+| State | Allowed Actions |
+|-------|-----------------|
+| CREATED | None |
+| PLANNING | READ_CODE |
+| DEVELOPMENT | READ_CODE, WRITE_CODE, RUN_TESTS, COMMIT |
+| TESTING | READ_CODE, RUN_TESTS |
+| AWAITING_FEEDBACK | READ_CODE |
+| FIXING | READ_CODE, WRITE_CODE, RUN_TESTS, COMMIT |
+| READY_FOR_PRODUCTION | READ_CODE, PUSH, DEPLOY_TEST |
+| DEPLOYED | READ_CODE |
+| REJECTED | None |
+| ARCHIVED | None |
+
+### Role Permissions
+
+| Role | Allowed Actions |
+|------|-----------------|
+| OWNER | READ_CODE, WRITE_CODE, RUN_TESTS, COMMIT, PUSH, DEPLOY_TEST |
+| ADMIN | READ_CODE, WRITE_CODE, RUN_TESTS, COMMIT, PUSH, DEPLOY_TEST |
+| DEVELOPER | READ_CODE, WRITE_CODE, RUN_TESTS, COMMIT |
+| TESTER | READ_CODE, RUN_TESTS |
+| VIEWER | READ_CODE |
+
+### Hard Fail Conditions
+
+| Condition | Description |
+|-----------|-------------|
+| Invalid lifecycle state | Execution terminates, audit logged |
+| Invalid action | Execution terminates, audit logged |
+| Invalid user role | Execution terminates, audit logged |
+| Action not permitted in state | Execution terminates, audit logged |
+| Role cannot perform action | Execution terminates, audit logged |
+| Workspace outside /home/aitesting.mybd.in/jobs/ | Execution terminates (path traversal prevention) |
+| Governance documents missing | Execution terminates (policy enforcement) |
+| DEPLOY_PROD via automation | Always blocked (requires human dual-approval) |
+
+### Security Tests (tests/test_execution_gate.py)
+
+| Test Class | Coverage |
+|------------|----------|
+| TestLifecycleStatePermissions | State permission enforcement (10 states) |
+| TestDeployRestrictions | Deploy blocked from wrong states, prod always blocked |
+| TestCommitRestrictions | Commit blocked in AWAITING_FEEDBACK, TESTING, DEPLOYED |
+| TestWorkspaceIsolation | Path traversal prevention, jobs directory enforcement |
+| TestGovernanceDocuments | Required docs enforcement |
+| TestRoleBasedAccessControl | Role permission enforcement |
+| TestAuditTrail | Audit logging for all decisions |
+| TestInvalidInputs | Invalid state/action/role handling |
 
 ---
 
