@@ -181,12 +181,14 @@ async def create_project_from_natural_language(
     """
     Create a new multi-aspect project from natural language description.
 
-    Phase 16C Enhanced:
+    Phase 16E Enhanced:
     1. Validate requirements (CHD layer)
-    2. Register project in Project Registry
-    3. Generate Internal Project Contract (IPC)
-    4. Initialize all aspects (Core, Backend, Frontend)
-    5. Begin autonomous planning phase
+    2. Run decision engine for conflict detection
+    3. If conflict: return for user resolution
+    4. Register project in Project Registry with identity
+    5. Generate Internal Project Contract (IPC)
+    6. Initialize all aspects (Core, Backend, Frontend)
+    7. Begin autonomous planning phase
     """
     try:
         # Phase 16C: Validate requirements first
@@ -208,18 +210,89 @@ async def create_project_from_natural_language(
         # Normalize project name from description
         project_name = _normalize_project_name(request.description)
 
-        # Check if project already exists
+        # Phase 16E: Run decision engine BEFORE any writes
+        try:
+            from controller.project_registry import get_registry
+            from controller.project_decision_engine import (
+                evaluate_project_creation,
+                DecisionType,
+            )
+
+            registry = get_registry()
+            existing_identities = registry.get_all_identities()
+
+            # Evaluate for conflicts
+            requirements_raw = "\n".join(request.requirements) if request.requirements else None
+            decision = evaluate_project_creation(
+                description=request.description,
+                requirements=requirements_raw,
+                tech_stack=None,  # Could be parsed from description
+                aspects=None,  # Will be extracted
+                existing_identities=existing_identities,
+            )
+
+            # If conflict detected, return for user resolution
+            if decision.requires_user_confirmation:
+                return CreateProjectResponse(
+                    project_name=project_name,
+                    contract_id=None,
+                    aspects_initialized=[],
+                    next_steps=[],
+                    message="Conflict detected - user confirmation required",
+                    # Include decision details for client to handle
+                    metadata={
+                        "conflict_detected": True,
+                        "decision": decision.to_dict(),
+                    }
+                )
+
+            # If decision is not NEW_PROJECT, handle accordingly
+            if decision.decision == DecisionType.CHANGE_MODE:
+                # Redirect to change mode on existing project
+                return CreateProjectResponse(
+                    project_name=decision.existing_project_name,
+                    contract_id=None,
+                    aspects_initialized=[],
+                    next_steps=["Use CHANGE_MODE to modify existing project"],
+                    message=decision.explanation,
+                    metadata={
+                        "redirect_to_change_mode": True,
+                        "existing_project": decision.existing_project_name,
+                    }
+                )
+
+            if decision.decision == DecisionType.NEW_VERSION:
+                # Create new version
+                existing_project = registry.get_project(decision.existing_project_name)
+                if existing_project:
+                    success, message, project = registry.create_project_version(
+                        parent_project=existing_project,
+                        description=request.description,
+                        created_by=request.user_id,
+                        requirements_raw=requirements_raw,
+                    )
+                    if success:
+                        project_name = project.name
+                    else:
+                        raise HTTPException(status_code=400, detail=message)
+
+        except ImportError as e:
+            logger.warning(f"Decision engine not available: {e}")
+
+        # Check if project already exists (legacy check)
         if _load_ipc(project_name):
             raise HTTPException(
                 status_code=400,
                 detail=f"Project '{project_name}' already exists"
             )
 
-        # Phase 16C: Register in Project Registry FIRST
+        # Phase 16E: Register in Project Registry with identity
         try:
             from controller.project_registry import get_registry
             registry = get_registry()
-            success, message, project = registry.create_project(
+
+            # Use create_project_with_identity for fingerprint tracking
+            success, message, project = registry.create_project_with_identity(
                 name=project_name,
                 description=request.description,
                 created_by=request.user_id,

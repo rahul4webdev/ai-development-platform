@@ -1,5 +1,5 @@
 """
-Phase 16C: Project Registry
+Phase 16E: Project Registry v2
 
 Canonical source of truth for all projects in the platform.
 
@@ -8,12 +8,16 @@ This module provides:
 2. Persistent storage with crash recovery
 3. Lifecycle auto-creation when projects are registered
 4. Dashboard-ready project queries
+5. PROJECT IDENTITY & FINGERPRINTING (Phase 16E)
+6. Version tracking and change history
 
 HARD CONSTRAINTS:
 - Project MUST exist before lifecycle can be created
 - Project state is derived from lifecycle states
 - All mutations are atomic and logged
 - No silent failures - all errors are structured
+- UNIQUE FINGERPRINT enforcement (Phase 16E)
+- No duplicate projects by semantic identity
 """
 
 import json
@@ -99,10 +103,17 @@ class ProjectAspect(str, Enum):
 @dataclass
 class Project:
     """
-    Canonical project model.
+    Canonical project model (Phase 16E).
 
     This is the single source of truth for project existence.
     Lifecycles reference projects, not the other way around.
+
+    Phase 16E additions:
+    - fingerprint: Semantic identity hash
+    - normalized_intent: Structured intent data
+    - version: Project version (v1, v2, etc.)
+    - change_history: List of change cycles
+    - parent_project_id: For versioned projects
     """
     project_id: str
     name: str
@@ -121,6 +132,12 @@ class Project:
     domains: Dict[str, str] = field(default_factory=dict)  # aspect -> domain mapping
     validation_errors: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Phase 16E: Identity & Versioning
+    fingerprint: Optional[str] = None  # Semantic fingerprint hash
+    normalized_intent: Dict[str, Any] = field(default_factory=dict)  # Structured intent
+    version: str = "v1"  # Project version
+    change_history: List[Dict[str, Any]] = field(default_factory=list)  # Change cycles
+    parent_project_id: Optional[str] = None  # For versioned projects
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -647,6 +664,329 @@ class ProjectRegistry:
     def project_exists(self, name: str) -> bool:
         """Check if project exists."""
         return self._normalize_name(name) in self._projects
+
+    # -------------------------------------------------------------------------
+    # Phase 16E: Identity & Fingerprint Methods
+    # -------------------------------------------------------------------------
+
+    def get_all_identities(self) -> List[Tuple["ProjectIdentity", str]]:
+        """
+        Get all project identities for conflict detection.
+
+        Returns list of (ProjectIdentity, project_name) tuples.
+        """
+        from controller.project_identity import (
+            ProjectIdentity,
+            NormalizedIntent,
+            create_project_identity,
+        )
+
+        identities = []
+        for project in self._projects.values():
+            if project.current_status == ProjectStatus.ARCHIVED.value:
+                continue
+
+            # If project has stored identity, use it
+            if project.fingerprint and project.normalized_intent:
+                try:
+                    intent = NormalizedIntent.from_dict(project.normalized_intent)
+                    identity = ProjectIdentity(
+                        project_id=project.project_id,
+                        fingerprint=project.fingerprint,
+                        normalized_intent=intent,
+                        created_at=project.created_at,
+                    )
+                    identities.append((identity, project.name))
+                except Exception as e:
+                    logger.warning(f"Failed to load identity for {project.name}: {e}")
+            else:
+                # Generate identity from project data
+                try:
+                    identity = create_project_identity(
+                        project_id=project.project_id,
+                        description=project.description,
+                        requirements=project.requirements_raw,
+                        tech_stack=project.tech_stack,
+                        aspects=list(project.aspects.keys()),
+                    )
+                    identities.append((identity, project.name))
+                except Exception as e:
+                    logger.warning(f"Failed to generate identity for {project.name}: {e}")
+
+        return identities
+
+    def get_project_by_fingerprint(self, fingerprint: str) -> Optional[Project]:
+        """Get project by its semantic fingerprint."""
+        for project in self._projects.values():
+            if project.fingerprint == fingerprint:
+                return project
+        return None
+
+    def find_similar_projects(
+        self,
+        description: str,
+        requirements: Optional[str] = None,
+        tech_stack: Optional[Dict[str, Any]] = None,
+        aspects: Optional[List[str]] = None,
+        threshold: float = 0.7,
+    ) -> List[Tuple[Project, float, str]]:
+        """
+        Find projects similar to the given description.
+
+        Returns list of (project, similarity_score, explanation) tuples.
+        """
+        from controller.project_identity import (
+            ProjectIdentityManager,
+            create_project_identity,
+        )
+
+        # Create identity for the new project
+        new_identity = create_project_identity(
+            project_id="temp",
+            description=description,
+            requirements=requirements,
+            tech_stack=tech_stack,
+            aspects=aspects,
+        )
+
+        # Get existing identities
+        existing = self.get_all_identities()
+
+        # Find matches
+        matches = ProjectIdentityManager.find_similar_in_registry(
+            identity=new_identity,
+            registry_identities=[id for id, _ in existing],
+            threshold=threshold,
+        )
+
+        # Map back to projects
+        result = []
+        for matched_id, score, explanation in matches:
+            project = self.get_project_by_id(matched_id.project_id)
+            if project:
+                result.append((project, score, explanation))
+
+        return result
+
+    def create_project_with_identity(
+        self,
+        name: str,
+        description: str,
+        created_by: str,
+        requirements_raw: Optional[str] = None,
+        requirements_source: str = "text",
+        tech_stack: Dict[str, Any] = None,
+        aspects: List[str] = None,
+        fingerprint: Optional[str] = None,
+        normalized_intent: Optional[Dict[str, Any]] = None,
+        version: str = "v1",
+        parent_project_id: Optional[str] = None,
+    ) -> Tuple[bool, str, Optional[Project]]:
+        """
+        Create a new project with identity information (Phase 16E).
+
+        Returns: (success, message, project)
+        """
+        from controller.project_identity import create_project_identity
+
+        # Normalize name
+        normalized_name = self._normalize_name(name)
+
+        # Check if exists by name
+        if normalized_name in self._projects:
+            return False, f"Project '{normalized_name}' already exists", None
+
+        # Generate identity if not provided
+        project_id = str(uuid.uuid4())
+        if not fingerprint or not normalized_intent:
+            identity = create_project_identity(
+                project_id=project_id,
+                description=description,
+                requirements=requirements_raw,
+                tech_stack=tech_stack,
+                aspects=aspects,
+            )
+            fingerprint = identity.fingerprint
+            normalized_intent = identity.normalized_intent.to_dict()
+
+        # Check for fingerprint collision (exact duplicate)
+        existing = self.get_project_by_fingerprint(fingerprint)
+        if existing:
+            return False, (
+                f"Duplicate project detected! '{existing.name}' has identical semantic fingerprint. "
+                f"Use the decision engine to resolve this conflict."
+            ), None
+
+        # Create project
+        now = datetime.utcnow().isoformat()
+        project = Project(
+            project_id=project_id,
+            name=normalized_name,
+            description=description,
+            created_by=created_by,
+            created_at=now,
+            updated_at=now,
+            current_status=ProjectStatus.CREATED.value,
+            requirements_raw=requirements_raw,
+            requirements_source=requirements_source,
+            tech_stack=tech_stack or {},
+            fingerprint=fingerprint,
+            normalized_intent=normalized_intent,
+            version=version,
+            parent_project_id=parent_project_id,
+        )
+
+        # Initialize aspects
+        default_aspects = aspects or ["api", "frontend", "admin"]
+        for aspect in default_aspects:
+            project.aspects[aspect] = ProjectStatus.CREATED.value
+
+        # Save
+        self._projects[normalized_name] = project
+        self._save_registry()
+
+        logger.info(
+            f"Created project with identity: {normalized_name} "
+            f"(id={project_id}, fingerprint={fingerprint[:16]}...)"
+        )
+        return True, f"Project '{normalized_name}' created successfully", project
+
+    def create_project_version(
+        self,
+        parent_project: Project,
+        description: str,
+        created_by: str,
+        requirements_raw: Optional[str] = None,
+        tech_stack: Optional[Dict[str, Any]] = None,
+        aspects: Optional[List[str]] = None,
+    ) -> Tuple[bool, str, Optional[Project]]:
+        """
+        Create a new version of an existing project (Phase 16E).
+
+        Returns: (success, message, new_project)
+        """
+        # Determine next version
+        current_version = parent_project.version
+        if current_version.startswith("v"):
+            try:
+                version_num = int(current_version[1:])
+                new_version = f"v{version_num + 1}"
+            except ValueError:
+                new_version = f"{current_version}.1"
+        else:
+            new_version = f"{current_version}.1"
+
+        # Create new project name
+        new_name = f"{parent_project.name}-{new_version}"
+
+        return self.create_project_with_identity(
+            name=new_name,
+            description=description,
+            created_by=created_by,
+            requirements_raw=requirements_raw,
+            requirements_source="text",
+            tech_stack=tech_stack,
+            aspects=aspects,
+            version=new_version,
+            parent_project_id=parent_project.project_id,
+        )
+
+    def add_change_record(
+        self,
+        name: str,
+        change_type: str,
+        change_description: str,
+        changed_by: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Add a change record to project history (Phase 16E).
+
+        Returns: (success, message)
+        """
+        project = self.get_project(name)
+        if not project:
+            return False, f"Project '{name}' not found"
+
+        change_record = {
+            "change_id": str(uuid.uuid4()),
+            "change_type": change_type,
+            "description": change_description,
+            "changed_by": changed_by,
+            "timestamp": datetime.utcnow().isoformat(),
+            "metadata": metadata or {},
+        }
+
+        project.change_history.append(change_record)
+        project.updated_at = datetime.utcnow().isoformat()
+        self._save_registry()
+
+        logger.info(f"Added change record to {name}: {change_type}")
+        return True, f"Change record added to '{name}'"
+
+    def get_dashboard_projects_grouped(self) -> List[Dict[str, Any]]:
+        """
+        Get projects grouped by identity for dashboard (Phase 16E).
+
+        Groups versions together and shows only unique logical projects.
+        """
+        result = []
+        seen_fingerprints = set()
+
+        # Sort by created_at to get original projects first
+        sorted_projects = sorted(
+            self._projects.values(),
+            key=lambda p: p.created_at,
+        )
+
+        for project in sorted_projects:
+            if project.current_status == ProjectStatus.ARCHIVED.value:
+                continue
+
+            # Skip if we've already seen this fingerprint
+            if project.fingerprint and project.fingerprint in seen_fingerprints:
+                continue
+
+            if project.fingerprint:
+                seen_fingerprints.add(project.fingerprint)
+
+            # Find all versions of this project
+            versions = []
+            if project.fingerprint:
+                for p in self._projects.values():
+                    if p.fingerprint == project.fingerprint and p.project_id != project.project_id:
+                        versions.append({
+                            "version": p.version,
+                            "project_id": p.project_id,
+                            "name": p.name,
+                        })
+
+            result.append({
+                "project_id": project.project_id,
+                "project_name": project.name,
+                "current_status": project.current_status,
+                "lifecycle_state": project.current_status,
+                "aspects": project.aspects,
+                "active_jobs": len(project.active_job_ids),
+                "lifecycle_count": len(project.lifecycle_ids),
+                "created_at": project.created_at,
+                "updated_at": project.updated_at,
+                "created_by": project.created_by,
+                "fingerprint": project.fingerprint,
+                "version": project.version,
+                "versions": versions,
+                "change_count": len(project.change_history),
+            })
+
+        # Sort by updated_at descending
+        result.sort(key=lambda p: p["updated_at"], reverse=True)
+        return result
+
+
+# Type hint for ProjectIdentity (avoid circular import)
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from controller.project_identity import ProjectIdentity
 
 
 # -----------------------------------------------------------------------------

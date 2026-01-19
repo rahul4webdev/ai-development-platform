@@ -22,11 +22,12 @@ Phase 16: Claude Execution & Observability
 - Phase 16A: Claude Execution Smoke Test - Real end-to-end job execution proof
 - Phase 16B: Platform Dashboard & Observability Layer - Read-only control plane
 - Phase 16C: Real Project Execution Stabilization - Project Registry, CHD validation, file upload
+- Phase 16E: Project Identity, Fingerprinting & Conflict Resolution Engine
 """
 
-__version__ = "0.16.2"
+__version__ = "0.16.4"
 
 # Single source of truth for phase metadata
-CURRENT_PHASE = "16C"
-CURRENT_PHASE_NAME = "Real Project Execution Stabilization"
+CURRENT_PHASE = "16E"
+CURRENT_PHASE_NAME = "Project Identity, Fingerprinting & Conflict Resolution"
 CURRENT_PHASE_FULL = f"Phase {CURRENT_PHASE}: {CURRENT_PHASE_NAME}"

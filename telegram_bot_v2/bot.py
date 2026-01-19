@@ -1,5 +1,5 @@
 """
-Telegram Bot - Phase 13.3-15.3
+Telegram Bot - Phase 13.3-16E
 
 Production Control Plane for AI Development Platform.
 
@@ -18,6 +18,8 @@ Features:
 - Autonomous lifecycle engine (15.1)
 - Continuous change cycles (15.2)
 - Project ingestion & adoption (15.3)
+- Project identity & fingerprinting (16E)
+- Conflict detection & resolution UX (16E)
 
 Safety:
 - Bot cannot trigger prod deploy directly
@@ -84,7 +86,7 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.15.5"
+BOT_VERSION = "0.16.4"
 BOT_START_TIME = datetime.utcnow()
 
 # -----------------------------------------------------------------------------
@@ -218,6 +220,11 @@ class CallbackAction(str, Enum):
     REJECT_IMPROVEMENT = "rej_improve"
     REJECT_INVALID = "rej_invalid"
     REJECT_OTHER = "rej_other"
+    # Phase 16E: Conflict Resolution Actions
+    CONFLICT_IMPROVE = "conf_improve"      # Improve existing project
+    CONFLICT_ADD_MODULE = "conf_addmod"    # Add new module to existing
+    CONFLICT_NEW_VERSION = "conf_newver"   # Create new version
+    CONFLICT_CANCEL = "conf_cancel"        # Cancel project creation
 
 
 # -----------------------------------------------------------------------------
@@ -230,6 +237,8 @@ class UserState:
         self.pending_project_creation: Dict[int, str] = {}
         self.awaiting_input: Dict[int, str] = {}
         self.approval_history: Dict[str, List[Dict[str, Any]]] = {}  # deployment_id -> approvals
+        # Phase 16E: Conflict resolution state
+        self.pending_conflicts: Dict[int, Dict[str, Any]] = {}  # user_id -> conflict details
 
 
 user_state = UserState()
@@ -1192,6 +1201,45 @@ def get_rejection_reason_keyboard(project_name: str, aspect: str) -> InlineKeybo
             InlineKeyboardButton(
                 "📝 Other (explain)",
                 callback_data=f"{CallbackAction.REJECT_OTHER.value}:{project_name}:{aspect}"
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_conflict_resolution_keyboard(
+    existing_project: str,
+    new_description: str,
+    conflict_id: str
+) -> InlineKeyboardMarkup:
+    """
+    Create inline keyboard for conflict resolution (Phase 16E).
+
+    Shows user choices when a similar project already exists.
+    """
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "1️⃣ Improve existing project",
+                callback_data=f"{CallbackAction.CONFLICT_IMPROVE.value}:{existing_project}:{conflict_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "2️⃣ Add new module",
+                callback_data=f"{CallbackAction.CONFLICT_ADD_MODULE.value}:{existing_project}:{conflict_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "3️⃣ Create new version",
+                callback_data=f"{CallbackAction.CONFLICT_NEW_VERSION.value}:{existing_project}:{conflict_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "4️⃣ Cancel",
+                callback_data=f"{CallbackAction.CONFLICT_CANCEL.value}:{existing_project}:{conflict_id}"
             )
         ]
     ]
@@ -2390,6 +2438,76 @@ async def create_project_from_description(
         # Send initial progress
         await progress_callback("input_received", "in_progress", {"source": "text"})
 
+        # Phase 16E: Check for conflicts FIRST before project creation
+        try:
+            from controller.project_registry import get_registry
+            from controller.project_decision_engine import (
+                evaluate_project_creation,
+                DecisionType,
+            )
+
+            await progress_callback("validating", "in_progress", None)
+
+            registry = get_registry()
+            existing_identities = registry.get_all_identities()
+
+            # Evaluate for conflicts
+            decision = evaluate_project_creation(
+                description=description,
+                requirements=description,
+                tech_stack=None,
+                aspects=None,
+                existing_identities=existing_identities,
+            )
+
+            # If conflict detected, show user choices
+            if decision.requires_user_confirmation:
+                conflict_id = f"conf_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                existing_project = decision.existing_project_name or "unknown"
+
+                # Store conflict state for callback
+                user_id_int = int(user_id) if user_id.isdigit() else hash(user_id) % (10**9)
+                user_state.pending_conflicts[user_id_int] = {
+                    "conflict_id": conflict_id,
+                    "description": description,
+                    "existing_project": existing_project,
+                    "decision": decision.to_dict(),
+                    "created_at": datetime.utcnow().isoformat(),
+                }
+
+                # Format conflict message
+                conflict_text = (
+                    f"⚠️ *Conflict Detected*\n\n"
+                    f"A similar project already exists:\n"
+                    f"*Existing:* `{existing_project}`\n\n"
+                    f"*Similarity:* {decision.confidence * 100:.0f}%\n"
+                    f"*Reason:* {decision.explanation}\n\n"
+                )
+
+                if decision.differences:
+                    conflict_text += "*Key differences:*\n"
+                    for diff in decision.differences[:3]:
+                        conflict_text += f"  • {diff}\n"
+                    conflict_text += "\n"
+
+                conflict_text += "*Choose an action:*"
+
+                await update.message.reply_text(
+                    conflict_text,
+                    parse_mode="Markdown",
+                    reply_markup=get_conflict_resolution_keyboard(
+                        existing_project=existing_project,
+                        new_description=description[:50],
+                        conflict_id=conflict_id
+                    )
+                )
+                return
+
+            await progress_callback("validating", "completed", None)
+
+        except ImportError as e:
+            logger.warning(f"Decision engine not available: {e}")
+
         # Try new ProjectService first (Phase 16C)
         try:
             from controller.project_service import create_project_from_text
@@ -2680,6 +2798,118 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"Please explain the rejection reason in detail:",
                 parse_mode="Markdown"
             )
+
+        # Phase 16E: Conflict Resolution Callbacks
+        elif action in [
+            CallbackAction.CONFLICT_IMPROVE.value,
+            CallbackAction.CONFLICT_ADD_MODULE.value,
+            CallbackAction.CONFLICT_NEW_VERSION.value,
+            CallbackAction.CONFLICT_CANCEL.value
+        ]:
+            # project_name is actually existing_project, aspect is conflict_id
+            existing_project = project_name
+            conflict_id = aspect
+
+            # Get stored conflict state
+            conflict_state = user_state.pending_conflicts.get(user_id, {})
+            description = conflict_state.get("description", "")
+
+            safety.log_action(user_id, f"conflict_resolution_{action}", {
+                "existing_project": existing_project,
+                "conflict_id": conflict_id,
+                "choice": action
+            })
+
+            if action == CallbackAction.CONFLICT_CANCEL.value:
+                # Clear conflict state
+                user_state.pending_conflicts.pop(user_id, None)
+                await query.edit_message_text(
+                    "✅ *Project creation cancelled.*\n\n"
+                    "No changes were made.",
+                    parse_mode="Markdown"
+                )
+
+            elif action == CallbackAction.CONFLICT_IMPROVE.value:
+                # Route to change mode for existing project
+                user_state.pending_conflicts.pop(user_id, None)
+                await query.edit_message_text(
+                    f"🔄 *Switching to CHANGE_MODE*\n\n"
+                    f"Your request will improve the existing project:\n"
+                    f"`{existing_project}`\n\n"
+                    f"Use /change_request {existing_project} to add modifications.",
+                    parse_mode="Markdown"
+                )
+
+            elif action == CallbackAction.CONFLICT_ADD_MODULE.value:
+                # Add new module to existing project
+                user_state.pending_conflicts.pop(user_id, None)
+                await query.edit_message_text(
+                    f"📦 *Adding Module*\n\n"
+                    f"A new module will be added to:\n"
+                    f"`{existing_project}`\n\n"
+                    f"The system will analyze your requirements and add appropriate modules.\n"
+                    f"Use /project_status {existing_project} to check progress.",
+                    parse_mode="Markdown"
+                )
+
+                # Trigger module addition via registry
+                try:
+                    from controller.project_registry import get_registry
+                    registry = get_registry()
+                    registry.add_change_record(
+                        project_name=existing_project,
+                        change_type="module_addition",
+                        description=description,
+                        changed_by=str(user_id),
+                        details={"from_conflict": conflict_id}
+                    )
+                except Exception as e:
+                    logger.error(f"Error recording module addition: {e}")
+
+            elif action == CallbackAction.CONFLICT_NEW_VERSION.value:
+                # Create new version of the project
+                user_state.pending_conflicts.pop(user_id, None)
+
+                try:
+                    from controller.project_registry import get_registry
+                    registry = get_registry()
+
+                    existing = registry.get_project(existing_project)
+                    if existing:
+                        success, message, new_project = registry.create_project_version(
+                            parent_project=existing,
+                            description=description,
+                            created_by=str(user_id),
+                            requirements_raw=description,
+                        )
+
+                        if success:
+                            await query.edit_message_text(
+                                f"🆕 *New Version Created*\n\n"
+                                f"*Original:* `{existing_project}`\n"
+                                f"*New Version:* `{new_project.name}`\n"
+                                f"*Version:* {new_project.version}\n\n"
+                                f"The new version will be developed independently.\n"
+                                f"Use /project_status {new_project.name} to check progress.",
+                                parse_mode="Markdown"
+                            )
+                        else:
+                            await query.edit_message_text(
+                                f"❌ *Error Creating Version*\n\n{message}",
+                                parse_mode="Markdown"
+                            )
+                    else:
+                        await query.edit_message_text(
+                            f"❌ *Error:* Project `{existing_project}` not found.",
+                            parse_mode="Markdown"
+                        )
+                except Exception as e:
+                    logger.error(f"Error creating new version: {e}")
+                    await query.edit_message_text(
+                        f"❌ *Error:* {str(e)}",
+                        parse_mode="Markdown"
+                    )
+
         else:
             await query.edit_message_text(f"Unknown action: {action}")
     except Exception as e:

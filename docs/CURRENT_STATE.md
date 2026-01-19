@@ -6,16 +6,17 @@ The AI agent MUST update this file after completing any task.
 ---
 
 ## Last Updated
-- **Timestamp**: 2026-01-19
-- **Task**: Phase 16C Real Project Execution Stabilization - COMPLETED
-- **Status**: Complete - Project Registry, CHD validation, file upload support, no more 500 errors
+- **Timestamp**: 2026-01-20
+- **Task**: Phase 16E Project Identity, Fingerprinting & Conflict Resolution - COMPLETED
+- **Status**: Complete - Enterprise-grade project identity system, deterministic fingerprinting, conflict resolution engine
 
 ---
 
 ## Current Phase
 ```
-Phase: PHASE_16C_COMPLETE
+Phase: PHASE_16E_COMPLETE
 Mode: development
+Version: 0.16.4
 ```
 
 ## Phase 16A: Claude Execution Smoke Test - VERIFIED
@@ -187,6 +188,136 @@ Projects were being created as IPC files in `projects/` directory, but dashboard
 
 ---
 
+## Phase 16E: Project Identity, Fingerprinting & Conflict Resolution - VERIFIED
+
+**Enterprise-grade system to prevent duplicate projects, ambiguous intent, and silent overwrites.**
+
+### Problem Solved
+
+| Issue | Impact | Solution |
+|-------|--------|----------|
+| Duplicate Projects | Same project created multiple times with different names | Fingerprint-based deduplication |
+| Ambiguous Intent | "Build CRM" vs "Build CRM with API" - unclear if same project | Normalized intent extraction |
+| Silent Overwrites | Creating similar project overwrites work | Conflict detection with user choices |
+| No Version History | No tracking of project evolution | Parent-child version linking |
+
+### Components Implemented
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| ProjectIdentity | controller/project_identity.py | Frozen/immutable project identity |
+| NormalizedIntent | controller/project_identity.py | Semantic project representation |
+| IntentExtractor | controller/project_identity.py | Extracts purpose, modules, DB, architecture |
+| FingerprintGenerator | controller/project_identity.py | SHA-256 deterministic fingerprinting |
+| ProjectIdentityManager | controller/project_identity.py | Identity creation and comparison |
+| DecisionResult | controller/project_decision_engine.py | Decision with explanation and confidence |
+| ProjectDecisionEngine | controller/project_decision_engine.py | Locked decision matrix |
+| ArchitectureChangeDetector | controller/project_decision_engine.py | Breaking change detection |
+| ScopeChangeDetector | controller/project_decision_engine.py | Module change detection |
+
+### Fingerprinting Rules (Deterministic)
+
+Fingerprint is SHA-256 hash of canonicalized:
+- `purpose_keywords` (sorted, lowercase)
+- `functional_modules` (sorted, lowercase)
+- `domain_topology` (sorted, lowercase)
+- `database_type` (string)
+- `architecture_class` (string)
+- `target_users` (sorted, lowercase)
+
+**NOT included**: repo URLs, file paths, timestamps, secrets, user IDs.
+
+### Decision Matrix (Locked)
+
+| Condition | Decision | User Confirmation |
+|-----------|----------|-------------------|
+| No existing projects | NEW_PROJECT | No |
+| Exact fingerprint match | CONFLICT_DETECTED | **Yes** |
+| Similarity >= 85% | CONFLICT_DETECTED | **Yes** |
+| Architecture change | NEW_VERSION | **Yes** |
+| Scope change only | CHANGE_MODE | **Yes** |
+| Similarity < 50% | NEW_PROJECT | No |
+
+### Similarity Scoring
+
+| Component | Weight |
+|-----------|--------|
+| Purpose Keywords | 0.30 |
+| Functional Modules | 0.30 |
+| Domain Topology | 0.15 |
+| Database Type | 0.10 |
+| Architecture Class | 0.10 |
+| Target Users | 0.05 |
+
+### Project Registry v2 Changes
+
+| New Field | Type | Purpose |
+|-----------|------|---------|
+| fingerprint | str | SHA-256 identity fingerprint |
+| normalized_intent | dict | Semantic intent representation |
+| version | str | v1, v2, v3... |
+| change_history | list | Change records |
+| parent_project_id | str | Link to parent version |
+
+| New Method | Purpose |
+|------------|---------|
+| get_all_identities() | Return all (ProjectIdentity, name) tuples |
+| get_project_by_fingerprint() | Lookup by fingerprint |
+| find_similar_projects() | Find projects above similarity threshold |
+| create_project_with_identity() | Create with fingerprint |
+| create_project_version() | Create new version of existing project |
+| add_change_record() | Track change history |
+| get_dashboard_projects_grouped() | Group by fingerprint |
+
+### Telegram Bot Conflict UX
+
+When conflict detected, bot shows:
+```
+⚠️ Conflict Detected
+
+A similar project already exists:
+Existing: `crm-saas-v1`
+
+Similarity: 87%
+Reason: High similarity in purpose and modules
+
+Choose an action:
+[1️⃣ Improve existing project]
+[2️⃣ Add new module]
+[3️⃣ Create new version]
+[4️⃣ Cancel]
+```
+
+### Dashboard Identity Grouping
+
+| Method | Purpose |
+|--------|---------|
+| get_projects_grouped_by_identity() | Group projects by fingerprint family |
+| ProjectOverview.fingerprint | New field in project overview |
+| ProjectOverview.version | New field in project overview |
+| ProjectOverview.parent_project_id | New field in project overview |
+
+### API Changes
+
+| Endpoint | Change |
+|----------|--------|
+| POST /v2/project/create | Now runs decision engine, returns conflict if detected |
+| GET /dashboard | Now includes fingerprint, version, parent in projects |
+
+### Test Coverage (tests/test_phase16e.py)
+
+| Test Class | Tests |
+|------------|-------|
+| TestProjectIdentityEngine | 8 tests |
+| TestProjectDecisionEngine | 9 tests |
+| TestProjectRegistryV2 | 6 tests |
+| TestPhase16EIntegration | 4 tests |
+| TestEdgeCases | 3 tests |
+
+**30 tests total.**
+
+---
+
 ## Important: Runtime Truth Validation (Phase 15.8)
 
 **All system validations now use RUNTIME TRUTH, not configuration presence.**
@@ -316,6 +447,13 @@ See [CLAUDE_CLI_EXECUTION_MODEL.md](CLAUDE_CLI_EXECUTION_MODEL.md) for CLI detai
 | Project Service | Implemented | controller/project_service.py | Phase 16C: Unified project creation with progress callbacks |
 | Telegram File Handler | Implemented | telegram_bot_v2/bot.py | Phase 16C: .md/.txt file upload for project creation |
 | Phase 16C Tests | Implemented | tests/test_phase16c.py | Phase 16C: 24 tests for registry, validator, service |
+| Project Identity Engine | Implemented | controller/project_identity.py | Phase 16E: Deterministic fingerprinting, normalized intent |
+| Decision Engine | Implemented | controller/project_decision_engine.py | Phase 16E: Locked decision matrix, conflict detection |
+| Project Registry v2 | Upgraded | controller/project_registry.py | Phase 16E: Identity fields, version tracking, fingerprint lookup |
+| Conflict Resolution UX | Implemented | telegram_bot_v2/bot.py | Phase 16E: User choice buttons for conflict resolution |
+| Dashboard Identity Grouping | Implemented | controller/dashboard_backend.py | Phase 16E: Group projects by fingerprint family |
+| Phase12 Router Integration | Updated | controller/phase12_router.py | Phase 16E: Decision engine before project creation |
+| Phase 16E Tests | Implemented | tests/test_phase16e.py | Phase 16E: 30 tests for identity, decision, integration |
 
 ---
 

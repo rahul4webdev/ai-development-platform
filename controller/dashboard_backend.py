@@ -1,5 +1,5 @@
 """
-Phase 16B: Platform Dashboard & Observability Layer
+Phase 16B-16E: Platform Dashboard & Observability Layer
 
 READ-ONLY control plane for comprehensive system visibility.
 
@@ -17,11 +17,13 @@ This module provides:
 3. Lifecycle Timeline - State transitions, approvals, feedback
 4. Deployment View - TEST/PROD deployments
 5. Security & Audit - Gate denials, policy violations
+6. Identity Grouping - Projects grouped by fingerprint (Phase 16E)
 
 All data is aggregated from existing sources:
 - lifecycle_v2.py - Lifecycle state and history
 - claude_backend.py - Job and scheduler state
 - execution_gate.py - Audit trail and gate decisions
+- project_registry.py - Project registry with identity (Phase 16E)
 """
 
 import json
@@ -75,9 +77,13 @@ class ProjectOverview:
     lifecycle_id: Optional[str]
     created_at: Optional[str]
     updated_at: Optional[str]
+    # Phase 16E: Identity fields
+    fingerprint: Optional[str] = None
+    version: str = "v1"
+    parent_project_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "project_id": self.project_id,
             "project_name": self.project_name,
             "mode": self.mode,
@@ -90,7 +96,15 @@ class ProjectOverview:
             "lifecycle_id": self.lifecycle_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            # Phase 16E: Identity information
+            "fingerprint": self.fingerprint,
+            "version": self.version,
+            "parent_project_id": self.parent_project_id,
         }
+        # Include identity_info if attached
+        if hasattr(self, "_identity_info"):
+            result.update(self._identity_info)
+        return result
 
 
 @dataclass
@@ -355,21 +369,23 @@ class DashboardBackend:
 
         Returns list of projects with their current state.
         Data is aggregated from:
-        1. Project Registry (primary source - Phase 16C)
+        1. Project Registry (primary source - Phase 16C/16E)
         2. Lifecycle state files (secondary source)
 
         This ensures projects appear in dashboard immediately after creation.
+
+        Phase 16E: Projects now include fingerprint and version information.
         """
         result = []
         seen_projects = set()
 
-        # Source 1: Project Registry (Phase 16C)
+        # Source 1: Project Registry (Phase 16C/16E)
         registry_projects = await self._read_registry_projects()
         for proj in registry_projects:
             project_name = proj.get("project_name", "unknown")
             seen_projects.add(project_name)
 
-            result.append(ProjectOverview(
+            overview = ProjectOverview(
                 project_id=proj.get("project_id", "unknown"),
                 project_name=project_name,
                 mode=proj.get("mode", "project_mode"),
@@ -382,7 +398,13 @@ class DashboardBackend:
                 lifecycle_id=proj.get("lifecycle_ids", [None])[0] if proj.get("lifecycle_ids") else None,
                 created_at=proj.get("created_at"),
                 updated_at=proj.get("updated_at"),
-            ))
+                # Phase 16E: Identity fields
+                fingerprint=proj.get("fingerprint"),
+                version=proj.get("version", "v1"),
+                parent_project_id=proj.get("parent_project_id"),
+            )
+
+            result.append(overview)
 
         # Source 2: Lifecycle state files (for projects not in registry)
         lifecycles = await self._read_all_lifecycles()
@@ -433,6 +455,58 @@ class DashboardBackend:
             ))
 
         return result
+
+    async def get_projects_grouped_by_identity(self) -> Dict[str, Any]:
+        """
+        Get projects grouped by fingerprint/identity (Phase 16E).
+
+        Returns projects organized by their unique identity, showing
+        all versions of the same logical project together.
+
+        This enables the dashboard to:
+        1. Show project families (same identity, different versions)
+        2. Detect and display project evolution
+        3. Provide consistent project grouping
+        """
+        grouped = await self._read_registry_projects_grouped()
+
+        if not grouped:
+            # Fall back to ungrouped view
+            projects = await self.get_all_projects()
+            return {
+                "grouped": False,
+                "project_families": [],
+                "ungrouped_projects": [p.to_dict() for p in projects],
+            }
+
+        # Build project families
+        families = []
+        for fingerprint, versions in grouped.items():
+            if not versions:
+                continue
+
+            # Sort by version
+            sorted_versions = sorted(
+                versions,
+                key=lambda x: x.get("version", "v1")
+            )
+
+            primary = sorted_versions[-1]  # Latest version
+            families.append({
+                "fingerprint": fingerprint,
+                "primary_project": primary.get("project_name"),
+                "total_versions": len(versions),
+                "versions": sorted_versions,
+                "created_at": sorted_versions[0].get("created_at"),
+                "latest_update": primary.get("updated_at"),
+            })
+
+        return {
+            "grouped": True,
+            "total_families": len(families),
+            "project_families": families,
+            "ungrouped_projects": [],
+        }
 
     async def get_project_detail(self, project_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -718,6 +792,24 @@ class DashboardBackend:
         except Exception as e:
             logger.warning(f"Failed to read project registry: {e}")
             return []
+
+    async def _read_registry_projects_grouped(self) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Read projects from Project Registry grouped by identity (Phase 16E).
+
+        Returns:
+            Dict with keys as fingerprints and values as lists of project versions.
+        """
+        try:
+            from controller.project_registry import get_registry
+            registry = get_registry()
+            return registry.get_dashboard_projects_grouped()
+        except ImportError:
+            logger.debug("Project registry not available for grouped view")
+            return {}
+        except Exception as e:
+            logger.warning(f"Failed to read grouped projects: {e}")
+            return {}
 
     async def _read_all_lifecycles(self) -> List[Dict[str, Any]]:
         """Read all lifecycle state files."""
