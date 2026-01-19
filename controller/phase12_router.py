@@ -542,13 +542,99 @@ async def get_dashboard():
     - Internal test summary
     - Last deployment status
     - Health indicators
+
+    Data sources (Phase 16C):
+    1. Project Registry (primary source for new projects)
+    2. IPC files (legacy source for older projects)
     """
     dashboards = []
+    seen_projects = set()
 
-    # Get all projects from directory
+    # Source 1: Project Registry (Phase 16C - primary source)
+    try:
+        from controller.project_registry import get_registry
+        registry = get_registry()
+        registry_projects = registry.get_dashboard_projects()
+
+        for proj in registry_projects:
+            project_name = proj.get("project_name", "")
+            if project_name:
+                seen_projects.add(project_name)
+                # Convert registry format to dashboard format
+                aspects_progress = {}
+                for aspect_name, aspect_status in proj.get("aspects", {}).items():
+                    # Map registry aspect names to ProjectAspect enum
+                    aspect_mapping = {
+                        "api": ProjectAspect.CORE,
+                        "core": ProjectAspect.CORE,
+                        "backend": ProjectAspect.BACKEND,
+                        "admin": ProjectAspect.BACKEND,
+                        "frontend": ProjectAspect.FRONTEND,
+                        "frontend_web": ProjectAspect.FRONTEND,
+                    }
+                    mapped_aspect = aspect_mapping.get(aspect_name.lower(), ProjectAspect.CORE)
+
+                    # Map registry status to AspectPhase
+                    phase_mapping = {
+                        "created": AspectPhase.NOT_STARTED,
+                        "planning": AspectPhase.PLANNING,
+                        "development": AspectPhase.DEVELOPMENT,
+                        "testing": AspectPhase.UNIT_TESTING,
+                        "awaiting_feedback": AspectPhase.AWAITING_FEEDBACK,
+                        "ready_for_production": AspectPhase.READY_FOR_PRODUCTION,
+                        "deployed": AspectPhase.DEPLOYED_PRODUCTION,
+                    }
+                    current_phase = phase_mapping.get(aspect_status, AspectPhase.NOT_STARTED)
+
+                    # Use mapped aspect as key (ProjectAspect enum)
+                    aspects_progress[mapped_aspect] = AspectProgress(
+                        aspect=mapped_aspect,
+                        current_phase=current_phase,
+                        phase_progress_percent=10.0 if aspect_status == "planning" else 0.0,
+                        ci_status=None,
+                        last_ci_at=None,
+                        test_summary="Pending",
+                        deploy_status=None,
+                        last_deploy_at=None,
+                        health="unknown"
+                    )
+
+                # Parse timestamps - handle ISO format from registry
+                created_at_str = proj.get("created_at", "")
+                updated_at_str = proj.get("updated_at", "")
+                try:
+                    created_at = datetime.fromisoformat(created_at_str) if created_at_str else datetime.now()
+                    updated_at = datetime.fromisoformat(updated_at_str) if updated_at_str else datetime.now()
+                except ValueError:
+                    created_at = datetime.now()
+                    updated_at = datetime.now()
+
+                dashboard = ProjectDashboard(
+                    project_name=project_name,
+                    overall_status=proj.get("current_status", "created"),
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    aspects=aspects_progress,
+                    total_tests_passed=0,
+                    total_tests_failed=0,
+                    system_health="healthy",
+                    last_activity=updated_at,
+                    notifications_count=0
+                )
+                dashboards.append(dashboard)
+
+        logger.debug(f"Loaded {len(registry_projects)} projects from registry")
+    except ImportError:
+        logger.debug("Project registry not available")
+    except Exception as e:
+        logger.warning(f"Failed to load registry projects: {e}")
+
+    # Source 2: IPC files (legacy - for projects not in registry)
     if PROJECTS_DIR.exists():
         for project_dir in PROJECTS_DIR.iterdir():
             if project_dir.is_dir() and not project_dir.name.startswith("."):
+                if project_dir.name in seen_projects:
+                    continue  # Already loaded from registry
                 ipc = _load_ipc(project_dir.name)
                 if ipc:
                     dashboard = _build_dashboard(ipc)

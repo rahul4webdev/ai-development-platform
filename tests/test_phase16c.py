@@ -284,6 +284,53 @@ class TestDashboardIntegration:
             loop.close()
 
 
+class TestV2DashboardReadsRegistry:
+    """Test that /v2/dashboard reads from project registry (Phase 16C.A fix)."""
+
+    def test_v2_dashboard_imports_registry(self):
+        """The /v2/dashboard endpoint should import project registry."""
+        import asyncio
+        from controller.phase12_router import get_dashboard
+
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(get_dashboard())
+            # Should return DashboardResponse
+            assert hasattr(result, "projects")
+            assert hasattr(result, "total_projects")
+        finally:
+            loop.close()
+
+    def test_registry_project_appears_in_v2_dashboard(self):
+        """Registry projects should appear in /v2/dashboard response."""
+        import asyncio
+        import uuid
+        from controller.project_registry import get_registry
+        from controller.phase12_router import get_dashboard
+
+        # Create a unique project in registry using singleton
+        registry = get_registry()
+        unique_name = f"test-v2-dashboard-{uuid.uuid4().hex[:8]}"
+        success, message, project = registry.create_project(
+            name=unique_name,
+            description="Test project for v2 dashboard",
+            created_by="test-user",
+        )
+        assert success, f"Failed to create project: {message}"
+
+        # Check it appears in /v2/dashboard
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(get_dashboard())
+            project_names = [p.project_name for p in result.projects]
+            assert unique_name in project_names, (
+                f"Registry project '{unique_name}' not found in /v2/dashboard. "
+                f"Found: {project_names}"
+            )
+        finally:
+            loop.close()
+
+
 class TestTelegramIntegration:
     """Test Telegram bot integration."""
 
