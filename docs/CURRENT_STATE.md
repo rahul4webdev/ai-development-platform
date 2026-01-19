@@ -7,14 +7,14 @@ The AI agent MUST update this file after completing any task.
 
 ## Last Updated
 - **Timestamp**: 2026-01-19
-- **Task**: Phase 15.2 Continuous Change Cycles - COMPLETED
+- **Task**: Phase 15.3 Project Ingestion Engine - COMPLETED
 - **Status**: Complete (ANTHROPIC_API_KEY still required for execution)
 
 ---
 
 ## Current Phase
 ```
-Phase: PHASE_15.2_COMPLETE
+Phase: PHASE_15.3_COMPLETE
 Mode: development
 ```
 
@@ -82,6 +82,18 @@ Mode: development
 | Telegram Change Commands | Implemented | telegram_bot_v2/bot.py | Phase 15.2: new_feature/report_bug/improve/refactor/security_fix |
 | Scheduler Aspect Isolation | Implemented | controller/claude_backend.py | Phase 15.2: One active job per project+aspect |
 | Phase 15.2 Tests | Implemented | tests/test_lifecycle_engine.py | Phase 15.2: 30+ additional tests |
+| Ingestion Engine | Implemented | controller/ingestion_engine.py | Phase 15.3: External project ingestion & adoption |
+| Git Repository Analysis | Implemented | controller/ingestion_engine.py | Phase 15.3: Clone, analyze git metadata |
+| Local Path Analysis | Implemented | controller/ingestion_engine.py | Phase 15.3: Analyze local directories |
+| File Enumeration | Implemented | controller/ingestion_engine.py | Phase 15.3: Enumerate files, detect binaries |
+| Structure Analysis | Implemented | controller/ingestion_engine.py | Phase 15.3: Detect build system, package manager |
+| Aspect Detection | Implemented | controller/ingestion_engine.py | Phase 15.3: Auto-detect project aspects |
+| Risk Scanning | Implemented | controller/ingestion_engine.py | Phase 15.3: Detect secrets, sensitive files |
+| Document Generation | Implemented | controller/ingestion_engine.py | Phase 15.3: Generate PROJECT_MANIFEST, CURRENT_STATE, etc |
+| Ingestion Workflow | Implemented | controller/ingestion_engine.py | Phase 15.3: Create, analyze, approve, register |
+| Ingestion API Endpoints | Implemented | controller/main.py | Phase 15.3: /ingestion/* endpoints |
+| Telegram Ingestion Commands | Implemented | telegram_bot_v2/bot.py | Phase 15.3: ingest_git/ingest_local/approve/register |
+| Phase 15.3 Tests | Implemented | tests/test_ingestion_engine.py | Phase 15.3: 30+ tests |
 
 ---
 
@@ -149,6 +161,8 @@ None
 
 | Timestamp | Task | Status | Details |
 |-----------|------|--------|---------|
+| 2026-01-19 | Phase 15.3 complete | Completed | Project Ingestion Engine: external project adoption, git/local analysis, aspect detection, risk scanning, document generation |
+| 2026-01-19 | Phase 15.2 complete | Completed | Continuous Change Cycles: DEPLOYED loops, SECURITY type, cycle tracking, change history/lineage |
 | 2026-01-19 | Phase 15.1 complete | Completed | Autonomous Lifecycle Engine: 10-state machine, PROJECT/CHANGE modes, aspect isolation, event triggers |
 | 2026-01-19 | Phase 14.11 complete | Completed | Priority & Fair Scheduling: EMERGENCY/HIGH/NORMAL/LOW, starvation prevention (30min), audit logging |
 | 2026-01-19 | Phase 14.10 complete | Completed | Multi-worker scheduler: MAX_CONCURRENT_JOBS=3, persistent state, resource limits, crash recovery |
@@ -167,6 +181,143 @@ None
 | 2026-01-16 | Phase 1 skeleton | Completed | Created controller/, bots/, tests/, workflows/, moved docs/, created README files |
 | 2026-01-16 | Bootstrap config | Completed | Updated all files with confirmed repository, domains, hosting, and tech stack details |
 | 2026-01-16 | Bootstrap docs | Completed | Created all foundational files |
+
+---
+
+## Phase 15.3 Deliverables
+
+### Project Ingestion Engine (controller/ingestion_engine.py)
+
+| Component | Description |
+|-----------|-------------|
+| ProjectIngestionEngine | Main class for analyzing and ingesting external projects |
+| IngestionRequest | Data class for tracking ingestion requests |
+| IngestionReport | Complete analysis report for a project |
+| FileInfo | Information about individual files |
+| AspectDetection | Detected project aspects with confidence scores |
+| RiskAssessment | Security risk analysis results |
+| GitMetadata | Git repository metadata |
+| StructureAnalysis | Project structure analysis |
+
+### Ingestion Workflow
+
+| Step | Description |
+|------|-------------|
+| 1. Create Request | /ingestion POST - creates pending request |
+| 2. Start Analysis | /ingestion/{id}/analyze POST - clones/prepares and analyzes |
+| 3. Review Report | Analysis results available with risk assessment |
+| 4. Approve/Reject | /ingestion/{id}/approve or /reject POST |
+| 5. Register | /ingestion/{id}/register POST - creates lifecycle instances |
+
+### Ingestion Status Values
+
+| Status | Description |
+|--------|-------------|
+| pending | Request created, not yet analyzed |
+| analyzing | Analysis in progress |
+| awaiting_approval | Analysis complete, waiting for human approval |
+| approved | Approved by admin/owner |
+| rejected | Rejected with reason |
+| registered | Successfully registered as project(s) |
+| failed | Analysis or registration failed |
+
+### Ingestion Source Types
+
+| Type | Description |
+|------|-------------|
+| git_repository | Clone from Git URL (https or git@) |
+| local_path | Analyze local filesystem directory |
+
+### Analysis Pipeline
+
+| Step | Description |
+|------|-------------|
+| Repository Inspection | Clone git repo or prepare local path |
+| Git Metadata | Extract remote URL, branch, commits, contributors |
+| File Enumeration | Enumerate all files (excludes .git, node_modules, etc) |
+| Structure Analysis | Detect build system, package manager, tests, CI |
+| Aspect Detection | Classify aspects (backend, frontend, core, etc) |
+| Risk Scanning | Detect hardcoded secrets, sensitive files, dangerous patterns |
+| Document Check | Find existing governance documents |
+
+### Risk Levels
+
+| Level | Criteria |
+|-------|----------|
+| low | No issues found |
+| medium | Some issues found (>5 total) |
+| high | Dangerous patterns or >10 issues |
+| critical | Hardcoded secrets found (>5) |
+
+### Generated Governance Documents
+
+| Document | Description |
+|----------|-------------|
+| PROJECT_MANIFEST.yaml | Project metadata and configuration |
+| CURRENT_STATE.md | Current project state documentation |
+| ARCHITECTURE.md | Architecture and structure overview |
+| AI_POLICY.md | AI collaboration policy and boundaries |
+| TESTING_STRATEGY.md | Testing strategy and requirements |
+
+### API Endpoints (Phase 15.3)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| /ingestion | POST | Create ingestion request |
+| /ingestion/{id}/analyze | POST | Start analysis |
+| /ingestion/{id}/approve | POST | Approve ingestion |
+| /ingestion/{id}/reject | POST | Reject ingestion |
+| /ingestion/{id}/register | POST | Register as project |
+| /ingestion/{id} | GET | Get ingestion by ID |
+| /ingestion | GET | List ingestions |
+| /ingestion/status | GET | Get engine status |
+
+### Telegram Bot Commands (Phase 15.3)
+
+| Command | Purpose |
+|---------|---------|
+| /ingest_git <name> <url> | Ingest from Git repository |
+| /ingest_local <name> <path> | Ingest from local path |
+| /approve_ingestion <id> | Approve ingestion |
+| /reject_ingestion <id> <reason> | Reject ingestion |
+| /register_ingestion <id> | Register approved ingestion |
+| /ingestion_status [id] | Check ingestion status |
+
+### Safety Guarantees
+
+- **READ_ONLY_ANALYSIS**: Analysis never modifies the source project
+- **HUMAN_APPROVAL_REQUIRED**: Registration requires explicit approval
+- **RISK_VISIBILITY**: Security issues clearly reported before approval
+- **DOCUMENT_GENERATION**: Missing governance docs auto-generated
+- **LIFECYCLE_INTEGRATION**: Registered projects start in DEPLOYED state
+- **AUDIT_TRAIL**: All ingestion actions logged
+
+### Files
+
+| Path | Purpose |
+|------|---------|
+| /home/aitesting.mybd.in/jobs/ingestion/ingestion_state.json | Persistent ingestion state |
+| /home/aitesting.mybd.in/jobs/ingestion/workspaces/{id}/ | Cloned/prepared project |
+| /home/aitesting.mybd.in/jobs/ingestion/reports/{id}.json | Analysis reports |
+
+### Test Coverage (tests/test_ingestion_engine.py)
+
+| Test Class | Coverage |
+|------------|----------|
+| TestIngestionRequestCreation | Create git/local/targeted requests |
+| TestFileEnumeration | File listing, limits, exclusions |
+| TestGitMetadataExtraction | Git repo detection, metadata |
+| TestStructureAnalysis | Build system, package manager detection |
+| TestAspectDetection | Aspect classification, confidence |
+| TestRiskScanning | Secret/sensitive file detection |
+| TestDocumentGeneration | Governance doc generation |
+| TestAnalysisPipeline | Full pipeline execution |
+| TestApprovalWorkflow | Approve/reject/permission flow |
+| TestQueryMethods | List/filter ingestion requests |
+| TestSerialization | Data serialization/deserialization |
+| TestEdgeCases | Empty dirs, missing paths, binaries |
+| TestPublicAPI | Public function signatures |
+| TestLifecycleIntegration | Lifecycle registration flow |
 
 ---
 

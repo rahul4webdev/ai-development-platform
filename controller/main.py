@@ -4121,6 +4121,320 @@ async def get_aspect_history_endpoint(project_name: str, aspect: str):
 
 
 # -----------------------------------------------------------------------------
+# Phase 15.3: Project Ingestion Engine Endpoints
+# -----------------------------------------------------------------------------
+
+# Import ingestion engine module
+try:
+    from .ingestion_engine import (
+        get_ingestion_engine,
+        create_ingestion_request,
+        start_ingestion_analysis,
+        approve_ingestion,
+        reject_ingestion,
+        register_ingested_project,
+        get_ingestion_request as get_ingestion,
+        list_ingestion_requests,
+        IngestionStatus,
+        IngestionSource,
+    )
+    INGESTION_AVAILABLE = True
+    logger.info("Phase 15.3: Ingestion Engine module loaded successfully")
+except ImportError as e:
+    INGESTION_AVAILABLE = False
+    logger.warning(f"Ingestion Engine module not available: {e}")
+
+
+# Pydantic models for ingestion endpoints
+class CreateIngestionRequest(BaseModel):
+    """Request to create an ingestion request."""
+    project_name: str
+    source_type: str  # git_repository, local_path
+    source_location: str  # Git URL or filesystem path
+    requested_by: str
+    description: str = ""
+    target_aspects: list = Field(default_factory=list)  # Optional list of aspects
+
+
+class ApproveIngestionRequest(BaseModel):
+    """Request to approve an ingestion."""
+    approved_by: str
+    role: str  # owner, admin
+
+
+class RejectIngestionRequest(BaseModel):
+    """Request to reject an ingestion."""
+    rejected_by: str
+    reason: str
+    role: str  # owner, admin
+
+
+class RegisterIngestionRequest(BaseModel):
+    """Request to register an approved ingestion."""
+    registered_by: str
+    role: str  # owner, admin
+
+
+@app.post("/ingestion")
+async def create_ingestion_endpoint(request: CreateIngestionRequest):
+    """
+    Phase 15.3: Create a new project ingestion request.
+
+    Starts the process of ingesting an external project into the platform.
+    The project will be analyzed before registration.
+
+    Supported source types:
+    - git_repository: Clone from a Git URL
+    - local_path: Analyze an existing local directory
+    """
+    if not INGESTION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Ingestion engine not available")
+
+    # Validate source type
+    valid_source_types = ["git_repository", "local_path"]
+    if request.source_type not in valid_source_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid source_type: {request.source_type}. Valid types: {valid_source_types}"
+        )
+
+    success, message, request_data = await create_ingestion_request(
+        project_name=request.project_name,
+        source_type=request.source_type,
+        source_location=request.source_location,
+        requested_by=request.requested_by,
+        description=request.description,
+        target_aspects=request.target_aspects if request.target_aspects else None,
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "status": "created",
+        "message": message,
+        "ingestion": request_data,
+    }
+
+
+@app.post("/ingestion/{ingestion_id}/analyze")
+async def start_analysis_endpoint(ingestion_id: str):
+    """
+    Phase 15.3: Start the analysis for an ingestion request.
+
+    This will:
+    1. Clone the repository (for git) or prepare the local path
+    2. Enumerate and analyze all files
+    3. Detect project aspects
+    4. Scan for security risks
+    5. Check for existing governance documents
+    6. Generate an analysis report
+    """
+    if not INGESTION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Ingestion engine not available")
+
+    success, message, report = await start_ingestion_analysis(ingestion_id)
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "status": "analyzed",
+        "message": message,
+        "report": report,
+    }
+
+
+@app.post("/ingestion/{ingestion_id}/approve")
+async def approve_ingestion_endpoint(ingestion_id: str, request: ApproveIngestionRequest):
+    """
+    Phase 15.3: Approve an ingestion request.
+
+    Only owners and admins can approve ingestion requests.
+    The request must be in AWAITING_APPROVAL status.
+    """
+    if not INGESTION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Ingestion engine not available")
+
+    # Validate role
+    valid_roles = ["owner", "admin"]
+    if request.role not in valid_roles:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role: {request.role}. Only owners and admins can approve."
+        )
+
+    success, message = await approve_ingestion(
+        ingestion_id=ingestion_id,
+        approved_by=request.approved_by,
+        role=request.role,
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "status": "approved",
+        "message": message,
+        "ingestion_id": ingestion_id,
+    }
+
+
+@app.post("/ingestion/{ingestion_id}/reject")
+async def reject_ingestion_endpoint(ingestion_id: str, request: RejectIngestionRequest):
+    """
+    Phase 15.3: Reject an ingestion request.
+
+    Only owners and admins can reject ingestion requests.
+    A reason must be provided.
+    """
+    if not INGESTION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Ingestion engine not available")
+
+    # Validate role
+    valid_roles = ["owner", "admin"]
+    if request.role not in valid_roles:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role: {request.role}. Only owners and admins can reject."
+        )
+
+    success, message = await reject_ingestion(
+        ingestion_id=ingestion_id,
+        rejected_by=request.rejected_by,
+        reason=request.reason,
+        role=request.role,
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "status": "rejected",
+        "message": message,
+        "ingestion_id": ingestion_id,
+    }
+
+
+@app.post("/ingestion/{ingestion_id}/register")
+async def register_ingestion_endpoint(ingestion_id: str, request: RegisterIngestionRequest):
+    """
+    Phase 15.3: Register an approved ingestion as a project.
+
+    Creates lifecycle instances for each detected aspect in DEPLOYED state.
+    Generates missing governance documents.
+
+    This is the final step of the ingestion workflow.
+    """
+    if not INGESTION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Ingestion engine not available")
+
+    # Validate role
+    valid_roles = ["owner", "admin"]
+    if request.role not in valid_roles:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role: {request.role}. Only owners and admins can register."
+        )
+
+    success, message, lifecycle_ids = await register_ingested_project(
+        ingestion_id=ingestion_id,
+        registered_by=request.registered_by,
+        role=request.role,
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "status": "registered",
+        "message": message,
+        "ingestion_id": ingestion_id,
+        "lifecycle_ids": lifecycle_ids,
+    }
+
+
+@app.get("/ingestion/{ingestion_id}")
+async def get_ingestion_endpoint(ingestion_id: str):
+    """
+    Phase 15.3: Get an ingestion request by ID.
+
+    Returns the full ingestion request including analysis report if available.
+    """
+    if not INGESTION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Ingestion engine not available")
+
+    request_data = await get_ingestion(ingestion_id)
+
+    if not request_data:
+        raise HTTPException(status_code=404, detail=f"Ingestion request {ingestion_id} not found")
+
+    return request_data
+
+
+@app.get("/ingestion")
+async def list_ingestions_endpoint(status: Optional[str] = None, limit: int = 50):
+    """
+    Phase 15.3: List ingestion requests.
+
+    Can be filtered by status:
+    - pending: Not yet analyzed
+    - analyzing: Currently being analyzed
+    - awaiting_approval: Analysis complete, waiting for approval
+    - approved: Approved, ready for registration
+    - rejected: Rejected by admin
+    - registered: Successfully registered as a project
+    - failed: Analysis or registration failed
+    """
+    if not INGESTION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Ingestion engine not available")
+
+    # Validate status if provided
+    if status:
+        valid_statuses = ["pending", "analyzing", "awaiting_approval", "approved", "rejected", "registered", "failed"]
+        if status not in valid_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status: {status}. Valid statuses: {valid_statuses}"
+            )
+
+    requests = await list_ingestion_requests(status=status, limit=limit)
+
+    return {
+        "count": len(requests),
+        "status_filter": status,
+        "requests": requests,
+    }
+
+
+@app.get("/ingestion/status")
+async def ingestion_status_endpoint():
+    """
+    Phase 15.3: Get the status of the ingestion engine.
+
+    Returns counts of ingestion requests by status.
+    """
+    if not INGESTION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Ingestion engine not available")
+
+    # Get counts by status
+    all_requests = await list_ingestion_requests(limit=1000)
+
+    status_counts = {}
+    for req in all_requests:
+        status = req.get("status", "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    return {
+        "phase": "15.3",
+        "available": True,
+        "total_requests": len(all_requests),
+        "by_status": status_counts,
+        "message": "Ingestion Engine operational",
+    }
+
+
+# -----------------------------------------------------------------------------
 # Error Handlers
 # -----------------------------------------------------------------------------
 @app.exception_handler(HTTPException)
@@ -4145,7 +4459,7 @@ async def http_exception_handler(request, exc):
 @app.on_event("startup")
 async def startup_event():
     """Initialize controller on startup."""
-    logger.info("Task Controller starting up (Phase 15.1)...")
+    logger.info("Task Controller starting up (Phase 15.3)...")
     logger.info(f"Projects directory: {PROJECTS_DIR}")
     logger.info(f"Docs directory: {DOCS_DIR}")
 
@@ -4169,12 +4483,20 @@ async def startup_event():
         except Exception as e:
             logger.error(f"Failed to initialize lifecycle manager: {e}")
 
-    logger.info("Task Controller ready (Phase 15.2: Continuous Change Cycles)")
+    # Phase 15.3: Initialize ingestion engine
+    if INGESTION_AVAILABLE:
+        try:
+            engine = get_ingestion_engine()
+            logger.info("Phase 15.3: Ingestion Engine initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize ingestion engine: {e}")
+
+    logger.info("Task Controller ready (Phase 15.3: Project Ingestion Engine)")
     logger.info("SAFETY: Production deployment requires DUAL APPROVAL (different users).")
     logger.info("SAFETY: All production actions logged to immutable audit trail.")
     logger.info("SAFETY: Production rollback always available (break-glass).")
     logger.info("SAFETY: Testing environment MUST be used before production.")
-    logger.info("PHASE 15.2: Continuous change cycles with DEPLOYED -> AWAITING_FEEDBACK loops.")
+    logger.info("PHASE 15.3: External project ingestion with safe, deterministic analysis.")
 
 
 @app.on_event("shutdown")

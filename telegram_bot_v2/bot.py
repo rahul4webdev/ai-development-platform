@@ -1,5 +1,5 @@
 """
-Telegram Bot - Phase 13.3-15.2
+Telegram Bot - Phase 13.3-15.3
 
 Production Control Plane for AI Development Platform.
 
@@ -17,6 +17,7 @@ Features:
 - Claude CLI job management (14.0)
 - Autonomous lifecycle engine (15.1)
 - Continuous change cycles (15.2)
+- Project ingestion & adoption (15.3)
 
 Safety:
 - Bot cannot trigger prod deploy directly
@@ -83,7 +84,7 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.15.2"
+BOT_VERSION = "0.15.3"
 BOT_START_TIME = datetime.utcnow()
 
 # -----------------------------------------------------------------------------
@@ -2824,6 +2825,417 @@ async def change_summary_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # -----------------------------------------------------------------------------
+# Phase 15.3: Project Ingestion Commands
+# -----------------------------------------------------------------------------
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
+async def ingest_git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /ingest_git <project_name> <git_url> - Ingest a project from Git (Phase 15.3)
+    """
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /ingest\\_git <project\\_name> <git\\_url>\n"
+            "Example: /ingest\\_git my-project https://github.com/user/repo.git\n\n"
+            "This will clone and analyze the repository, then prepare it for registration."
+        )
+        return
+
+    project_name = context.args[0]
+    git_url = context.args[1]
+    user_id = str(update.effective_user.id)
+
+    # Basic validation
+    if not git_url.startswith(("https://", "git@")):
+        await update.message.reply_text(
+            "Invalid Git URL. Must start with https:// or git@"
+        )
+        return
+
+    try:
+        await update.message.reply_text(
+            f"🔍 *Starting ingestion analysis...*\n\n"
+            f"*Project:* {project_name}\n"
+            f"*Source:* {git_url}\n\n"
+            f"This may take a few minutes...",
+            parse_mode="Markdown"
+        )
+
+        # Create ingestion request
+        result = await controller.post("/ingestion", {
+            "project_name": project_name,
+            "source_type": "git_repository",
+            "source_location": git_url,
+            "requested_by": user_id,
+            "description": f"Ingested via Telegram by user {user_id}",
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        ingestion = result.get("ingestion", {})
+        ingestion_id = ingestion.get("ingestion_id")
+
+        # Start analysis
+        analyze_result = await controller.post(f"/ingestion/{ingestion_id}/analyze")
+
+        if "error" in analyze_result:
+            await update.message.reply_text(f"❌ Analysis failed: {analyze_result.get('error')}")
+            return
+
+        report = analyze_result.get("report", {})
+        aspects = report.get("aspects", {})
+        risk = report.get("risk_assessment", {})
+        structure = report.get("structure", {})
+
+        # Format response
+        text = f"✅ *Analysis Complete!*\n\n"
+        text += f"*Ingestion ID:* `{ingestion_id[:8]}...`\n"
+        text += f"*Project:* {project_name}\n\n"
+
+        text += f"*📊 Structure:*\n"
+        text += f"  Files: {structure.get('total_files', 'N/A')}\n"
+        text += f"  Size: {structure.get('total_size_bytes', 0) / 1024 / 1024:.1f} MB\n"
+        text += f"  Tests: {'✅' if structure.get('has_tests') else '❌'}\n"
+        text += f"  CI/CD: {'✅' if structure.get('has_ci') else '❌'}\n\n"
+
+        text += f"*🎯 Detected Aspects:*\n"
+        for aspect in aspects.get("detected_aspects", [])[:5]:
+            text += f"  • {aspect}\n"
+
+        text += f"\n*🔒 Risk Level:* {risk.get('risk_level', 'unknown').upper()}\n"
+        if risk.get("total_issues", 0) > 0:
+            text += f"  Issues found: {risk.get('total_issues')}\n"
+
+        ready = report.get("ready_for_registration", False)
+        if ready:
+            text += f"\n✅ *Ready for registration!*\n"
+            text += f"Use `/approve_ingestion {ingestion_id[:8]}` to approve."
+        else:
+            text += f"\n⚠️ *Blocking issues found:*\n"
+            for issue in report.get("blocking_issues", []):
+                text += f"  • {issue}\n"
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+        safety.log_action(int(user_id), "ingest_git", {
+            "project_name": project_name,
+            "ingestion_id": ingestion_id,
+            "git_url": git_url,
+            "ready_for_registration": ready,
+        })
+
+    except Exception as e:
+        logger.error(f"Error in ingest_git_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
+async def ingest_local_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /ingest_local <project_name> <path> - Ingest a project from local path (Phase 15.3)
+    """
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /ingest\\_local <project\\_name> <path>\n"
+            "Example: /ingest\\_local my-project /home/user/my-project\n\n"
+            "This will analyze the local directory and prepare it for registration."
+        )
+        return
+
+    project_name = context.args[0]
+    local_path = " ".join(context.args[1:])  # Path might have spaces
+    user_id = str(update.effective_user.id)
+
+    try:
+        await update.message.reply_text(
+            f"🔍 *Starting ingestion analysis...*\n\n"
+            f"*Project:* {project_name}\n"
+            f"*Source:* {local_path}\n\n"
+            f"This may take a moment...",
+            parse_mode="Markdown"
+        )
+
+        # Create ingestion request
+        result = await controller.post("/ingestion", {
+            "project_name": project_name,
+            "source_type": "local_path",
+            "source_location": local_path,
+            "requested_by": user_id,
+            "description": f"Ingested via Telegram by user {user_id}",
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        ingestion = result.get("ingestion", {})
+        ingestion_id = ingestion.get("ingestion_id")
+
+        # Start analysis
+        analyze_result = await controller.post(f"/ingestion/{ingestion_id}/analyze")
+
+        if "error" in analyze_result:
+            await update.message.reply_text(f"❌ Analysis failed: {analyze_result.get('error')}")
+            return
+
+        report = analyze_result.get("report", {})
+        aspects = report.get("aspects", {})
+        risk = report.get("risk_assessment", {})
+        structure = report.get("structure", {})
+
+        # Format response
+        text = f"✅ *Analysis Complete!*\n\n"
+        text += f"*Ingestion ID:* `{ingestion_id[:8]}...`\n"
+        text += f"*Project:* {project_name}\n\n"
+
+        text += f"*📊 Structure:*\n"
+        text += f"  Files: {structure.get('total_files', 'N/A')}\n"
+        text += f"  Size: {structure.get('total_size_bytes', 0) / 1024 / 1024:.1f} MB\n\n"
+
+        text += f"*🎯 Detected Aspects:*\n"
+        for aspect in aspects.get("detected_aspects", [])[:5]:
+            text += f"  • {aspect}\n"
+
+        text += f"\n*🔒 Risk Level:* {risk.get('risk_level', 'unknown').upper()}\n"
+
+        ready = report.get("ready_for_registration", False)
+        if ready:
+            text += f"\n✅ *Ready for registration!*\n"
+            text += f"Use `/approve_ingestion {ingestion_id[:8]}` to approve."
+        else:
+            text += f"\n⚠️ *Review required before registration.*"
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+        safety.log_action(int(user_id), "ingest_local", {
+            "project_name": project_name,
+            "ingestion_id": ingestion_id,
+            "local_path": local_path,
+            "ready_for_registration": ready,
+        })
+
+    except Exception as e:
+        logger.error(f"Error in ingest_local_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN)
+async def approve_ingestion_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /approve_ingestion <ingestion_id> - Approve an ingestion (Phase 15.3)
+    """
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /approve\\_ingestion <ingestion\\_id>\n"
+            "Example: /approve\\_ingestion abc12345"
+        )
+        return
+
+    ingestion_id = context.args[0]
+    user_id = str(update.effective_user.id)
+    user_role = get_user_role(update.effective_user.id)
+
+    try:
+        result = await controller.post(f"/ingestion/{ingestion_id}/approve", {
+            "approved_by": user_id,
+            "role": user_role.value,
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        await update.message.reply_text(
+            f"✅ *Ingestion Approved!*\n\n"
+            f"*Ingestion ID:* `{ingestion_id[:8]}...`\n\n"
+            f"Now use `/register_ingestion {ingestion_id[:8]}` to complete registration.",
+            parse_mode="Markdown"
+        )
+
+        safety.log_action(int(user_id), "approve_ingestion", {
+            "ingestion_id": ingestion_id,
+        })
+
+    except Exception as e:
+        logger.error(f"Error in approve_ingestion_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN)
+async def reject_ingestion_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /reject_ingestion <ingestion_id> <reason> - Reject an ingestion (Phase 15.3)
+    """
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /reject\\_ingestion <ingestion\\_id> <reason>\n"
+            "Example: /reject\\_ingestion abc12345 Contains sensitive data"
+        )
+        return
+
+    ingestion_id = context.args[0]
+    reason = " ".join(context.args[1:])
+    user_id = str(update.effective_user.id)
+    user_role = get_user_role(update.effective_user.id)
+
+    try:
+        result = await controller.post(f"/ingestion/{ingestion_id}/reject", {
+            "rejected_by": user_id,
+            "reason": reason,
+            "role": user_role.value,
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        await update.message.reply_text(
+            f"❌ *Ingestion Rejected*\n\n"
+            f"*Ingestion ID:* `{ingestion_id[:8]}...`\n"
+            f"*Reason:* {reason}",
+            parse_mode="Markdown"
+        )
+
+        safety.log_action(int(user_id), "reject_ingestion", {
+            "ingestion_id": ingestion_id,
+            "reason": reason,
+        })
+
+    except Exception as e:
+        logger.error(f"Error in reject_ingestion_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN)
+async def register_ingestion_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /register_ingestion <ingestion_id> - Register an approved ingestion (Phase 15.3)
+    """
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /register\\_ingestion <ingestion\\_id>\n"
+            "Example: /register\\_ingestion abc12345\n\n"
+            "Note: Ingestion must be approved first."
+        )
+        return
+
+    ingestion_id = context.args[0]
+    user_id = str(update.effective_user.id)
+    user_role = get_user_role(update.effective_user.id)
+
+    try:
+        await update.message.reply_text(
+            f"🔄 *Registering project...*\n\n"
+            f"This will create lifecycle instances and generate governance documents.",
+            parse_mode="Markdown"
+        )
+
+        result = await controller.post(f"/ingestion/{ingestion_id}/register", {
+            "registered_by": user_id,
+            "role": user_role.value,
+        })
+
+        if "error" in result:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+            return
+
+        lifecycle_ids = result.get("lifecycle_ids", [])
+
+        text = f"✅ *Project Registered Successfully!*\n\n"
+        text += f"*Ingestion ID:* `{ingestion_id[:8]}...`\n"
+        text += f"*Lifecycles Created:* {len(lifecycle_ids)}\n\n"
+
+        if lifecycle_ids:
+            text += "*Lifecycle IDs:*\n"
+            for lid in lifecycle_ids[:5]:
+                text += f"  • `{lid[:8]}...`\n"
+
+        text += f"\n🎉 The project is now registered and in DEPLOYED state.\n"
+        text += f"You can use change commands like /new\\_feature, /report\\_bug, etc."
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+        safety.log_action(int(user_id), "register_ingestion", {
+            "ingestion_id": ingestion_id,
+            "lifecycle_ids": lifecycle_ids,
+        })
+
+    except Exception as e:
+        logger.error(f"Error in register_ingestion_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER)
+async def ingestion_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /ingestion_status [ingestion_id] - Check ingestion status (Phase 15.3)
+    """
+    try:
+        if context.args:
+            # Get specific ingestion
+            ingestion_id = context.args[0]
+            result = await controller.get(f"/ingestion/{ingestion_id}")
+
+            if "error" in result:
+                await update.message.reply_text(f"❌ Error: {result.get('error')}")
+                return
+
+            text = f"*Ingestion Status*\n\n"
+            text += f"*ID:* `{result.get('ingestion_id', 'N/A')[:8]}...`\n"
+            text += f"*Project:* {result.get('project_name', 'N/A')}\n"
+            text += f"*Status:* {result.get('status', 'N/A').upper()}\n"
+            text += f"*Source:* {result.get('source_type', 'N/A')}\n"
+            text += f"*Requested:* {result.get('requested_at', 'N/A')[:10]}\n"
+
+            if result.get("report"):
+                report = result.get("report", {})
+                text += f"\n*Analysis:*\n"
+                text += f"  Risk: {report.get('risk_assessment', {}).get('risk_level', 'N/A')}\n"
+                text += f"  Files: {report.get('structure', {}).get('total_files', 'N/A')}\n"
+                text += f"  Ready: {'✅' if report.get('ready_for_registration') else '❌'}\n"
+
+            if result.get("lifecycle_ids"):
+                text += f"\n*Lifecycles:* {len(result.get('lifecycle_ids', []))}\n"
+
+        else:
+            # List recent ingestions
+            result = await controller.get("/ingestion?limit=10")
+
+            if "error" in result:
+                await update.message.reply_text(f"❌ Error: {result.get('error')}")
+                return
+
+            requests = result.get("requests", [])
+            if not requests:
+                await update.message.reply_text("No ingestion requests found.")
+                return
+
+            text = f"*Recent Ingestions*\n\n"
+            for req in requests[:10]:
+                status_emoji = {
+                    "pending": "⏳",
+                    "analyzing": "🔍",
+                    "awaiting_approval": "⏸",
+                    "approved": "✅",
+                    "rejected": "❌",
+                    "registered": "🎉",
+                    "failed": "💥",
+                }.get(req.get("status", ""), "❓")
+
+                text += f"{status_emoji} `{req.get('ingestion_id', 'N/A')[:8]}` "
+                text += f"*{req.get('project_name', 'N/A')}*\n"
+                text += f"   Status: {req.get('status', 'N/A')}\n"
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in ingestion_status_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
 # Error Handler
 # -----------------------------------------------------------------------------
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2900,6 +3312,14 @@ def main():
     application.add_handler(CommandHandler("security_fix", security_fix_command))
     application.add_handler(CommandHandler("cycle_history", cycle_history_command))
     application.add_handler(CommandHandler("change_summary", change_summary_command))
+
+    # Phase 15.3: Project Ingestion commands
+    application.add_handler(CommandHandler("ingest_git", ingest_git_command))
+    application.add_handler(CommandHandler("ingest_local", ingest_local_command))
+    application.add_handler(CommandHandler("approve_ingestion", approve_ingestion_command))
+    application.add_handler(CommandHandler("reject_ingestion", reject_ingestion_command))
+    application.add_handler(CommandHandler("register_ingestion", register_ingestion_command))
+    application.add_handler(CommandHandler("ingestion_status", ingestion_status_command))
 
     # Callback query handler for inline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))
