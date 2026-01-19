@@ -1,0 +1,880 @@
+# MILESTONES.yaml
+# Phase 15.4: Roadmap Intelligence Engine
+# Generated: 2026-01-19
+
+---
+# Milestone definitions with acceptance criteria and lifecycle integration
+
+milestones:
+
+  # =============================================================================
+  # EPIC-A1: Telegram Bot Activation
+  # =============================================================================
+
+  - milestone_id: "MS-A1-01"
+    epic_id: "EPIC-A1"
+    title: "Create Telegram Bot Token"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - CREATED
+      - PLANNING
+    acceptance_criteria:
+      - "Bot token obtained from BotFather"
+      - "Bot username registered and verified"
+      - "Token stored securely (not in repository)"
+    rollback_strategy: "Delete bot via BotFather, recreate if needed"
+    estimated_complexity: S
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-A1-02"
+    epic_id: "EPIC-A1"
+    title: "Configure Bot Environment Variables"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+    acceptance_criteria:
+      - "TELEGRAM_BOT_TOKEN environment variable configured on VPS"
+      - "Bot can read token from environment"
+      - "Token not exposed in logs or code"
+    rollback_strategy: "Remove environment variable, bot enters degraded mode"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-A1-03"
+    epic_id: "EPIC-A1"
+    title: "Bot Command Verification"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+      - AWAITING_FEEDBACK
+    acceptance_criteria:
+      - "/start command responds with welcome message"
+      - "/help command lists available commands"
+      - "/health command returns system status"
+      - "/whoami command returns user role"
+    rollback_strategy: "Revert to previous bot version if commands fail"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-A2: VPS Deployment Infrastructure
+  # =============================================================================
+
+  - milestone_id: "MS-A2-01"
+    epic_id: "EPIC-A2"
+    title: "Verify VPS Access"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - CREATED
+      - PLANNING
+    acceptance_criteria:
+      - "SSH access to 82.25.110.109 verified"
+      - "root or sudo access confirmed"
+      - "Disk space > 10GB available"
+      - "Memory > 2GB available"
+    rollback_strategy: "N/A - verification only"
+    estimated_complexity: S
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-A2-02"
+    epic_id: "EPIC-A2"
+    title: "Create Systemd Service for Controller"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+    acceptance_criteria:
+      - "controller.service file created in /etc/systemd/system/"
+      - "Service starts on boot"
+      - "Service restarts on failure (max 3 attempts)"
+      - "Service logs to systemd journal"
+    rollback_strategy: "systemctl disable controller; rm /etc/systemd/system/controller.service"
+    estimated_complexity: M
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-A2-03"
+    epic_id: "EPIC-A2"
+    title: "Create Systemd Service for Telegram Bot"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+    acceptance_criteria:
+      - "telegram-bot.service file created"
+      - "Service depends on controller.service"
+      - "Service restarts on failure"
+      - "Service logs to systemd journal"
+    rollback_strategy: "systemctl disable telegram-bot; rm /etc/systemd/system/telegram-bot.service"
+    estimated_complexity: M
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-A2-04"
+    epic_id: "EPIC-A2"
+    title: "Configure OpenLiteSpeed Proxy"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+      - TESTING
+    acceptance_criteria:
+      - "aitesting.mybd.in routes to controller port 8001"
+      - "SSL certificate configured (Let's Encrypt)"
+      - "HTTPS enforced"
+      - "Health endpoint accessible at https://aitesting.mybd.in/health"
+    rollback_strategy: "Restore previous OpenLiteSpeed configuration"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-A3: CI/CD Pipeline Implementation
+  # =============================================================================
+
+  - milestone_id: "MS-A3-01"
+    epic_id: "EPIC-A3"
+    title: "Implement Test Workflow"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+    acceptance_criteria:
+      - "GitHub Actions workflow runs on push to main"
+      - "pytest executes all tests"
+      - "flake8/ruff linting passes"
+      - "Test results visible in PR checks"
+    rollback_strategy: "Revert workflow file to previous version"
+    estimated_complexity: M
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-A3-02"
+    epic_id: "EPIC-A3"
+    title: "Implement Deploy Workflow"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+      - TESTING
+    acceptance_criteria:
+      - "Deploy workflow triggers on merge to main"
+      - "SSH deployment to VPS executes"
+      - "Services restarted after deployment"
+      - "Deployment notification sent to Telegram"
+    rollback_strategy: "Manual deployment of previous version"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: false
+
+  - milestone_id: "MS-A3-03"
+    epic_id: "EPIC-A3"
+    title: "Configure GitHub Secrets"
+    aspect: core
+    change_type: security
+    expected_lifecycle_states:
+      - DEVELOPMENT
+    acceptance_criteria:
+      - "VPS_SSH_KEY secret configured"
+      - "VPS_HOST secret configured"
+      - "TELEGRAM_BOT_TOKEN secret configured"
+      - "Secrets not exposed in workflow logs"
+    rollback_strategy: "Rotate secrets, update GitHub configuration"
+    estimated_complexity: S
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-A4: Health Monitoring Setup
+  # =============================================================================
+
+  - milestone_id: "MS-A4-01"
+    epic_id: "EPIC-A4"
+    title: "Implement Detailed Health Endpoint"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+    acceptance_criteria:
+      - "/health returns JSON with component statuses"
+      - "Controller status included"
+      - "Claude CLI status included"
+      - "Scheduler status included"
+      - "Response time < 500ms"
+    rollback_strategy: "Revert to simple health check"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-A4-02"
+    epic_id: "EPIC-A4"
+    title: "Configure Basic Alerting"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+      - TESTING
+    acceptance_criteria:
+      - "Alert sent to Telegram on service down"
+      - "Alert sent on 5 consecutive health check failures"
+      - "Alert includes service name and error"
+      - "No alert spam (cooldown implemented)"
+    rollback_strategy: "Disable alerting, rely on manual monitoring"
+    estimated_complexity: M
+    requires_human_approval: false
+    blocking: false
+
+  # =============================================================================
+  # EPIC-B1: Claude API Integration
+  # =============================================================================
+
+  - milestone_id: "MS-B1-01"
+    epic_id: "EPIC-B1"
+    title: "Configure ANTHROPIC_API_KEY"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - CREATED
+      - PLANNING
+    acceptance_criteria:
+      - "ANTHROPIC_API_KEY environment variable set on VPS"
+      - "Key not exposed in logs"
+      - "Claude CLI can authenticate"
+    rollback_strategy: "Remove API key, Claude backend enters degraded mode"
+    estimated_complexity: S
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-B1-02"
+    epic_id: "EPIC-B1"
+    title: "Verify Claude CLI Execution"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+      - TESTING
+    acceptance_criteria:
+      - "Claude CLI responds to simple prompt"
+      - "Execution completes within timeout"
+      - "Output captured correctly"
+      - "Exit code handled properly"
+    rollback_strategy: "Disable Claude jobs, queue holds until resolved"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-B1-03"
+    epic_id: "EPIC-B1"
+    title: "Validate Job Queue Integration"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+      - AWAITING_FEEDBACK
+    acceptance_criteria:
+      - "Job submitted via API enters QUEUED state"
+      - "Job picked up by scheduler"
+      - "Job executes and transitions to COMPLETED"
+      - "Job artifacts stored in workspace"
+    rollback_strategy: "Clear job queue, restart scheduler"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-B2: Job Workspace Verification
+  # =============================================================================
+
+  - milestone_id: "MS-B2-01"
+    epic_id: "EPIC-B2"
+    title: "Verify Workspace Creation"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+      - TESTING
+    acceptance_criteria:
+      - "Workspace directory created at /home/aitesting.mybd.in/jobs/job-{uuid}/"
+      - "AI_POLICY.md copied to workspace"
+      - "PROJECT_MANIFEST.yaml copied to workspace"
+      - "Workspace isolated from other jobs"
+    rollback_strategy: "Manual workspace cleanup"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-B2-02"
+    epic_id: "EPIC-B2"
+    title: "Verify Artifact Storage"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "Job output stored in workspace"
+      - "Job logs captured"
+      - "Artifacts accessible after job completion"
+      - "Artifacts cleaned up after 24 hours"
+    rollback_strategy: "Manual artifact cleanup"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  # =============================================================================
+  # EPIC-B3: Priority Scheduler Validation
+  # =============================================================================
+
+  - milestone_id: "MS-B3-01"
+    epic_id: "EPIC-B3"
+    title: "Verify Priority Ordering"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "EMERGENCY jobs execute before HIGH"
+      - "HIGH jobs execute before NORMAL"
+      - "NORMAL jobs execute before LOW"
+      - "FIFO order within same priority"
+    rollback_strategy: "Reset scheduler to FIFO-only mode"
+    estimated_complexity: M
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-B3-02"
+    epic_id: "EPIC-B3"
+    title: "Verify Starvation Prevention"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "Jobs waiting >30 minutes receive priority boost"
+      - "Escalation capped at HIGH (75)"
+      - "Escalation logged to audit trail"
+      - "All jobs eventually execute"
+    rollback_strategy: "Disable starvation prevention"
+    estimated_complexity: M
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-B3-03"
+    epic_id: "EPIC-B3"
+    title: "Verify Aspect Isolation"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "Only one job per project+aspect runs concurrently"
+      - "Different aspects can run in parallel"
+      - "Isolation enforced at scheduler level"
+    rollback_strategy: "Remove aspect isolation, use global queue"
+    estimated_complexity: M
+    requires_human_approval: false
+    blocking: false
+
+  # =============================================================================
+  # EPIC-C1: PROJECT_MODE Lifecycle Validation
+  # =============================================================================
+
+  - milestone_id: "MS-C1-01"
+    epic_id: "EPIC-C1"
+    title: "Create Test Project via API"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - CREATED
+    acceptance_criteria:
+      - "POST /lifecycle creates PROJECT_MODE instance"
+      - "Instance in CREATED state"
+      - "Aspect assigned correctly"
+      - "Lifecycle ID returned"
+    rollback_strategy: "Delete lifecycle instance"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-C1-02"
+    epic_id: "EPIC-C1"
+    title: "Transition Through Planning"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - PLANNING
+    acceptance_criteria:
+      - "SYSTEM_INIT trigger transitions to PLANNING"
+      - "Transition logged to audit trail"
+      - "State persisted to JSON"
+    rollback_strategy: "Reset lifecycle to CREATED"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-C1-03"
+    epic_id: "EPIC-C1"
+    title: "Execute Development with Claude Job"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEVELOPMENT
+    acceptance_criteria:
+      - "CLAUDE_JOB_COMPLETED trigger transitions to DEVELOPMENT"
+      - "Claude job submits and completes"
+      - "Job artifacts associated with lifecycle"
+    rollback_strategy: "Cancel job, reset lifecycle"
+    estimated_complexity: M
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-C1-04"
+    epic_id: "EPIC-C1"
+    title: "Execute Testing Phase"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+      - AWAITING_FEEDBACK
+    acceptance_criteria:
+      - "TEST_PASSED or TEST_FAILED trigger transitions correctly"
+      - "On pass, transitions to AWAITING_FEEDBACK"
+      - "On fail, transitions to FIXING"
+    rollback_strategy: "Reset to DEVELOPMENT"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-C1-05"
+    epic_id: "EPIC-C1"
+    title: "Complete Human Approval Flow"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - READY_FOR_PRODUCTION
+      - DEPLOYED
+    acceptance_criteria:
+      - "HUMAN_APPROVAL transitions to READY_FOR_PRODUCTION"
+      - "Second HUMAN_APPROVAL transitions to DEPLOYED"
+      - "Dual approval required for production"
+    rollback_strategy: "Reset to AWAITING_FEEDBACK"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-C2: CHANGE_MODE Lifecycle Validation
+  # =============================================================================
+
+  - milestone_id: "MS-C2-01"
+    epic_id: "EPIC-C2"
+    title: "Create Bug Fix Change"
+    aspect: core
+    change_type: bug
+    expected_lifecycle_states:
+      - AWAITING_FEEDBACK
+    acceptance_criteria:
+      - "CONTINUOUS_CHANGE_REQUEST on DEPLOYED lifecycle"
+      - "Transitions to AWAITING_FEEDBACK"
+      - "change_type set to 'bug'"
+      - "cycle_number incremented"
+    rollback_strategy: "Reset to DEPLOYED"
+    estimated_complexity: S
+    requires_human_approval: true
+    blocking: false
+
+  - milestone_id: "MS-C2-02"
+    epic_id: "EPIC-C2"
+    title: "Create Feature Change"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - AWAITING_FEEDBACK
+    acceptance_criteria:
+      - "change_type set to 'feature'"
+      - "Change summary captured"
+      - "Cycle history updated"
+    rollback_strategy: "Reset to DEPLOYED"
+    estimated_complexity: S
+    requires_human_approval: true
+    blocking: false
+
+  - milestone_id: "MS-C2-03"
+    epic_id: "EPIC-C2"
+    title: "Create Security Fix Change"
+    aspect: core
+    change_type: security
+    expected_lifecycle_states:
+      - AWAITING_FEEDBACK
+    acceptance_criteria:
+      - "change_type set to 'security'"
+      - "Security priority flag set"
+      - "Expedited review noted"
+    rollback_strategy: "Reset to DEPLOYED"
+    estimated_complexity: S
+    requires_human_approval: true
+    blocking: false
+
+  - milestone_id: "MS-C2-04"
+    epic_id: "EPIC-C2"
+    title: "Complete Change Cycle"
+    aspect: core
+    change_type: improvement
+    expected_lifecycle_states:
+      - FIXING
+      - READY_FOR_PRODUCTION
+      - DEPLOYED
+    acceptance_criteria:
+      - "Full cycle completes: AWAITING_FEEDBACK -> FIXING -> DEPLOYED"
+      - "Cycle history records all transitions"
+      - "Change lineage tracked"
+    rollback_strategy: "Reset to previous DEPLOYED state"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-C3: Project Ingestion Validation
+  # =============================================================================
+
+  - milestone_id: "MS-C3-01"
+    epic_id: "EPIC-C3"
+    title: "Ingest Git Repository"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - CREATED
+    acceptance_criteria:
+      - "Repository cloned successfully"
+      - "File enumeration complete"
+      - "Git metadata extracted"
+      - "Analysis report generated"
+    rollback_strategy: "Delete ingestion workspace"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: false
+
+  - milestone_id: "MS-C3-02"
+    epic_id: "EPIC-C3"
+    title: "Verify Aspect Detection"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "Aspects detected match project structure"
+      - "Confidence scores reasonable"
+      - "Evidence files identified"
+    rollback_strategy: "Manual aspect assignment"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-C3-03"
+    epic_id: "EPIC-C3"
+    title: "Verify Risk Scanning"
+    aspect: core
+    change_type: security
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "Hardcoded secrets detected if present"
+      - "Sensitive files flagged"
+      - "Risk level assigned correctly"
+    rollback_strategy: "N/A - scan only"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-C3-04"
+    epic_id: "EPIC-C3"
+    title: "Register Ingested Project"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - DEPLOYED
+    acceptance_criteria:
+      - "Lifecycle instances created for each aspect"
+      - "Instances in DEPLOYED state"
+      - "Governance documents generated"
+      - "Project visible in project list"
+    rollback_strategy: "Delete lifecycle instances, remove project"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-D1: Security Audit
+  # =============================================================================
+
+  - milestone_id: "MS-D1-01"
+    epic_id: "EPIC-D1"
+    title: "Dependency Vulnerability Scan"
+    aspect: core
+    change_type: security
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "pip-audit or safety scan executed"
+      - "No critical vulnerabilities"
+      - "High vulnerabilities documented with remediation plan"
+    rollback_strategy: "N/A - scan only"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-D1-02"
+    epic_id: "EPIC-D1"
+    title: "Secret Scanning"
+    aspect: core
+    change_type: security
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "No secrets in repository"
+      - "No secrets in logs"
+      - "Environment variables used correctly"
+    rollback_strategy: "Rotate exposed secrets"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-D1-03"
+    epic_id: "EPIC-D1"
+    title: "API Security Review"
+    aspect: backend
+    change_type: security
+    expected_lifecycle_states:
+      - TESTING
+      - AWAITING_FEEDBACK
+    acceptance_criteria:
+      - "Input validation on all endpoints"
+      - "Rate limiting effective"
+      - "No injection vulnerabilities"
+      - "Error messages don't leak information"
+    rollback_strategy: "Revert to previous API version"
+    estimated_complexity: L
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-D4: Rollback Testing
+  # =============================================================================
+
+  - milestone_id: "MS-D4-01"
+    epic_id: "EPIC-D4"
+    title: "Test Task Rollback"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "/rollback endpoint restores backup"
+      - "Task state transitions to ROLLED_BACK"
+      - "Files restored to pre-apply state"
+    rollback_strategy: "N/A - testing rollback itself"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-D4-02"
+    epic_id: "EPIC-D4"
+    title: "Test Production Rollback"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "Break-glass rollback executes without dual approval"
+      - "Previous version deployed"
+      - "Audit trail captures rollback"
+      - "Notification sent to Telegram"
+    rollback_strategy: "N/A - testing rollback itself"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-D5: Dual Approval Workflow Testing
+  # =============================================================================
+
+  - milestone_id: "MS-D5-01"
+    epic_id: "EPIC-D5"
+    title: "Verify Self-Approval Blocked"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "User cannot approve their own production request"
+      - "Error message returned"
+      - "Attempt logged to audit trail"
+    rollback_strategy: "N/A - verification only"
+    estimated_complexity: S
+    requires_human_approval: false
+    blocking: false
+
+  - milestone_id: "MS-D5-02"
+    epic_id: "EPIC-D5"
+    title: "Verify Dual Approval Required"
+    aspect: core
+    change_type: feature
+    expected_lifecycle_states:
+      - TESTING
+    acceptance_criteria:
+      - "Production deployment requires requestor and approver"
+      - "Requestor and approver must be different users"
+      - "Both users logged to audit trail"
+    rollback_strategy: "N/A - verification only"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  # =============================================================================
+  # EPIC-D6: Test Coverage Achievement
+  # =============================================================================
+
+  - milestone_id: "MS-D6-01"
+    epic_id: "EPIC-D6"
+    title: "Achieve 70% Unit Test Coverage"
+    aspect: core
+    change_type: improvement
+    expected_lifecycle_states:
+      - DEVELOPMENT
+      - TESTING
+    acceptance_criteria:
+      - "pytest --cov reports >= 70% coverage"
+      - "All critical paths tested"
+      - "No untested error handlers in critical code"
+    rollback_strategy: "N/A - additive only"
+    estimated_complexity: L
+    requires_human_approval: false
+    blocking: true
+
+  - milestone_id: "MS-D6-02"
+    epic_id: "EPIC-D6"
+    title: "Add Integration Tests"
+    aspect: core
+    change_type: improvement
+    expected_lifecycle_states:
+      - DEVELOPMENT
+      - TESTING
+    acceptance_criteria:
+      - "API endpoint integration tests exist"
+      - "Lifecycle flow integration tests exist"
+      - "Tests run in CI pipeline"
+    rollback_strategy: "N/A - additive only"
+    estimated_complexity: L
+    requires_human_approval: false
+    blocking: false
+
+  # =============================================================================
+  # EPIC-E1: Production Deployment
+  # =============================================================================
+
+  - milestone_id: "MS-E1-01"
+    epic_id: "EPIC-E1"
+    title: "Submit Production Deployment Request"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - READY_FOR_PRODUCTION
+    acceptance_criteria:
+      - "Request includes justification (min 20 chars)"
+      - "Request includes rollback plan"
+      - "Risk acknowledgment captured"
+      - "Request logged to audit trail"
+    rollback_strategy: "Cancel request"
+    estimated_complexity: S
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-E1-02"
+    epic_id: "EPIC-E1"
+    title: "Obtain Dual Approval"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - READY_FOR_PRODUCTION
+    acceptance_criteria:
+      - "Different user approves"
+      - "Approver confirms review of changes"
+      - "Approver confirms review of rollback plan"
+      - "Approval logged to audit trail"
+    rollback_strategy: "Reject request"
+    estimated_complexity: S
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-E1-03"
+    epic_id: "EPIC-E1"
+    title: "Execute Production Deployment"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEPLOYED
+    acceptance_criteria:
+      - "Deployment to ai.mybd.in successful"
+      - "Health check passes"
+      - "Release manifest created"
+      - "Notification sent to Telegram"
+    rollback_strategy: "Execute break-glass rollback"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+  - milestone_id: "MS-E1-04"
+    epic_id: "EPIC-E1"
+    title: "Verify Production Health"
+    aspect: backend
+    change_type: feature
+    expected_lifecycle_states:
+      - DEPLOYED
+    acceptance_criteria:
+      - "/health returns 200 OK"
+      - "Error rate < 1% for 1 hour"
+      - "Response time P95 < 2s"
+      - "No critical errors in logs"
+    rollback_strategy: "Execute break-glass rollback"
+    estimated_complexity: M
+    requires_human_approval: true
+    blocking: true
+
+# =============================================================================
+# Milestone Summary
+# =============================================================================
+#
+# Total Milestones: 47
+#
+# By Epic:
+#   EPIC-A1 (Telegram Bot): 3 milestones
+#   EPIC-A2 (VPS Infrastructure): 4 milestones
+#   EPIC-A3 (CI/CD Pipeline): 3 milestones
+#   EPIC-A4 (Health Monitoring): 2 milestones
+#   EPIC-B1 (Claude Integration): 3 milestones
+#   EPIC-B2 (Job Workspace): 2 milestones
+#   EPIC-B3 (Priority Scheduler): 3 milestones
+#   EPIC-C1 (PROJECT_MODE): 5 milestones
+#   EPIC-C2 (CHANGE_MODE): 4 milestones
+#   EPIC-C3 (Ingestion): 4 milestones
+#   EPIC-D1 (Security Audit): 3 milestones
+#   EPIC-D4 (Rollback Testing): 2 milestones
+#   EPIC-D5 (Dual Approval): 2 milestones
+#   EPIC-D6 (Test Coverage): 2 milestones
+#   EPIC-E1 (Production Deploy): 4 milestones
+#
+# By Complexity:
+#   S (Small): 18 milestones
+#   M (Medium): 23 milestones
+#   L (Large): 4 milestones
+#   XL (Extra Large): 0 milestones
+#
+# Blocking Milestones: 21
+# Requires Human Approval: 31

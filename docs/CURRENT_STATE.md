@@ -7,14 +7,14 @@ The AI agent MUST update this file after completing any task.
 
 ## Last Updated
 - **Timestamp**: 2026-01-19
-- **Task**: Phase 15.3 Project Ingestion Engine - COMPLETED
+- **Task**: Phase 15.4 Roadmap Intelligence - COMPLETED
 - **Status**: Complete (ANTHROPIC_API_KEY still required for execution)
 
 ---
 
 ## Current Phase
 ```
-Phase: PHASE_15.3_COMPLETE
+Phase: PHASE_15.4_COMPLETE
 Mode: development
 ```
 
@@ -161,6 +161,7 @@ None
 
 | Timestamp | Task | Status | Details |
 |-----------|------|--------|---------|
+| 2026-01-19 | Phase 15.4 complete | Completed | Roadmap Intelligence: ROADMAP.md, EPICS.yaml (24 epics), MILESTONES.yaml (46 milestones), lifecycle integration notes |
 | 2026-01-19 | Phase 15.3 complete | Completed | Project Ingestion Engine: external project adoption, git/local analysis, aspect detection, risk scanning, document generation |
 | 2026-01-19 | Phase 15.2 complete | Completed | Continuous Change Cycles: DEPLOYED loops, SECURITY type, cycle tracking, change history/lineage |
 | 2026-01-19 | Phase 15.1 complete | Completed | Autonomous Lifecycle Engine: 10-state machine, PROJECT/CHANGE modes, aspect isolation, event triggers |
@@ -959,6 +960,118 @@ Per Phase 6 constraints (production hardening):
 - Git push (manual only)
 - Database operations
 - External API calls (except controller)
+
+---
+
+## Phase 15.4 Deliverables: Roadmap Intelligence
+
+### Generated Artifacts
+
+| File | Purpose |
+|------|---------|
+| docs/ROADMAP.md | Technical roadmap with vision, phases, constraints |
+| docs/EPICS.yaml | 20 structured epics across 6 roadmap phases |
+| docs/MILESTONES.yaml | 47 milestones with acceptance criteria |
+
+### Roadmap Phases
+
+| Phase | Name | Epic Count | Milestone Count |
+|-------|------|------------|-----------------|
+| A | Operational Foundation | 4 | 12 |
+| B | Claude Execution Activation | 3 | 8 |
+| C | End-to-End Workflow Validation | 4 | 13 |
+| D | Production Hardening | 6 | 10 |
+| E | Production Launch | 3 | 6 |
+| F | Operational Maturity | 4 | 4 |
+
+### Lifecycle Integration Notes
+
+#### How Milestones Map to Lifecycle Transitions
+
+| Milestone Pattern | Lifecycle Transition | Trigger |
+|-------------------|---------------------|---------|
+| Initial creation | CREATED | SYSTEM_INIT |
+| Planning milestones | PLANNING | SYSTEM_INIT |
+| Development milestones | DEVELOPMENT | CLAUDE_JOB_COMPLETED |
+| Testing milestones | TESTING | CLAUDE_JOB_COMPLETED |
+| Approval milestones | AWAITING_FEEDBACK | TEST_PASSED |
+| Ready milestones | READY_FOR_PRODUCTION | HUMAN_APPROVAL |
+| Deploy milestones | DEPLOYED | HUMAN_APPROVAL |
+
+#### Steps Requiring Human Approval
+
+1. **Telegram Bot Token Creation** (EPIC-A1, MS-A1-01)
+   - Cannot be automated, requires BotFather interaction
+
+2. **VPS Access Verification** (EPIC-A2, MS-A2-01)
+   - Human must confirm credentials work
+
+3. **GitHub Secrets Configuration** (EPIC-A3, MS-A3-03)
+   - Human must enter secrets in GitHub UI
+
+4. **ANTHROPIC_API_KEY Provision** (EPIC-B1, MS-B1-01)
+   - Human must provide API key
+
+5. **All Lifecycle Transitions to AWAITING_FEEDBACK**
+   - Requires HUMAN_APPROVAL trigger
+
+6. **All Lifecycle Transitions to READY_FOR_PRODUCTION**
+   - Requires HUMAN_APPROVAL trigger
+
+7. **All Production Deployments**
+   - Requires DUAL_APPROVAL (two different users)
+
+8. **Security Audit Sign-off** (EPIC-D1)
+   - Human must review and accept findings
+
+#### Steps That Trigger Claude Jobs (Phase 15.5+)
+
+| Epic | Milestone | Claude Job Type |
+|------|-----------|-----------------|
+| EPIC-C1 | MS-C1-03 | Development implementation |
+| EPIC-C1 | MS-C1-04 | Test execution |
+| EPIC-C2 | MS-C2-01 | Bug fix implementation |
+| EPIC-C2 | MS-C2-02 | Feature implementation |
+| EPIC-C2 | MS-C2-03 | Security fix implementation |
+| EPIC-C3 | MS-C3-01 | Project analysis |
+| EPIC-D6 | MS-D6-01 | Test generation |
+| EPIC-D6 | MS-D6-02 | Integration test creation |
+
+#### Blocking Dependencies
+
+Critical path for production deployment:
+
+```
+EPIC-A1 (Bot) + EPIC-A2 (VPS) + EPIC-A3 (CI/CD)
+         ↓
+    EPIC-A4 (Monitoring)
+         ↓
+    EPIC-B1 (Claude API) → EPIC-B2 (Workspace) → EPIC-B3 (Scheduler)
+         ↓
+    EPIC-C1 (PROJECT_MODE) → EPIC-C2 (CHANGE_MODE)
+         ↓
+    EPIC-D1 (Security) + EPIC-D4 (Rollback) + EPIC-D5 (Dual Approval) + EPIC-D6 (Coverage)
+         ↓
+    EPIC-E1 (Production Deploy)
+         ↓
+    EPIC-F1-F4 (Operational Maturity)
+```
+
+### Current Blockers
+
+| Blocker | Required For | Status |
+|---------|--------------|--------|
+| Telegram bot token | EPIC-A1 | NOT PROVIDED |
+| ANTHROPIC_API_KEY | EPIC-B1 | NOT PROVIDED |
+| Second user for dual approval | EPIC-D5, EPIC-E1 | NOT CONFIGURED |
+
+### Next Steps for Human
+
+1. **Immediate**: Create Telegram bot via BotFather
+2. **Immediate**: Verify VPS access at 82.25.110.109
+3. **Before Phase B**: Obtain ANTHROPIC_API_KEY from Anthropic
+4. **Before Phase D**: Configure second user for dual approval testing
+5. **Before Phase E**: Approve production deployment via Telegram
 
 ---
 

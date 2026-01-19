@@ -1,0 +1,456 @@
+# EPICS.yaml
+# Phase 15.4: Roadmap Intelligence Engine
+# Generated: 2026-01-19
+
+---
+# Epic definitions for AI Development Platform roadmap
+
+epics:
+
+  # =============================================================================
+  # Phase A: Operational Foundation
+  # =============================================================================
+
+  - epic_id: "EPIC-A1"
+    title: "Telegram Bot Activation"
+    description: |
+      Create and configure the Telegram bot token, connect the existing bot implementation
+      to the Telegram API, and verify basic command functionality.
+    target_aspects:
+      - core
+    risk_level: LOW
+    dependencies: []
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "A"
+    priority: HIGH
+    human_input_required:
+      - "Telegram bot token creation via BotFather"
+      - "Bot username selection"
+
+  - epic_id: "EPIC-A2"
+    title: "VPS Deployment Infrastructure"
+    description: |
+      Configure the VPS environment for running the Task Controller and Telegram bot.
+      Set up systemd services, configure OpenLiteSpeed, and establish SSH deployment workflows.
+    target_aspects:
+      - backend
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-A1"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "A"
+    priority: HIGH
+    human_input_required:
+      - "VPS credentials verification"
+      - "Domain DNS confirmation"
+
+  - epic_id: "EPIC-A3"
+    title: "CI/CD Pipeline Implementation"
+    description: |
+      Transform the skeleton CI/CD workflow into a functional GitHub Actions pipeline
+      that runs tests, performs linting, and deploys to testing environment.
+    target_aspects:
+      - core
+    risk_level: LOW
+    dependencies: []
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "A"
+    priority: HIGH
+    human_input_required:
+      - "GitHub secrets configuration"
+
+  - epic_id: "EPIC-A4"
+    title: "Health Monitoring Setup"
+    description: |
+      Implement health check endpoints, configure uptime monitoring, and set up
+      basic alerting for service availability.
+    target_aspects:
+      - backend
+      - core
+    risk_level: LOW
+    dependencies:
+      - "EPIC-A2"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "A"
+    priority: MEDIUM
+    human_input_required: []
+
+  # =============================================================================
+  # Phase B: Claude Execution Activation
+  # =============================================================================
+
+  - epic_id: "EPIC-B1"
+    title: "Claude API Integration"
+    description: |
+      Configure ANTHROPIC_API_KEY, verify Claude CLI execution in sandboxed environment,
+      and validate job queue functionality.
+    target_aspects:
+      - backend
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-A2"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "B"
+    priority: HIGH
+    human_input_required:
+      - "ANTHROPIC_API_KEY provision"
+
+  - epic_id: "EPIC-B2"
+    title: "Job Workspace Verification"
+    description: |
+      Verify job workspace creation, policy document injection, artifact storage,
+      and cleanup procedures are working correctly.
+    target_aspects:
+      - backend
+    risk_level: LOW
+    dependencies:
+      - "EPIC-B1"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "B"
+    priority: MEDIUM
+    human_input_required: []
+
+  - epic_id: "EPIC-B3"
+    title: "Priority Scheduler Validation"
+    description: |
+      End-to-end testing of priority scheduling, starvation prevention, and
+      aspect isolation under concurrent job load.
+    target_aspects:
+      - backend
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-B1"
+      - "EPIC-B2"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "B"
+    priority: MEDIUM
+    human_input_required: []
+
+  # =============================================================================
+  # Phase C: End-to-End Workflow Validation
+  # =============================================================================
+
+  - epic_id: "EPIC-C1"
+    title: "PROJECT_MODE Lifecycle Validation"
+    description: |
+      Execute a complete PROJECT_MODE lifecycle from project creation through
+      planning, development, testing, and deployment to testing environment.
+    target_aspects:
+      - core
+      - backend
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-B1"
+      - "EPIC-B2"
+      - "EPIC-B3"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "C"
+    priority: HIGH
+    human_input_required:
+      - "Lifecycle transition approvals"
+      - "Deployment confirmation"
+
+  - epic_id: "EPIC-C2"
+    title: "CHANGE_MODE Lifecycle Validation"
+    description: |
+      Execute complete CHANGE_MODE cycles including bug fixes, feature additions,
+      improvements, refactoring, and security fixes.
+    target_aspects:
+      - core
+      - backend
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-C1"
+    lifecycle_mode: CHANGE_MODE
+    roadmap_phase: "C"
+    priority: HIGH
+    human_input_required:
+      - "Change request approvals"
+      - "Deployment confirmations"
+
+  - epic_id: "EPIC-C3"
+    title: "Project Ingestion Validation"
+    description: |
+      Test the ingestion engine with real external projects, verify analysis
+      accuracy, document generation, and lifecycle registration.
+    target_aspects:
+      - core
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-C1"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "C"
+    priority: MEDIUM
+    human_input_required:
+      - "Ingestion approval"
+      - "Registration approval"
+
+  - epic_id: "EPIC-C4"
+    title: "Continuous Change Cycles Validation"
+    description: |
+      Verify DEPLOYED → AWAITING_FEEDBACK → FIXING → DEPLOYED loops work correctly
+      with proper cycle tracking and lineage.
+    target_aspects:
+      - core
+    risk_level: LOW
+    dependencies:
+      - "EPIC-C1"
+      - "EPIC-C2"
+    lifecycle_mode: CHANGE_MODE
+    roadmap_phase: "C"
+    priority: MEDIUM
+    human_input_required:
+      - "Feedback submission"
+      - "Change approvals"
+
+  # =============================================================================
+  # Phase D: Production Hardening
+  # =============================================================================
+
+  - epic_id: "EPIC-D1"
+    title: "Security Audit"
+    description: |
+      Comprehensive security review including secret scanning, dependency audit,
+      API security validation, and penetration testing of critical paths.
+    target_aspects:
+      - core
+      - backend
+    risk_level: HIGH
+    dependencies:
+      - "EPIC-C1"
+      - "EPIC-C2"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "D"
+    priority: HIGH
+    human_input_required:
+      - "Security audit review"
+      - "Remediation approval"
+
+  - epic_id: "EPIC-D2"
+    title: "Rate Limiting Verification"
+    description: |
+      Test rate limiting under load, verify per-user and per-command limits,
+      and validate abuse prevention mechanisms.
+    target_aspects:
+      - backend
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-C1"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "D"
+    priority: MEDIUM
+    human_input_required: []
+
+  - epic_id: "EPIC-D3"
+    title: "Degraded Mode Testing"
+    description: |
+      Simulate failure scenarios (Claude unavailable, VPS resource exhaustion)
+      and verify graceful degradation and owner override functionality.
+    target_aspects:
+      - backend
+      - core
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-C1"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "D"
+    priority: MEDIUM
+    human_input_required:
+      - "Degraded mode behavior approval"
+
+  - epic_id: "EPIC-D4"
+    title: "Rollback Testing"
+    description: |
+      Test break-glass rollback procedures, verify backup restoration,
+      and validate dual approval bypass for emergency rollbacks.
+    target_aspects:
+      - backend
+    risk_level: HIGH
+    dependencies:
+      - "EPIC-C1"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "D"
+    priority: HIGH
+    human_input_required:
+      - "Rollback verification"
+
+  - epic_id: "EPIC-D5"
+    title: "Dual Approval Workflow Testing"
+    description: |
+      Verify that production deployments require two different users,
+      self-approval is blocked, and audit trail captures all approvals.
+    target_aspects:
+      - core
+    risk_level: HIGH
+    dependencies:
+      - "EPIC-C1"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "D"
+    priority: HIGH
+    human_input_required:
+      - "Second user for approval testing"
+
+  - epic_id: "EPIC-D6"
+    title: "Test Coverage Achievement"
+    description: |
+      Ensure all test suites achieve minimum 70% coverage as required by
+      TESTING_STRATEGY.md, fill gaps in integration and smoke tests.
+    target_aspects:
+      - core
+      - backend
+    risk_level: LOW
+    dependencies: []
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "D"
+    priority: HIGH
+    human_input_required: []
+
+  # =============================================================================
+  # Phase E: Production Launch
+  # =============================================================================
+
+  - epic_id: "EPIC-E1"
+    title: "Production Deployment"
+    description: |
+      Execute production deployment with full approval workflow,
+      create release manifest, and verify health checks.
+    target_aspects:
+      - backend
+      - core
+    risk_level: HIGH
+    dependencies:
+      - "EPIC-D1"
+      - "EPIC-D2"
+      - "EPIC-D3"
+      - "EPIC-D4"
+      - "EPIC-D5"
+      - "EPIC-D6"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "E"
+    priority: HIGH
+    human_input_required:
+      - "Production deployment request with justification"
+      - "Dual approval from different users"
+      - "Final deployment confirmation"
+
+  - epic_id: "EPIC-E2"
+    title: "Production Monitoring Setup"
+    description: |
+      Configure production monitoring dashboards, set up alerting thresholds,
+      and establish on-call procedures.
+    target_aspects:
+      - backend
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-E1"
+    lifecycle_mode: CHANGE_MODE
+    roadmap_phase: "E"
+    priority: HIGH
+    human_input_required:
+      - "Alert threshold approval"
+
+  - epic_id: "EPIC-E3"
+    title: "Documentation Finalization"
+    description: |
+      Complete all user-facing documentation, API reference,
+      operational runbooks, and troubleshooting guides.
+    target_aspects:
+      - core
+    risk_level: LOW
+    dependencies:
+      - "EPIC-E1"
+    lifecycle_mode: CHANGE_MODE
+    roadmap_phase: "E"
+    priority: MEDIUM
+    human_input_required:
+      - "Documentation review"
+
+  # =============================================================================
+  # Phase F: Operational Maturity
+  # =============================================================================
+
+  - epic_id: "EPIC-F1"
+    title: "Self-Healing Implementation"
+    description: |
+      Implement automatic service restart, connection recovery,
+      and queue recovery mechanisms.
+    target_aspects:
+      - backend
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-E1"
+    lifecycle_mode: CHANGE_MODE
+    roadmap_phase: "F"
+    priority: MEDIUM
+    human_input_required:
+      - "Self-healing behavior approval"
+
+  - epic_id: "EPIC-F2"
+    title: "Backup Verification Automation"
+    description: |
+      Implement automated daily backup verification,
+      backup integrity checks, and restoration testing.
+    target_aspects:
+      - backend
+    risk_level: MEDIUM
+    dependencies:
+      - "EPIC-E1"
+    lifecycle_mode: CHANGE_MODE
+    roadmap_phase: "F"
+    priority: MEDIUM
+    human_input_required: []
+
+  - epic_id: "EPIC-F3"
+    title: "Capacity Planning"
+    description: |
+      Analyze resource utilization, project growth patterns,
+      and document scaling strategy for 6-month horizon.
+    target_aspects:
+      - core
+    risk_level: LOW
+    dependencies:
+      - "EPIC-E1"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "F"
+    priority: LOW
+    human_input_required:
+      - "Capacity projections review"
+
+  - epic_id: "EPIC-F4"
+    title: "Incident Response Runbook"
+    description: |
+      Document P1/P2 incident scenarios, response procedures,
+      escalation paths, and post-incident review process.
+    target_aspects:
+      - core
+    risk_level: LOW
+    dependencies:
+      - "EPIC-E1"
+    lifecycle_mode: PROJECT_MODE
+    roadmap_phase: "F"
+    priority: MEDIUM
+    human_input_required:
+      - "Runbook review and approval"
+
+# =============================================================================
+# Epic Summary
+# =============================================================================
+#
+# Total Epics: 20
+#
+# By Phase:
+#   Phase A (Operational Foundation): 4 epics
+#   Phase B (Claude Execution): 3 epics
+#   Phase C (End-to-End Validation): 4 epics
+#   Phase D (Production Hardening): 6 epics
+#   Phase E (Production Launch): 3 epics
+#   Phase F (Operational Maturity): 4 epics
+#
+# By Risk Level:
+#   HIGH: 6 epics
+#   MEDIUM: 11 epics
+#   LOW: 3 epics
+#
+# By Lifecycle Mode:
+#   PROJECT_MODE: 16 epics
+#   CHANGE_MODE: 4 epics

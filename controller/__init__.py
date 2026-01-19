@@ -12,11 +12,12 @@ Phase 15: Autonomous Lifecycle Engine with Continuous Change Cycles
 - Phase 15.1: Deterministic lifecycle state machine with event-driven transitions
 - Phase 15.2: Continuous change cycles with DEPLOYED -> AWAITING_FEEDBACK loops
 - Phase 15.3: Existing project ingestion & adoption engine
+- Phase 15.4: Roadmap intelligence with epics and milestones
 """
 
-__version__ = "0.15.3"
+__version__ = "0.15.4"
 
 # Single source of truth for phase metadata
-CURRENT_PHASE = "15.3"
-CURRENT_PHASE_NAME = "Project Ingestion Engine"
+CURRENT_PHASE = "15.4"
+CURRENT_PHASE_NAME = "Roadmap Intelligence"
 CURRENT_PHASE_FULL = f"Phase {CURRENT_PHASE}: {CURRENT_PHASE_NAME}"
