@@ -109,13 +109,13 @@ def escape_markdown(text: str) -> str:
     """
     Escape special characters for Telegram Markdown (v1) parsing.
 
-    Characters that need escaping: _ * ` [
-    Note: Parentheses can cause issues when combined with other markdown.
+    Characters that need escaping: _ * ` [ ] ( )
+    Parentheses and brackets can cause issues with link parsing.
     """
     if not text:
         return text
     # Escape backslash first, then other special chars
-    for char in ['\\', '_', '*', '`', '[']:
+    for char in ['\\', '_', '*', '`', '[', ']', '(', ')']:
         text = text.replace(char, f'\\{char}')
     return text
 
