@@ -104,6 +104,22 @@ NO_RETRY_ACTIONS = frozenset([
     "deploy",
 ])
 
+
+def escape_markdown(text: str) -> str:
+    """
+    Escape special characters for Telegram Markdown (v1) parsing.
+
+    Characters that need escaping: _ * ` [
+    Note: Parentheses can cause issues when combined with other markdown.
+    """
+    if not text:
+        return text
+    # Escape backslash first, then other special chars
+    for char in ['\\', '_', '*', '`', '[']:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
 # -----------------------------------------------------------------------------
 # Phase 13.4: Role System
 # -----------------------------------------------------------------------------
@@ -1907,7 +1923,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         controller_health = await controller.health_check()
         if "error" in controller_health:
             lines.append("❌ *Controller:* Unreachable")
-            lines.append(f"   Error: {controller_health.get('error')}")
+            lines.append(f"   Error: {escape_markdown(str(controller_health.get('error', '')))}")
         else:
             lines.append("✅ *Controller:* Healthy")
             controller_phase = controller_health.get('phase', 'unknown')
@@ -1981,7 +1997,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             if claude_status.get("available"):
                 lines.append("✅ *Claude CLI:* Available")
-                lines.append(f"   Version: {cli_info.get('version', 'unknown')}")
+                lines.append(f"   Version: {escape_markdown(cli_info.get('version', 'unknown'))}")
                 # Phase 15.5: Show auth type
                 auth_type = cli_info.get("auth_type", "unknown")
                 if auth_type == "cli_session":
@@ -2003,7 +2019,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 elif not cli_info.get("authenticated"):
                     lines.append("   Not authenticated (run 'claude auth login')")
                 elif cli_info.get("error"):
-                    lines.append(f"   Error: {cli_info.get('error')[:50]}")
+                    lines.append(f"   Error: {escape_markdown(cli_info.get('error', '')[:50])}")
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
