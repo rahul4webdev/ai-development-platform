@@ -1700,7 +1700,21 @@ async def check_claude_availability() -> Dict[str, Any]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=5  # Short timeout for version check
+            )
+        except asyncio.TimeoutError:
+            # Kill subprocess on timeout
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
+            result["error"] = "Claude CLI version check timed out"
+            logger.warning("Claude CLI --version timed out - subprocess killed")
+            return result
 
         if process.returncode == 0:
             result["installed"] = True
@@ -1748,8 +1762,14 @@ async def check_claude_availability() -> Dict[str, Any]:
                 timeout=30  # 30 second timeout for test
             )
         except asyncio.TimeoutError:
+            # Kill the subprocess on timeout to prevent zombie processes
+            try:
+                process.kill()
+                await process.wait()  # Ensure process is fully terminated
+            except Exception:
+                pass  # Process may already be dead
             result["error"] = "Execution test timed out after 30 seconds"
-            logger.warning("Claude CLI execution test timed out")
+            logger.warning("Claude CLI execution test timed out - subprocess killed")
             return result
 
         stdout_text = stdout.decode().strip()
