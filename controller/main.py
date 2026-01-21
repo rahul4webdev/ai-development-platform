@@ -4737,6 +4737,949 @@ async def dashboard_audit_endpoint(
 
 
 # -----------------------------------------------------------------------------
+# Phase 17A: Runtime Intelligence Endpoints (READ-ONLY)
+# -----------------------------------------------------------------------------
+
+# Import runtime intelligence backend
+try:
+    from .runtime_intelligence import (
+        get_runtime_engine,
+        get_signals,
+        get_signal_summary,
+        poll_signals,
+        SignalType,
+        Severity,
+        RuntimeSignal,
+        SignalSummary,
+    )
+    RUNTIME_INTELLIGENCE_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Runtime intelligence not available: {e}")
+    RUNTIME_INTELLIGENCE_AVAILABLE = False
+
+
+@app.get("/runtime/signals")
+async def runtime_signals_endpoint(
+    project_id: Optional[str] = None,
+    signal_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    since_hours: int = 24,
+    limit: int = 100,
+):
+    """
+    Phase 17A: Get runtime signals.
+
+    Query parameters:
+    - project_id: Filter by project
+    - signal_type: Filter by signal type (system_resource, worker_queue, etc.)
+    - severity: Filter by severity (info, warning, degraded, critical, unknown)
+    - since_hours: Time window in hours (default 24)
+    - limit: Maximum signals to return (default 100)
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not RUNTIME_INTELLIGENCE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Runtime intelligence not available")
+
+    try:
+        from datetime import datetime, timedelta
+
+        since = datetime.utcnow() - timedelta(hours=since_hours)
+
+        # Parse optional enums
+        type_filter = None
+        if signal_type:
+            try:
+                type_filter = SignalType(signal_type)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid signal_type: {signal_type}")
+
+        severity_filter = None
+        if severity:
+            try:
+                severity_filter = Severity(severity)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid severity: {severity}")
+
+        signals = get_signals(
+            since=since,
+            project_id=project_id,
+            signal_type=type_filter,
+            severity=severity_filter,
+            limit=limit,
+        )
+
+        return {
+            "phase": "17A",
+            "endpoint": "runtime/signals",
+            "observation_only": True,
+            "filter": {
+                "project_id": project_id,
+                "signal_type": signal_type,
+                "severity": severity,
+                "since_hours": since_hours,
+            },
+            "count": len(signals),
+            "signals": [s.to_dict() for s in signals],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Runtime signals error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get signals: {str(e)}")
+
+
+@app.get("/runtime/summary")
+async def runtime_summary_endpoint(
+    since_hours: int = 24,
+):
+    """
+    Phase 17A: Get runtime signal summary.
+
+    Query parameters:
+    - since_hours: Time window in hours (default 24)
+
+    Returns:
+    - Signal counts by severity
+    - Signal counts by type
+    - Unknown count (visibility of missing data)
+    - Observability status
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not RUNTIME_INTELLIGENCE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Runtime intelligence not available")
+
+    try:
+        from datetime import datetime, timedelta
+
+        since = datetime.utcnow() - timedelta(hours=since_hours)
+        summary = get_signal_summary(since=since)
+
+        return {
+            "phase": "17A",
+            "endpoint": "runtime/summary",
+            "observation_only": True,
+            "summary": summary.to_dict(),
+        }
+
+    except Exception as e:
+        logger.error(f"Runtime summary error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get summary: {str(e)}")
+
+
+@app.get("/runtime/status")
+async def runtime_status_endpoint():
+    """
+    Phase 17A: Get runtime intelligence engine status.
+
+    Returns:
+    - Engine running state
+    - Poll configuration
+    - Last poll timestamp
+    - Poll count
+
+    This is a READ-ONLY endpoint. No mutations.
+    """
+    if not RUNTIME_INTELLIGENCE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Runtime intelligence not available")
+
+    try:
+        engine = get_runtime_engine()
+        status = engine.get_status()
+
+        return {
+            "phase": "17A",
+            "endpoint": "runtime/status",
+            "observation_only": True,
+            "status": status,
+        }
+
+    except Exception as e:
+        logger.error(f"Runtime status error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get status: {str(e)}")
+
+
+@app.post("/runtime/poll")
+async def runtime_poll_endpoint():
+    """
+    Phase 17A: Trigger a manual signal poll.
+
+    This endpoint triggers an immediate poll cycle without waiting
+    for the scheduled interval.
+
+    Returns:
+    - Number of signals collected
+    - Number of signals persisted
+
+    This is a READ-ONLY operation - it only collects and persists signals.
+    It does NOT modify lifecycle, deployments, or intent.
+    """
+    if not RUNTIME_INTELLIGENCE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Runtime intelligence not available")
+
+    try:
+        persisted, signals = poll_signals()
+
+        # Summarize by severity
+        by_severity = {}
+        for signal in signals:
+            sev = signal.severity
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+
+        return {
+            "phase": "17A",
+            "endpoint": "runtime/poll",
+            "observation_only": True,
+            "collected": len(signals),
+            "persisted": persisted,
+            "by_severity": by_severity,
+            "message": f"Poll complete: {len(signals)} signals collected, {persisted} persisted",
+        }
+
+    except Exception as e:
+        logger.error(f"Runtime poll error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to poll: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
+# Phase 17B: Incident Classification Endpoints (READ-ONLY)
+# -----------------------------------------------------------------------------
+try:
+    from .incident_model import (
+        Incident,
+        IncidentType,
+        IncidentSeverity,
+        IncidentScope,
+        IncidentState,
+        IncidentSummary,
+    )
+    from .incident_engine import (
+        IncidentClassificationEngine,
+        classify_signals,
+        get_classification_engine,
+    )
+    from .incident_store import (
+        IncidentStore,
+        get_incident_store,
+        persist_incidents,
+        read_incidents,
+        read_recent_incidents,
+        get_incident_by_id,
+        get_incident_summary,
+    )
+    INCIDENT_CLASSIFICATION_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Incident classification not available: {e}")
+    INCIDENT_CLASSIFICATION_AVAILABLE = False
+
+
+@app.get("/incidents")
+async def incidents_endpoint(
+    incident_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    scope: Optional[str] = None,
+    state: Optional[str] = None,
+    project_id: Optional[str] = None,
+    since_hours: int = 24,
+    limit: int = 100,
+):
+    """
+    Phase 17B: Get incidents.
+
+    Query parameters:
+    - incident_type: Filter by type (performance, reliability, security, etc.)
+    - severity: Filter by severity (info, low, medium, high, critical, unknown)
+    - scope: Filter by scope (system, project, project_aspect, job, unknown)
+    - state: Filter by state (open, closed, unknown)
+    - project_id: Filter by project
+    - since_hours: Time window in hours (default 24)
+    - limit: Maximum incidents to return (default 100)
+
+    This is a READ-ONLY endpoint. No mutations, no alerts, no recommendations.
+    """
+    if not INCIDENT_CLASSIFICATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Incident classification not available")
+
+    try:
+        from datetime import datetime, timedelta
+
+        since = datetime.utcnow() - timedelta(hours=since_hours)
+
+        # Parse filters
+        type_filter = IncidentType(incident_type) if incident_type else None
+        severity_filter = IncidentSeverity(severity) if severity else None
+        scope_filter = IncidentScope(scope) if scope else None
+        state_filter = IncidentState(state) if state else None
+
+        store = get_incident_store()
+        incidents = store.read_incidents(
+            since=since,
+            incident_type=type_filter,
+            severity=severity_filter,
+            scope=scope_filter,
+            state=state_filter,
+            project_id=project_id,
+            limit=limit,
+        )
+
+        return {
+            "phase": "17B",
+            "endpoint": "incidents",
+            "observation_only": True,
+            "no_alerts": True,
+            "no_recommendations": True,
+            "total": len(incidents),
+            "filters": {
+                "incident_type": incident_type,
+                "severity": severity,
+                "scope": scope,
+                "state": state,
+                "project_id": project_id,
+                "since_hours": since_hours,
+            },
+            "incidents": [i.to_dict() for i in incidents],
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid filter value: {str(e)}")
+    except Exception as e:
+        logger.error(f"Incidents endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get incidents: {str(e)}")
+
+
+@app.get("/incidents/recent")
+async def incidents_recent_endpoint(
+    hours: int = 24,
+    limit: int = 50,
+):
+    """
+    Phase 17B: Get recent incidents.
+
+    Query parameters:
+    - hours: Time window in hours (default 24)
+    - limit: Maximum incidents to return (default 50)
+
+    This is a READ-ONLY endpoint. No mutations, no alerts, no recommendations.
+    """
+    if not INCIDENT_CLASSIFICATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Incident classification not available")
+
+    try:
+        store = get_incident_store()
+        incidents = store.read_recent(hours=hours, limit=limit)
+
+        return {
+            "phase": "17B",
+            "endpoint": "incidents/recent",
+            "observation_only": True,
+            "no_alerts": True,
+            "no_recommendations": True,
+            "total": len(incidents),
+            "hours": hours,
+            "incidents": [i.to_dict() for i in incidents],
+        }
+
+    except Exception as e:
+        logger.error(f"Recent incidents endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get recent incidents: {str(e)}")
+
+
+@app.get("/incidents/summary")
+async def incidents_summary_endpoint(
+    since_hours: int = 24,
+):
+    """
+    Phase 17B: Get incident summary.
+
+    Query parameters:
+    - since_hours: Time window in hours (default 24)
+
+    Returns summary counts by severity, type, scope, and state.
+    Also includes list of recent incidents.
+
+    This is a READ-ONLY endpoint. No mutations, no alerts, no recommendations.
+    """
+    if not INCIDENT_CLASSIFICATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Incident classification not available")
+
+    try:
+        summary = get_incident_summary(since_hours=since_hours)
+
+        return {
+            "phase": "17B",
+            "endpoint": "incidents/summary",
+            "observation_only": True,
+            "no_alerts": True,
+            "no_recommendations": True,
+            **summary.to_dict(),
+        }
+
+    except Exception as e:
+        logger.error(f"Incidents summary endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get incident summary: {str(e)}")
+
+
+@app.get("/incidents/{incident_id}")
+async def incident_by_id_endpoint(incident_id: str):
+    """
+    Phase 17B: Get a specific incident by ID.
+
+    This is a READ-ONLY endpoint. No mutations, no alerts, no recommendations.
+    """
+    if not INCIDENT_CLASSIFICATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Incident classification not available")
+
+    try:
+        incident = get_incident_by_id(incident_id)
+
+        if not incident:
+            raise HTTPException(status_code=404, detail=f"Incident not found: {incident_id}")
+
+        return {
+            "phase": "17B",
+            "endpoint": "incidents/{id}",
+            "observation_only": True,
+            "no_alerts": True,
+            "no_recommendations": True,
+            "incident": incident.to_dict(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Incident by ID endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get incident: {str(e)}")
+
+
+@app.post("/incidents/classify")
+async def incidents_classify_endpoint():
+    """
+    Phase 17B: Trigger incident classification from current signals.
+
+    This reads signals from Phase 17A, classifies them into incidents,
+    and persists the incidents.
+
+    CRITICAL: This is an OBSERVATION-ONLY operation:
+    - No lifecycle changes
+    - No alerts
+    - No recommendations
+    - No deployments
+
+    It only classifies signals into incidents and stores them.
+    """
+    if not INCIDENT_CLASSIFICATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Incident classification not available")
+
+    if not RUNTIME_INTELLIGENCE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Runtime intelligence not available (required for signals)")
+
+    try:
+        from datetime import datetime, timedelta
+
+        # Get recent signals from Phase 17A
+        since = datetime.utcnow() - timedelta(hours=1)
+        signals = get_signals(since=since, limit=500)
+
+        if not signals:
+            return {
+                "phase": "17B",
+                "endpoint": "incidents/classify",
+                "observation_only": True,
+                "no_alerts": True,
+                "no_recommendations": True,
+                "signals_processed": 0,
+                "incidents_created": 0,
+                "message": "No signals to classify",
+            }
+
+        # Classify signals into incidents
+        engine = get_classification_engine()
+        incidents = engine.classify_signals(signals)
+
+        # Persist incidents
+        store = get_incident_store()
+        persisted = store.persist(incidents)
+
+        return {
+            "phase": "17B",
+            "endpoint": "incidents/classify",
+            "observation_only": True,
+            "no_alerts": True,
+            "no_recommendations": True,
+            "signals_processed": len(signals),
+            "incidents_created": len(incidents),
+            "incidents_persisted": persisted,
+            "incidents": [
+                {
+                    "incident_id": i.incident_id,
+                    "incident_type": i.incident_type,
+                    "severity": i.severity,
+                    "title": i.title,
+                }
+                for i in incidents
+            ],
+        }
+
+    except Exception as e:
+        logger.error(f"Incident classification error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to classify incidents: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
+# Phase 17C: Recommendation Endpoints (ADVISORY ONLY)
+# -----------------------------------------------------------------------------
+try:
+    from .recommendation_model import (
+        Recommendation,
+        RecommendationType,
+        RecommendationSeverity,
+        RecommendationApproval,
+        RecommendationStatus,
+        RecommendationSummary,
+        ApprovalRecord,
+    )
+    from .recommendation_engine import (
+        RecommendationEngine,
+        RecommendationGenerator,
+        get_recommendation_engine,
+        generate_recommendations,
+    )
+    from .recommendation_store import (
+        RecommendationStore,
+        get_recommendation_store,
+        persist_recommendations,
+        read_recommendations,
+        read_recent_recommendations,
+        get_recommendation_by_id,
+        get_recommendation_summary,
+    )
+    RECOMMENDATIONS_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Recommendations not available: {e}")
+    RECOMMENDATIONS_AVAILABLE = False
+
+
+@app.get("/recommendations")
+async def recommendations_endpoint(
+    recommendation_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    status: Optional[str] = None,
+    approval_required: Optional[str] = None,
+    project_id: Optional[str] = None,
+    since_hours: int = 168,  # 7 days default
+    limit: int = 100,
+):
+    """
+    Phase 17C: Get recommendations.
+
+    Query parameters:
+    - recommendation_type: Filter by type (investigate, mitigate, improve, refactor, document, no_action)
+    - severity: Filter by severity (info, low, medium, high, critical, unknown)
+    - status: Filter by status (pending, approved, dismissed, expired, unknown)
+    - approval_required: Filter by approval requirement (none_required, confirmation_required, explicit_approval_required)
+    - project_id: Filter by project
+    - since_hours: Time window in hours (default 168 = 7 days)
+    - limit: Maximum recommendations to return (default 100)
+
+    CRITICAL: This is an ADVISORY-ONLY endpoint.
+    - Recommendations suggest, never execute
+    - NO automation, NO lifecycle mutation
+    - Human must approve/dismiss
+    """
+    if not RECOMMENDATIONS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Recommendations not available")
+
+    try:
+        from datetime import datetime, timedelta
+
+        since = datetime.utcnow() - timedelta(hours=since_hours)
+
+        # Parse filters
+        type_filter = RecommendationType(recommendation_type) if recommendation_type else None
+        severity_filter = RecommendationSeverity(severity) if severity else None
+        status_filter = RecommendationStatus(status) if status else None
+        approval_filter = RecommendationApproval(approval_required) if approval_required else None
+
+        store = get_recommendation_store()
+        recommendations = store.read_recommendations(
+            since=since,
+            recommendation_type=type_filter,
+            severity=severity_filter,
+            status=status_filter,
+            approval_required=approval_filter,
+            project_id=project_id,
+            limit=limit,
+        )
+
+        return {
+            "phase": "17C",
+            "endpoint": "recommendations",
+            "advisory_only": True,
+            "no_execution": True,
+            "no_lifecycle_mutation": True,
+            "total": len(recommendations),
+            "filters": {
+                "recommendation_type": recommendation_type,
+                "severity": severity,
+                "status": status,
+                "approval_required": approval_required,
+                "project_id": project_id,
+                "since_hours": since_hours,
+            },
+            "recommendations": [r.to_dict() for r in recommendations],
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid filter value: {str(e)}")
+    except Exception as e:
+        logger.error(f"Recommendations endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get recommendations: {str(e)}")
+
+
+@app.get("/recommendations/recent")
+async def recommendations_recent_endpoint(
+    hours: int = 168,  # 7 days default
+    limit: int = 50,
+):
+    """
+    Phase 17C: Get recent recommendations.
+
+    Query parameters:
+    - hours: Time window in hours (default 168 = 7 days)
+    - limit: Maximum recommendations to return (default 50)
+
+    CRITICAL: This is an ADVISORY-ONLY endpoint.
+    - Recommendations suggest, never execute
+    - NO automation, NO lifecycle mutation
+    """
+    if not RECOMMENDATIONS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Recommendations not available")
+
+    try:
+        store = get_recommendation_store()
+        recommendations = store.read_recent(hours=hours, limit=limit)
+
+        return {
+            "phase": "17C",
+            "endpoint": "recommendations/recent",
+            "advisory_only": True,
+            "no_execution": True,
+            "no_lifecycle_mutation": True,
+            "total": len(recommendations),
+            "hours": hours,
+            "recommendations": [r.to_dict() for r in recommendations],
+        }
+
+    except Exception as e:
+        logger.error(f"Recent recommendations endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get recent recommendations: {str(e)}")
+
+
+@app.get("/recommendations/summary")
+async def recommendations_summary_endpoint(
+    since_hours: int = 168,  # 7 days default
+):
+    """
+    Phase 17C: Get recommendation summary.
+
+    Query parameters:
+    - since_hours: Time window in hours (default 168 = 7 days)
+
+    Returns summary counts by severity, type, status, and approval requirement.
+    Also includes list of recent recommendations.
+
+    CRITICAL: This is an ADVISORY-ONLY endpoint.
+    """
+    if not RECOMMENDATIONS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Recommendations not available")
+
+    try:
+        summary = get_recommendation_summary(since_hours=since_hours)
+
+        return {
+            "phase": "17C",
+            "endpoint": "recommendations/summary",
+            "advisory_only": True,
+            "no_execution": True,
+            "no_lifecycle_mutation": True,
+            **summary.to_dict(),
+        }
+
+    except Exception as e:
+        logger.error(f"Recommendations summary endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get recommendation summary: {str(e)}")
+
+
+@app.get("/recommendations/{recommendation_id}")
+async def recommendation_by_id_endpoint(recommendation_id: str):
+    """
+    Phase 17C: Get a specific recommendation by ID.
+
+    CRITICAL: This is an ADVISORY-ONLY endpoint.
+    - Recommendations suggest, never execute
+    """
+    if not RECOMMENDATIONS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Recommendations not available")
+
+    try:
+        recommendation = get_recommendation_by_id(recommendation_id)
+
+        if not recommendation:
+            raise HTTPException(status_code=404, detail=f"Recommendation not found: {recommendation_id}")
+
+        return {
+            "phase": "17C",
+            "endpoint": "recommendations/{id}",
+            "advisory_only": True,
+            "no_execution": True,
+            "no_lifecycle_mutation": True,
+            "recommendation": recommendation.to_dict(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Recommendation by ID endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get recommendation: {str(e)}")
+
+
+class ApprovalRequest(BaseModel):
+    """Request body for approve/dismiss endpoints."""
+    user_id: str = Field(..., description="ID of the user approving/dismissing")
+    reason: Optional[str] = Field(None, description="Optional reason for the decision")
+
+
+@app.post("/recommendations/{recommendation_id}/approve")
+async def approve_recommendation_endpoint(
+    recommendation_id: str,
+    request: ApprovalRequest,
+):
+    """
+    Phase 17C: Approve a recommendation.
+
+    This creates an approval record in the separate approvals log.
+    The original recommendation is NEVER modified (append-only).
+
+    CRITICAL CONSTRAINTS:
+    - This is ADVISORY ONLY - approval does NOT trigger execution
+    - NO automation, NO lifecycle mutation, NO deployment
+    - Human action required for any actual changes
+
+    Request body:
+    - user_id: ID of the user approving
+    - reason: Optional reason for approval
+    """
+    if not RECOMMENDATIONS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Recommendations not available")
+
+    try:
+        store = get_recommendation_store()
+
+        # Check if recommendation exists
+        recommendation = store.get_by_id(recommendation_id)
+        if not recommendation:
+            raise HTTPException(status_code=404, detail=f"Recommendation not found: {recommendation_id}")
+
+        # Check if already approved
+        if recommendation.status == RecommendationStatus.APPROVED.value:
+            return {
+                "phase": "17C",
+                "endpoint": "recommendations/{id}/approve",
+                "advisory_only": True,
+                "no_execution": True,
+                "no_lifecycle_mutation": True,
+                "already_approved": True,
+                "message": f"Recommendation {recommendation_id} was already approved",
+                "recommendation": recommendation.to_dict(),
+            }
+
+        # Create approval record
+        approval_record = store.approve(
+            recommendation_id=recommendation_id,
+            user_id=request.user_id,
+            reason=request.reason,
+        )
+
+        if not approval_record:
+            raise HTTPException(status_code=500, detail="Failed to create approval record")
+
+        # Get updated recommendation (with approval status applied)
+        updated_recommendation = store.get_by_id(recommendation_id)
+
+        return {
+            "phase": "17C",
+            "endpoint": "recommendations/{id}/approve",
+            "advisory_only": True,
+            "no_execution": True,
+            "no_lifecycle_mutation": True,
+            "approved": True,
+            "approval_record": approval_record.to_dict(),
+            "recommendation": updated_recommendation.to_dict() if updated_recommendation else None,
+            "message": "Recommendation approved. NOTE: This is advisory only - no automatic action taken.",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Approve recommendation endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to approve recommendation: {str(e)}")
+
+
+@app.post("/recommendations/{recommendation_id}/dismiss")
+async def dismiss_recommendation_endpoint(
+    recommendation_id: str,
+    request: ApprovalRequest,
+):
+    """
+    Phase 17C: Dismiss a recommendation.
+
+    This creates a dismissal record in the separate approvals log.
+    The original recommendation is NEVER modified (append-only).
+
+    CRITICAL CONSTRAINTS:
+    - This is ADVISORY ONLY
+    - NO automation, NO lifecycle mutation
+
+    Request body:
+    - user_id: ID of the user dismissing
+    - reason: Optional reason for dismissal
+    """
+    if not RECOMMENDATIONS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Recommendations not available")
+
+    try:
+        store = get_recommendation_store()
+
+        # Check if recommendation exists
+        recommendation = store.get_by_id(recommendation_id)
+        if not recommendation:
+            raise HTTPException(status_code=404, detail=f"Recommendation not found: {recommendation_id}")
+
+        # Check if already dismissed
+        if recommendation.status == RecommendationStatus.DISMISSED.value:
+            return {
+                "phase": "17C",
+                "endpoint": "recommendations/{id}/dismiss",
+                "advisory_only": True,
+                "no_execution": True,
+                "no_lifecycle_mutation": True,
+                "already_dismissed": True,
+                "message": f"Recommendation {recommendation_id} was already dismissed",
+                "recommendation": recommendation.to_dict(),
+            }
+
+        # Create dismissal record
+        dismissal_record = store.dismiss(
+            recommendation_id=recommendation_id,
+            user_id=request.user_id,
+            reason=request.reason,
+        )
+
+        if not dismissal_record:
+            raise HTTPException(status_code=500, detail="Failed to create dismissal record")
+
+        # Get updated recommendation (with dismissal status applied)
+        updated_recommendation = store.get_by_id(recommendation_id)
+
+        return {
+            "phase": "17C",
+            "endpoint": "recommendations/{id}/dismiss",
+            "advisory_only": True,
+            "no_execution": True,
+            "no_lifecycle_mutation": True,
+            "dismissed": True,
+            "dismissal_record": dismissal_record.to_dict(),
+            "recommendation": updated_recommendation.to_dict() if updated_recommendation else None,
+            "message": "Recommendation dismissed.",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Dismiss recommendation endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to dismiss recommendation: {str(e)}")
+
+
+@app.post("/recommendations/generate")
+async def generate_recommendations_endpoint():
+    """
+    Phase 17C: Generate recommendations from current incidents.
+
+    This reads incidents from Phase 17B, generates recommendations using
+    deterministic rules, and persists them.
+
+    CRITICAL: This is an ADVISORY-ONLY operation:
+    - Recommendations suggest, never execute
+    - NO lifecycle changes
+    - NO deployment
+    - NO Claude execution
+    - Human must approve/dismiss
+
+    It only generates recommendations and stores them.
+    """
+    if not RECOMMENDATIONS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Recommendations not available")
+
+    if not INCIDENT_CLASSIFICATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Incident classification not available (required for recommendation generation)")
+
+    try:
+        from datetime import datetime, timedelta
+
+        # Get recent incidents from Phase 17B
+        since = datetime.utcnow() - timedelta(hours=24)
+        incident_store = get_incident_store()
+        incidents = incident_store.read_incidents(since=since, limit=500)
+
+        if not incidents:
+            return {
+                "phase": "17C",
+                "endpoint": "recommendations/generate",
+                "advisory_only": True,
+                "no_execution": True,
+                "no_lifecycle_mutation": True,
+                "incidents_processed": 0,
+                "recommendations_created": 0,
+                "message": "No incidents to generate recommendations from",
+            }
+
+        # Generate recommendations from incidents
+        engine = get_recommendation_engine()
+        recommendations = engine.generate_recommendations(incidents)
+
+        # Persist recommendations
+        rec_store = get_recommendation_store()
+        persisted = rec_store.persist(recommendations)
+
+        return {
+            "phase": "17C",
+            "endpoint": "recommendations/generate",
+            "advisory_only": True,
+            "no_execution": True,
+            "no_lifecycle_mutation": True,
+            "incidents_processed": len(incidents),
+            "recommendations_created": len(recommendations),
+            "recommendations_persisted": persisted,
+            "recommendations": [
+                {
+                    "recommendation_id": r.recommendation_id,
+                    "recommendation_type": r.recommendation_type,
+                    "severity": r.severity,
+                    "title": r.title,
+                    "approval_required": r.approval_required,
+                }
+                for r in recommendations
+            ],
+        }
+
+    except Exception as e:
+        logger.error(f"Recommendation generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate recommendations: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
 # Error Handlers
 # -----------------------------------------------------------------------------
 @app.exception_handler(HTTPException)
@@ -4761,7 +5704,7 @@ async def http_exception_handler(request, exc):
 @app.on_event("startup")
 async def startup_event():
     """Initialize controller on startup."""
-    logger.info("Task Controller starting up (Phase 15.3)...")
+    logger.info("Task Controller starting up (Phase 17C)...")
     logger.info(f"Projects directory: {PROJECTS_DIR}")
     logger.info(f"Docs directory: {DOCS_DIR}")
 
@@ -4775,6 +5718,15 @@ async def startup_event():
             logger.info(f"Claude multi-worker scheduler started (max {MAX_CONCURRENT_JOBS} concurrent jobs)")
         except Exception as e:
             logger.error(f"Failed to start Claude scheduler: {e}")
+
+    # Phase 17A: Start runtime intelligence polling if available
+    if RUNTIME_INTELLIGENCE_AVAILABLE:
+        try:
+            from .runtime_intelligence import start_signal_polling
+            start_signal_polling()
+            logger.info("Runtime intelligence polling started (Phase 17A - OBSERVATION ONLY)")
+        except Exception as e:
+            logger.error(f"Failed to start runtime intelligence: {e}")
 
     # Phase 15.1: Initialize lifecycle manager and recover state
     if LIFECYCLE_AVAILABLE:
@@ -4793,12 +5745,16 @@ async def startup_event():
         except Exception as e:
             logger.error(f"Failed to initialize ingestion engine: {e}")
 
-    logger.info("Task Controller ready (Phase 15.3: Project Ingestion Engine)")
+    # Phase 17C: Log recommendations availability
+    if RECOMMENDATIONS_AVAILABLE:
+        logger.info("Phase 17C: Recommendation engine initialized (ADVISORY ONLY)")
+
+    logger.info("Task Controller ready (Phase 17C: Recommendation & Human-in-the-Loop)")
     logger.info("SAFETY: Production deployment requires DUAL APPROVAL (different users).")
     logger.info("SAFETY: All production actions logged to immutable audit trail.")
     logger.info("SAFETY: Production rollback always available (break-glass).")
     logger.info("SAFETY: Testing environment MUST be used before production.")
-    logger.info("PHASE 15.3: External project ingestion with safe, deterministic analysis.")
+    logger.info("PHASE 17C: Recommendations are ADVISORY ONLY - human approval required.")
 
 
 @app.on_event("shutdown")
@@ -4813,6 +5769,15 @@ async def shutdown_event():
             logger.info("Claude multi-worker scheduler stopped")
         except Exception as e:
             logger.error(f"Error stopping Claude scheduler: {e}")
+
+    # Phase 17A: Stop runtime intelligence polling if running
+    if RUNTIME_INTELLIGENCE_AVAILABLE:
+        try:
+            from .runtime_intelligence import stop_signal_polling
+            stop_signal_polling()
+            logger.info("Runtime intelligence polling stopped")
+        except Exception as e:
+            logger.error(f"Error stopping runtime intelligence: {e}")
 
 
 # -----------------------------------------------------------------------------

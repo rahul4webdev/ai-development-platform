@@ -6,17 +6,17 @@ The AI agent MUST update this file after completing any task.
 ---
 
 ## Last Updated
-- **Timestamp**: 2026-01-20
-- **Task**: Phase 16E Project Identity, Fingerprinting & Conflict Resolution - COMPLETED
-- **Status**: Complete - Enterprise-grade project identity system, deterministic fingerprinting, conflict resolution engine
+- **Timestamp**: 2026-01-21
+- **Task**: Phase 18B Human Approval Orchestration - COMPLETED
+- **Status**: Complete - DECISION-ONLY orchestrator, LOCKED enum ApprovalStatus (EXACTLY 3 values), frozen dataclass inputs, immediate denial rules, approval grant rules, pending states, 100% deterministic, mandatory audit, NO execution/notifications/automation, approval store with append-only JSONL, 43 tests
 
 ---
 
 ## Current Phase
 ```
-Phase: PHASE_16E_COMPLETE
+Phase: PHASE_18B_COMPLETE
 Mode: development
-Version: 0.16.4
+Version: 0.18.1
 ```
 
 ## Phase 16A: Claude Execution Smoke Test - VERIFIED
@@ -318,6 +318,775 @@ Choose an action:
 
 ---
 
+## Phase 16F: Intent Drift, Regression & Contract Enforcement - VERIFIED
+
+**Prevents silent project evolution through immutable baselines, drift detection, and contract enforcement.**
+
+### Problem Solved
+
+| Issue | Impact | Solution |
+|-------|--------|----------|
+| Silent Project Evolution | Project scope creeps without human awareness | Drift detection on every execution |
+| Architecture Changes | Breaking changes introduced silently | Hard block on architecture/DB changes |
+| Purpose Creep | Project expands beyond original intent | Purpose drift tracking and blocking |
+| No Accountability | Changes happen without approval | Immutable audit trail, rebaseline workflow |
+
+### Components Implemented
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| IntentBaseline | controller/intent_baseline.py | Immutable baseline snapshot |
+| RebaselineRequest | controller/intent_baseline.py | Workflow for updating baselines |
+| IntentBaselineManager | controller/intent_baseline.py | Baseline lifecycle management |
+| DriftLevel | controller/intent_drift_engine.py | NONE/LOW/MEDIUM/HIGH/CRITICAL classification |
+| DriftDimension | controller/intent_drift_engine.py | 6 drift axes (purpose, module, arch, db, surface, nonfunc) |
+| IntentDriftEngine | controller/intent_drift_engine.py | Deterministic drift analysis |
+| ContractType | controller/intent_contract.py | SOFT/CONFIRMATION_REQUIRED/HARD_BLOCK |
+| ContractViolation | controller/intent_contract.py | Violation record with severity |
+| IntentContractEnforcer | controller/intent_contract.py | Contract evaluation and enforcement |
+| PendingConfirmation | controller/intent_contract.py | Confirmation workflow for MEDIUM drift |
+
+### Drift Classification Levels (Locked)
+
+| Level | Score Range | Action |
+|-------|-------------|--------|
+| NONE | 0-5 | Allow silently |
+| LOW | 6-20 | Log warning, proceed |
+| MEDIUM | 21-50 | Require user confirmation |
+| HIGH | 51-80 | Hard block until approved |
+| CRITICAL | 81-100 | Freeze project |
+
+### Drift Dimensions (All 6 Required)
+
+| Dimension | Weight | Breaking Triggers |
+|-----------|--------|-------------------|
+| Purpose | 0.30 | Purpose keywords change significantly |
+| Architecture | 0.25 | monolith→microservices, api_only→fullstack |
+| Module | 0.20 | Major module addition/removal |
+| Database | 0.10 | postgresql→mongodb, none→postgresql |
+| Surface Area | 0.10 | New domains/APIs added |
+| Non-Functional | 0.05 | Target users change |
+
+### Contract Types
+
+| Type | Behavior |
+|------|----------|
+| SOFT | Claude may proceed, warning logged |
+| CONFIRMATION_REQUIRED | Claude must stop and ask user |
+| HARD_BLOCK | Claude is forbidden from proceeding |
+
+### Violation Rules
+
+| Violation Type | Default Contract |
+|----------------|------------------|
+| ARCHITECTURE_CHANGE | HARD_BLOCK |
+| DATABASE_CHANGE | HARD_BLOCK |
+| PURPOSE_EXPANSION | CONFIRMATION_REQUIRED |
+| DOMAIN_ADDITION | CONFIRMATION_REQUIRED |
+| MODULE_ADDITION | SOFT |
+| USER_TYPE_CHANGE | SOFT |
+| DRIFT_THRESHOLD_EXCEEDED | HARD_BLOCK |
+
+### ExecutionGate Integration
+
+| Enhancement | Description |
+|-------------|-------------|
+| drift_checked | Boolean indicating drift analysis was performed |
+| drift_blocks_execution | True if drift BLOCKS execution |
+| drift_requires_confirmation | True if drift REQUIRES confirmation |
+| drift_evaluation | Full contract evaluation result |
+| Phase 16F constraints | Added to execution constraints |
+
+### Rebaseline Workflow
+
+| Step | Description |
+|------|-------------|
+| 1. Drift detected | ExecutionGate blocks with HIGH/CRITICAL drift |
+| 2. Request rebaseline | User requests baseline update with justification |
+| 3. Review request | Admin reviews proposed new baseline |
+| 4. Approve/Reject | Admin approves (creates new baseline) or rejects |
+| 5. Old superseded | Previous baseline marked SUPERSEDED |
+| 6. Execution allowed | New baseline becomes active |
+
+### Audit Trail
+
+| File | Purpose |
+|------|---------|
+| /home/aitesting.mybd.in/jobs/intent_baselines/baseline_audit.log | Baseline operations |
+| /home/aitesting.mybd.in/jobs/intent_contracts/contract_audit.log | Contract evaluations |
+
+### Claude Restrictions (Enforced)
+
+- NEVER change architecture class without approval
+- NEVER change database type without approval
+- NEVER expand project purpose beyond baseline
+- NEVER add new production domains silently
+- NEVER bypass drift checks during execution
+
+### Test Coverage (tests/test_phase16f.py)
+
+| Test Class | Tests |
+|------------|-------|
+| TestIntentBaselineManager | 8 tests |
+| TestIntentDriftEngine | 10 tests |
+| TestIntentContractEnforcer | 10 tests |
+| TestIntegration | 5 tests |
+
+**33 tests total.**
+
+---
+
+## Phase 17A: Runtime Intelligence & Signal Collection Layer - VERIFIED
+
+**OBSERVATION-ONLY system for collecting, classifying, and persisting runtime signals.**
+
+### Critical Constraints (Enforced)
+
+| Constraint | Status |
+|------------|--------|
+| ❌ No lifecycle transitions | ✅ Enforced |
+| ❌ No deployment actions | ✅ Enforced |
+| ❌ No intent mutation | ✅ Enforced |
+| ❌ No auto-healing | ✅ Enforced |
+| ✅ Read-only aggregation only | ✅ Verified |
+| ✅ Deterministic classification | ✅ Verified |
+| ✅ UNKNOWN when data missing | ✅ Verified |
+| ✅ Append-only persistence | ✅ Verified |
+
+### Components Implemented
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| SignalType Enum | controller/runtime_intelligence.py | 8 LOCKED signal types |
+| Severity Enum | controller/runtime_intelligence.py | 5 LOCKED severity levels (includes UNKNOWN) |
+| RuntimeSignal | controller/runtime_intelligence.py | Immutable (frozen) signal dataclass |
+| SignalCollector | controller/runtime_intelligence.py | Read-only signal collection from system, workers, lifecycle |
+| SignalPersister | controller/runtime_intelligence.py | Append-only JSONL persistence with fsync |
+| RuntimeIntelligenceEngine | controller/runtime_intelligence.py | Polling engine for signal collection |
+| SignalSummary | controller/runtime_intelligence.py | Read-only aggregation model |
+
+### Signal Types (LOCKED)
+
+| Type | Description |
+|------|-------------|
+| SYSTEM_RESOURCE | CPU, memory, disk metrics |
+| WORKER_QUEUE | Job queue saturation, worker status |
+| JOB_FAILURE | Claude job failures |
+| TEST_REGRESSION | Test failure patterns |
+| DEPLOYMENT_FAILURE | Deployment failures |
+| DRIFT_WARNING | Intent drift detected |
+| HUMAN_OVERRIDE | Human intervention signals |
+| CONFIG_ANOMALY | Configuration anomalies |
+
+### Severity Levels (LOCKED)
+
+| Level | Description | Action |
+|-------|-------------|--------|
+| INFO | Normal operation | Log only |
+| WARNING | Potential issue | Monitor |
+| DEGRADED | Service degradation | Alert |
+| CRITICAL | Service impairment | Immediate attention |
+| UNKNOWN | Data unavailable | Never guess, always explicit |
+
+### Deterministic Classification Thresholds
+
+| Metric | INFO | WARNING | DEGRADED | CRITICAL |
+|--------|------|---------|----------|----------|
+| CPU % | <70 | 70-85 | 85-95 | ≥95 |
+| Memory % | <70 | 70-85 | 85-95 | ≥95 |
+| Disk % | <75 | 75-85 | 85-95 | ≥95 |
+| Queue Jobs | <3 | 3-5 | 5-10 | ≥10 |
+| Failures/hr | 0 | 1-2 | 3-4 | ≥5 |
+
+### API Endpoints (READ-ONLY)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| /runtime/signals | GET | Get signals with filters (project, severity, type, since) |
+| /runtime/summary | GET | Get signal summary for time window |
+| /runtime/status | GET | Get collection engine status |
+| /runtime/poll | POST | Trigger manual poll cycle |
+
+### Telegram Commands (READ-ONLY)
+
+| Command | Purpose |
+|---------|---------|
+| /signals [project] | View signals summary with severity breakdown |
+| /signals_recent [hours] [limit] | View recent signals list |
+| /runtime_status | View collection status |
+
+### Dashboard Integration
+
+| Component | Description |
+|-----------|-------------|
+| ObservabilityHealth | New dataclass for observability status |
+| DashboardSummary.observability | New field with signal counts |
+| _get_observability_health() | Method to aggregate signal health |
+| _determine_system_health() | Updated to consider observability |
+
+### Persistence
+
+| File | Format | Purpose |
+|------|--------|---------|
+| signals.jsonl | JSONL (append-only) | Signal storage with fsync |
+| poll_audit.log | JSONL (append-only) | Poll cycle audit trail |
+
+### Safety Guarantees
+
+- **IMMUTABLE_SIGNALS**: RuntimeSignal is frozen, cannot be modified after creation
+- **APPEND_ONLY_PERSISTENCE**: Signals are never deleted or modified in storage
+- **FSYNC_DURABILITY**: Every persist operation calls fsync for crash safety
+- **UNKNOWN_NOT_GUESSED**: Missing data ALWAYS produces UNKNOWN severity, never guessed
+- **NO_MUTATION_METHODS**: No lifecycle transition, deployment, or fix methods exist
+- **DETERMINISTIC_CLASSIFICATION**: Same input always produces same severity output
+- **CONFIDENCE_INDICATOR**: Every signal has 0.0-1.0 confidence score
+
+### Test Coverage (tests/test_phase17a_runtime_intelligence.py)
+
+| Test Class | Tests |
+|------------|-------|
+| TestSignalTypeEnum | 3 tests (LOCKED values, count) |
+| TestSeverityEnum | 3 tests (LOCKED values, UNKNOWN exists) |
+| TestSignalSourceEnum | 1 test (source values) |
+| TestRuntimeSignal | 9 tests (creation, immutability, validation, serialization) |
+| TestSignalCollector | 9 tests (collection, classification, UNKNOWN on failure) |
+| TestSignalPersister | 12 tests (persist, append-only, filters, summary) |
+| TestRuntimeIntelligenceEngine | 11 tests (polling, status, start/stop) |
+| TestObservationOnlyBehavior | 5 tests (no mutation methods) |
+| TestUnknownSeverityBehavior | 3 tests (UNKNOWN on missing data) |
+| TestSignalSummary | 3 tests (summary generation, observability status) |
+
+**58 tests total.**
+
+---
+
+## Phase 17B: Signal Interpretation & Incident Classification Layer - VERIFIED
+
+**OBSERVATION-ONLY system for correlating signals and classifying incidents.**
+
+### Critical Constraints (Enforced)
+
+| Constraint | Status |
+|------------|--------|
+| ❌ No lifecycle transitions | ✅ Enforced |
+| ❌ No deployment actions | ✅ Enforced |
+| ❌ No Claude execution | ✅ Enforced |
+| ❌ No alerts/notifications | ✅ Enforced |
+| ❌ No recommendations | ✅ Enforced |
+| ✅ Read-only aggregation only | ✅ Verified |
+| ✅ Deterministic classification | ✅ Verified |
+| ✅ UNKNOWN when data missing | ✅ Verified |
+| ✅ Append-only persistence | ✅ Verified |
+| ✅ Immutable incidents | ✅ Verified |
+
+### Components Implemented
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| IncidentType Enum | controller/incident_model.py | 7 LOCKED incident types |
+| IncidentSeverity Enum | controller/incident_model.py | 6 LOCKED severity levels (includes UNKNOWN) |
+| IncidentScope Enum | controller/incident_model.py | 5 LOCKED scope values |
+| IncidentState Enum | controller/incident_model.py | 3 LOCKED state values |
+| Incident | controller/incident_model.py | Frozen (immutable) incident dataclass |
+| IncidentSummary | controller/incident_model.py | Read-only aggregation model |
+| ClassificationRule | controller/incident_model.py | Frozen classification rule |
+| SignalCorrelationEngine | controller/incident_engine.py | Signal correlation within time windows |
+| IncidentClassifier | controller/incident_engine.py | Rule-based incident classification |
+| IncidentClassificationEngine | controller/incident_engine.py | Main engine combining correlation + classification |
+| IncidentStore | controller/incident_store.py | Append-only JSONL persistence |
+
+### Incident Types (LOCKED)
+
+| Type | Description |
+|------|-------------|
+| PERFORMANCE | System slowdowns, high latency, resource contention |
+| RELIABILITY | Service failures, job failures, test failures |
+| SECURITY | Security-related signals, gate denials |
+| GOVERNANCE | Drift violations, contract breaches, human overrides |
+| RESOURCE | Resource exhaustion, disk/memory/CPU issues |
+| CONFIGURATION | Config anomalies, misconfigurations |
+| UNKNOWN | Cannot classify - data insufficient |
+
+### Incident Severity (LOCKED)
+
+| Level | Description |
+|-------|-------------|
+| INFO | Informational, no impact |
+| LOW | Minor impact, no immediate action needed |
+| MEDIUM | Moderate impact, should be investigated |
+| HIGH | Significant impact, requires attention |
+| CRITICAL | Severe impact, urgent attention needed |
+| UNKNOWN | MANDATORY when data is insufficient |
+
+### Classification Rules (Deterministic)
+
+| Rule | Signal Types | Incident Type | Scope |
+|------|--------------|---------------|-------|
+| rule-resource-001 | SYSTEM_RESOURCE | RESOURCE | system |
+| rule-reliability-001 | JOB_FAILURE, TEST_REGRESSION, DEPLOYMENT_FAILURE | RELIABILITY | from_signal |
+| rule-governance-001 | DRIFT_WARNING, HUMAN_OVERRIDE | GOVERNANCE | from_signal |
+| rule-config-001 | CONFIG_ANOMALY | CONFIGURATION | from_signal |
+
+### API Endpoints (READ-ONLY)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| /incidents | GET | Get incidents with filters (project, type, severity, since) |
+| /incidents/recent | GET | Get recent incidents |
+| /incidents/summary | GET | Get incident summary for time window |
+| /incidents/{id} | GET | Get specific incident by ID |
+| /incidents/classify | POST | Classify signals (no persistence) |
+
+### Telegram Commands (READ-ONLY)
+
+| Command | Purpose |
+|---------|---------|
+| /incidents [project] | View incidents summary with severity/type breakdown |
+| /incidents_recent [hours] [limit] | View recent incidents list |
+| /incidents_summary | View detailed incident statistics |
+
+### Dashboard Integration
+
+| Component | Description |
+|-----------|-------------|
+| IncidentHealth | New dataclass for incident status |
+| DashboardSummary.incidents | New field with incident counts |
+| _get_incident_health() | Method to aggregate incident health |
+| _determine_system_health() | Updated to consider incidents |
+
+### Persistence
+
+| File | Format | Purpose |
+|------|--------|---------|
+| incidents.jsonl | JSONL (append-only) | Incident storage with fsync |
+| incident_audit.log | JSONL (append-only) | Persist audit trail |
+
+### Safety Guarantees
+
+- **IMMUTABLE_INCIDENTS**: Incident is frozen, cannot be modified after creation
+- **APPEND_ONLY_PERSISTENCE**: Incidents are never deleted or modified in storage
+- **FSYNC_DURABILITY**: Every persist operation calls fsync for crash safety
+- **UNKNOWN_NOT_GUESSED**: Missing data ALWAYS produces UNKNOWN, never guessed
+- **NO_MUTATION_METHODS**: No delete, update, edit, resolve, close methods exist
+- **DETERMINISTIC_CLASSIFICATION**: Same input always produces same incident
+- **TUPLE_SIGNAL_IDS**: source_signal_ids is tuple (immutable), not list
+- **CONFIDENCE_INDICATOR**: Every incident has 0.0-1.0 confidence score
+
+### Test Coverage (tests/test_phase17b_incident_classification.py)
+
+| Test Class | Tests |
+|------------|-------|
+| TestIncidentImmutability | 10 tests (frozen dataclass, tuple validation) |
+| TestClassificationDeterminism | 10 tests (same input = same output) |
+| TestUnknownHandling | 8 tests (UNKNOWN on missing data) |
+| TestAppendOnlyStore | 8 tests (no delete, no update, append-only) |
+| TestNoSideEffects | 6 tests (no lifecycle, no execute methods) |
+| TestEnumValidation | 5 tests (invalid values rejected) |
+| TestSerialization | 5 tests (to_dict/from_dict roundtrip) |
+
+**52 tests total.**
+
+---
+
+## Phase 17C: Recommendation & Human-in-the-Loop Reasoning Layer - VERIFIED
+
+**ADVISORY-ONLY system for generating recommendations from incidents with human approval workflow.**
+
+### Critical Constraints (Enforced)
+
+| Constraint | Status |
+|------------|--------|
+| ❌ No automatic execution | ✅ Enforced |
+| ❌ No lifecycle mutation | ✅ Enforced |
+| ❌ No deployment actions | ✅ Enforced |
+| ❌ No Claude execution | ✅ Enforced |
+| ❌ No alerts/notifications | ✅ Enforced |
+| ✅ Advisory suggestions only | ✅ Verified |
+| ✅ Human approval required | ✅ Verified |
+| ✅ Deterministic rule-based | ✅ Verified |
+| ✅ UNKNOWN propagates from incidents | ✅ Verified |
+| ✅ Append-only persistence | ✅ Verified |
+| ✅ Separate approval log | ✅ Verified |
+| ✅ Immutable recommendations | ✅ Verified |
+
+### Components Implemented
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| RecommendationType Enum | controller/recommendation_model.py | 6 LOCKED recommendation types |
+| RecommendationSeverity Enum | controller/recommendation_model.py | 6 LOCKED severity levels (includes UNKNOWN) |
+| RecommendationApproval Enum | controller/recommendation_model.py | 3 LOCKED approval requirements |
+| RecommendationStatus Enum | controller/recommendation_model.py | 5 LOCKED status values |
+| Recommendation | controller/recommendation_model.py | Frozen (immutable) recommendation dataclass |
+| ApprovalRecord | controller/recommendation_model.py | Frozen approval/dismissal record |
+| RecommendationSummary | controller/recommendation_model.py | Read-only aggregation model |
+| RecommendationRule | controller/recommendation_model.py | Frozen classification rule |
+| RecommendationGenerator | controller/recommendation_engine.py | Single incident -> recommendation |
+| RecommendationEngine | controller/recommendation_engine.py | Main engine for batch generation |
+| RecommendationStore | controller/recommendation_store.py | Append-only JSONL persistence |
+
+### Recommendation Types (LOCKED)
+
+| Type | Description |
+|------|-------------|
+| INVESTIGATE | Needs human investigation |
+| MITIGATE | Suggests mitigation steps |
+| IMPROVE | Suggests improvement actions |
+| REFACTOR | Suggests code/config refactoring |
+| DOCUMENT | Suggests documentation updates |
+| NO_ACTION | No action recommended (informational) |
+
+### Recommendation Severity (LOCKED)
+
+| Level | Description |
+|-------|-------------|
+| INFO | Informational, low priority |
+| LOW | Minor priority |
+| MEDIUM | Moderate priority |
+| HIGH | High priority, needs attention |
+| CRITICAL | Critical priority, urgent |
+| UNKNOWN | MANDATORY when data is insufficient |
+
+### Approval Requirements (LOCKED)
+
+| Level | Description |
+|-------|-------------|
+| NONE_REQUIRED | Info only, no approval needed |
+| CONFIRMATION_REQUIRED | Simple confirmation |
+| EXPLICIT_APPROVAL_REQUIRED | Detailed approval with reason |
+
+### API Endpoints (ADVISORY-ONLY)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| /recommendations | GET | Get recommendations with filters |
+| /recommendations/recent | GET | Get recent recommendations |
+| /recommendations/summary | GET | Get recommendation summary |
+| /recommendations/{id} | GET | Get specific recommendation |
+| /recommendations/{id}/approve | POST | Approve recommendation (creates ApprovalRecord) |
+| /recommendations/{id}/dismiss | POST | Dismiss recommendation (creates ApprovalRecord) |
+| /recommendations/generate | POST | Generate recommendations from incidents |
+
+### Telegram Commands (ADVISORY-ONLY)
+
+| Command | Purpose |
+|---------|---------|
+| /recommendations [status] [limit] | View recommendations list |
+| /recommendation <id> | View specific recommendation details |
+| /rec_approve <id> [reason] | Approve recommendation (ADVISORY-ONLY) |
+| /rec_dismiss <id> [reason] | Dismiss recommendation |
+
+### Dashboard Integration
+
+| Component | Description |
+|-----------|-------------|
+| RecommendationHealth | New dataclass for recommendation status |
+| DashboardSummary.recommendations | New field with recommendation counts |
+| _get_recommendation_health() | Method to aggregate recommendation health |
+
+### Persistence
+
+| File | Format | Purpose |
+|------|--------|---------|
+| recommendations.jsonl | JSONL (append-only) | Recommendation storage with fsync |
+| approvals.jsonl | JSONL (append-only) | Separate approval/dismissal log |
+
+### Safety Guarantees
+
+- **IMMUTABLE_RECOMMENDATIONS**: Recommendation is frozen, cannot be modified after creation
+- **APPEND_ONLY_PERSISTENCE**: Recommendations are never deleted or modified in storage
+- **SEPARATE_APPROVAL_LOG**: Approvals create NEW records, don't modify originals
+- **FSYNC_DURABILITY**: Every persist operation calls fsync for crash safety
+- **UNKNOWN_PROPAGATES**: UNKNOWN incidents produce UNKNOWN recommendations
+- **NO_EXECUTE_METHODS**: No execute, apply, trigger, run methods exist
+- **DETERMINISTIC_GENERATION**: Same incident always produces same recommendation type
+- **TUPLE_IMMUTABLE**: source_incident_ids and suggested_actions are tuples (immutable)
+- **ADVISORY_ONLY**: Approval does NOT trigger any automatic action
+
+### Test Coverage (tests/test_phase17c_recommendations.py)
+
+| Test Class | Tests |
+|------------|-------|
+| TestRecommendationImmutability | 8 tests (frozen dataclass, tuple validation) |
+| TestApprovalRecordImmutability | 4 tests (frozen record, action validation) |
+| TestEnumValidation | 8 tests (LOCKED enum values, invalid rejected) |
+| TestDeterminism | 5 tests (same input = same output) |
+| TestUnknownHandling | 5 tests (UNKNOWN propagation) |
+| TestAppendOnlyStore | 6 tests (no delete, no update, separate approvals) |
+| TestAdvisoryOnly | 5 tests (no execute methods, approval doesn't trigger) |
+| TestSerialization | 4 tests (to_dict/from_dict roundtrip) |
+| TestConfidenceValidation | 3 tests (0.0-1.0 range enforced) |
+| TestIncidentCountValidation | 2 tests (non-negative count) |
+
+**50 tests total.**
+
+---
+
+## Phase 18A: Automation Eligibility Engine - VERIFIED
+
+**DECISION-ONLY engine that answers: "Is automation allowed in this situation?"**
+
+### Critical Constraints (Enforced)
+
+| Constraint | Status |
+|------------|--------|
+| ❌ No execution | ✅ Enforced |
+| ❌ No scheduling | ✅ Enforced |
+| ❌ No triggering | ✅ Enforced |
+| ❌ No mutation | ✅ Enforced |
+| ❌ No recommendations | ✅ Enforced |
+| ❌ No planning | ✅ Enforced |
+| ✅ Decision-only | ✅ Verified |
+| ✅ 100% deterministic | ✅ Verified |
+| ✅ Mandatory audit | ✅ Verified |
+| ✅ All inputs mandatory | ✅ Verified |
+
+### Eligibility Decision Enum (LOCKED - EXACTLY 3 VALUES)
+
+| Decision | Meaning |
+|----------|---------|
+| AUTOMATION_FORBIDDEN | Automation must NEVER proceed |
+| AUTOMATION_ALLOWED_WITH_APPROVAL | Requires explicit human approval (Phase 18C) |
+| AUTOMATION_ALLOWED_LIMITED | ONLY RUN_TESTS and UPDATE_DOCS (no code writes) |
+
+### Components Implemented
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| EligibilityDecision Enum | controller/automation_eligibility.py | 3 LOCKED decision values |
+| LimitedAction Enum | controller/automation_eligibility.py | 2 allowed limited actions |
+| HardStopRule Enum | controller/automation_eligibility.py | All hard-stop rule IDs |
+| RecommendationInput | controller/automation_eligibility.py | Frozen recommendation snapshot |
+| DriftEvaluationInput | controller/automation_eligibility.py | Frozen drift snapshot |
+| IncidentSummaryInput | controller/automation_eligibility.py | Frozen incident snapshot |
+| LifecycleStateInput | controller/automation_eligibility.py | Frozen lifecycle snapshot |
+| ExecutionGateInput | controller/automation_eligibility.py | Frozen gate snapshot |
+| IntentBaselineInput | controller/automation_eligibility.py | Frozen baseline snapshot |
+| RuntimeIntelligenceInput | controller/automation_eligibility.py | Frozen runtime snapshot |
+| EligibilityInput | controller/automation_eligibility.py | Combined input (all 7 mandatory) |
+| EligibilityResult | controller/automation_eligibility.py | Frozen result with decision |
+| EligibilityAuditRecord | controller/automation_eligibility.py | Frozen audit record |
+| AutomationEligibilityEngine | controller/automation_eligibility.py | Pure decision logic |
+
+### Required Inputs (ALL MANDATORY)
+
+| Input | Source | If Missing |
+|-------|--------|------------|
+| Recommendation | Phase 17C | → FORBIDDEN |
+| Drift Evaluation | Phase 16F | → FORBIDDEN |
+| Incident Summary | Phase 17B | → FORBIDDEN |
+| Lifecycle State | Lifecycle Engine | → FORBIDDEN |
+| Execution Gate | Phase 15.6 | → FORBIDDEN |
+| Environment | Context | → FORBIDDEN |
+| Intent Baseline | IntentBaselineManager | → FORBIDDEN |
+| Runtime Intelligence | Phase 17A | → FORBIDDEN |
+
+### Hard-Stop Rules (ANY Match → FORBIDDEN)
+
+| Category | Rules |
+|----------|-------|
+| Drift | HIGH/CRITICAL level, architecture change, database change |
+| Baseline | Missing or invalid intent baseline |
+| Incidents | CRITICAL severity, SECURITY type, UNKNOWN state |
+| Signals | UNKNOWN severity, missing runtime window |
+| Environment | PRODUCTION + (MEDIUM drift OR MEDIUM incident) |
+| Governance | ExecutionGate denied, audit unavailable |
+
+### Safety Guarantees
+
+- **DECISION_ONLY**: Returns decision, NEVER executes anything
+- **NO_SIDE_EFFECTS**: No disk writes (except audit), no state changes
+- **DETERMINISTIC**: Same inputs ALWAYS produce same output
+- **ALL_INPUTS_MANDATORY**: Missing any input → FORBIDDEN
+- **HARD_STOP_PRIORITY**: Hard-stop rules evaluated FIRST
+- **AUDIT_REQUIRED**: Every evaluation emits immutable audit record
+- **AUDIT_FAILURE_FORBIDDEN**: If audit write fails → FORBIDDEN
+- **NO_BYPASS**: Cannot be bypassed by Claude, workers, jobs, APIs
+
+### Audit Record Structure
+
+| Field | Description |
+|-------|-------------|
+| audit_id | Unique identifier |
+| input_hash | SHA-256 hash of all inputs |
+| decision | EligibilityDecision value |
+| matched_rules | List of triggered HardStopRule values |
+| timestamp | ISO timestamp |
+| engine_version | Engine version (18A.1.0) |
+| environment | TEST or PRODUCTION |
+| project_id | Project identifier if available |
+
+### Test Coverage (tests/test_phase18a_automation_eligibility.py)
+
+| Test Class | Tests |
+|------------|-------|
+| TestEnumValidation | 4 tests (LOCKED enum values) |
+| TestImmutability | 5 tests (frozen dataclasses) |
+| TestMissingInputs | 8 tests (all inputs mandatory) |
+| TestDriftHardStops | 4 tests (HIGH/CRITICAL/arch/db) |
+| TestIncidentHardStops | 3 tests (CRITICAL/SECURITY/UNKNOWN) |
+| TestProductionEnvironment | 3 tests (stricter production rules) |
+| TestGovernanceHardStops | 2 tests (gate denied, invalid baseline) |
+| TestDeterminism | 3 tests (same input = same output) |
+| TestAllowedDecisions | 3 tests (LIMITED, WITH_APPROVAL) |
+| TestAudit | 2 tests (audit creation, required fields) |
+| TestNoSideEffects | 2 tests (no execute methods) |
+
+**39 tests total.**
+
+---
+
+## Phase 18B: Human Approval Orchestration - VERIFIED
+
+**DECISION-ONLY orchestrator that answers: "What is the approval status?"**
+
+### Critical Constraints (Enforced)
+
+| Constraint | Status |
+|------------|--------|
+| ❌ No execution | ✅ Enforced |
+| ❌ No notifications | ✅ Enforced |
+| ❌ No automation | ✅ Enforced |
+| ❌ No lifecycle mutation | ✅ Enforced |
+| ✅ Decision-only | ✅ Verified |
+| ✅ Human-governed | ✅ Verified |
+| ✅ 100% deterministic | ✅ Verified |
+| ✅ Mandatory audit | ✅ Verified |
+
+### Approval Status Enum (LOCKED - EXACTLY 3 VALUES)
+
+| Status | Meaning |
+|--------|---------|
+| APPROVAL_GRANTED | Human approval obtained, action may proceed |
+| APPROVAL_DENIED | Approval denied or conditions not met |
+| APPROVAL_PENDING | Awaiting human approval |
+
+### Denial Reasons (LOCKED)
+
+| Category | Reasons |
+|----------|---------|
+| Missing Input | MISSING_ELIGIBILITY, MISSING_RECOMMENDATION, MISSING_LIFECYCLE_STATE, MISSING_EXECUTION_GATE, MISSING_REQUESTER |
+| Eligibility | ELIGIBILITY_FORBIDDEN |
+| Process | APPROVAL_EXPIRED, APPROVAL_REVOKED, APPROVER_SAME_AS_REQUESTER, APPROVER_UNAUTHORIZED, INSUFFICIENT_APPROVERS |
+| Governance | EXECUTION_GATE_DENIED |
+| Audit | AUDIT_WRITE_FAILED |
+
+### Pending Reasons (LOCKED)
+
+| Reason | Meaning |
+|--------|---------|
+| AWAITING_APPROVAL | Waiting for explicit approval |
+| AWAITING_CONFIRMATION | Waiting for simple confirmation |
+| AWAITING_DUAL_APPROVAL | Waiting for multiple approvers |
+
+### Components Implemented
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| ApprovalStatus Enum | controller/approval_orchestrator.py | 3 LOCKED status values |
+| DenialReason Enum | controller/approval_orchestrator.py | All denial reason IDs |
+| PendingReason Enum | controller/approval_orchestrator.py | All pending reason IDs |
+| ApprovalType Enum | controller/approval_orchestrator.py | 4 approval type values |
+| ApprovalRequesterInput | controller/approval_orchestrator.py | Frozen requester snapshot |
+| ApproverInput | controller/approval_orchestrator.py | Frozen approver snapshot |
+| ApprovalStateInput | controller/approval_orchestrator.py | Frozen approval state |
+| OrchestrationInput | controller/approval_orchestrator.py | Combined input (all mandatory) |
+| OrchestrationResult | controller/approval_orchestrator.py | Frozen result with status |
+| ApprovalAuditRecord | controller/approval_orchestrator.py | Frozen audit record |
+| HumanApprovalOrchestrator | controller/approval_orchestrator.py | Pure orchestration logic |
+| ApprovalStore | controller/approval_store.py | Append-only JSONL persistence |
+| ApprovalRequestRecord | controller/approval_store.py | Frozen request record |
+| ApproverActionRecord | controller/approval_store.py | Frozen action record |
+| DecisionRecord | controller/approval_store.py | Frozen decision record |
+
+### Required Inputs (All Mandatory)
+
+| Input | Source | If Missing |
+|-------|--------|------------|
+| Eligibility Result | Phase 18A | → DENIED |
+| Recommendation | Phase 17C | → DENIED |
+| Lifecycle State | Lifecycle Engine | → DENIED |
+| Execution Gate | Phase 15.6 | → DENIED |
+| Requester | Request Context | → DENIED |
+| Approval State | Approval Store | → PENDING (if fresh) |
+
+### Immediate Denial Rules (ANY Match → DENIED)
+
+| Rule | Condition |
+|------|-----------|
+| Eligibility Forbidden | eligibility_result.decision = FORBIDDEN |
+| Gate Denied | execution_gate.gate_allows_action = false |
+| Approval Expired | expires_at < current_timestamp |
+| Self-Approval | approver_id = requester_id |
+
+### Approval Grant Rules
+
+| Rule | Condition |
+|------|-----------|
+| No Approval Required | approval_required = "none_required" |
+| Sufficient Approvers | approver_count >= required_approver_count |
+
+### Symmetry Guarantee Table
+
+| Input Condition | Output Status | Output Reason |
+|-----------------|---------------|---------------|
+| eligibility_result=None | APPROVAL_DENIED | MISSING_ELIGIBILITY |
+| recommendation=None | APPROVAL_DENIED | MISSING_RECOMMENDATION |
+| lifecycle_state=None | APPROVAL_DENIED | MISSING_LIFECYCLE_STATE |
+| execution_gate=None | APPROVAL_DENIED | MISSING_EXECUTION_GATE |
+| requester=None | APPROVAL_DENIED | MISSING_REQUESTER |
+| eligibility=FORBIDDEN | APPROVAL_DENIED | ELIGIBILITY_FORBIDDEN |
+| gate_allows_action=False | APPROVAL_DENIED | EXECUTION_GATE_DENIED |
+| expires_at < current | APPROVAL_DENIED | APPROVAL_EXPIRED |
+| approver=requester | APPROVAL_DENIED | APPROVER_SAME_AS_REQUESTER |
+| approval_required=none | APPROVAL_GRANTED | None |
+| approvers >= required | APPROVAL_GRANTED | None |
+| confirmation, 0 approvers | APPROVAL_PENDING | AWAITING_CONFIRMATION |
+| explicit, 0 approvers | APPROVAL_PENDING | AWAITING_APPROVAL |
+| dual, < required | APPROVAL_PENDING | AWAITING_DUAL_APPROVAL |
+| audit write fails | APPROVAL_DENIED | AUDIT_WRITE_FAILED |
+
+### Safety Guarantees
+
+- **DECISION_ONLY**: Returns status, NEVER executes anything
+- **NO_NOTIFICATIONS**: Does not send alerts, emails, or messages
+- **NO_AUTOMATION**: Does not trigger any automated actions
+- **DETERMINISTIC**: Same inputs ALWAYS produce same output
+- **HUMAN_GOVERNED**: Humans approve, system tracks
+- **SELF_APPROVAL_BLOCKED**: Requester cannot approve own request
+- **EXPIRY_ENFORCED**: Expired approvals are DENIED
+- **AUDIT_REQUIRED**: Every evaluation emits immutable audit record
+- **AUDIT_FAILURE_DENIED**: If audit write fails → DENIED
+
+### Approval Store
+
+| Feature | Description |
+|---------|-------------|
+| Persistence | Append-only JSONL with fsync |
+| Requests File | approval_requests.jsonl |
+| Decisions File | approval_decisions.jsonl |
+| Actions File | approver_actions.jsonl |
+| Immutability | Records never modified or deleted |
+
+### Test Coverage (tests/test_phase18b_approval_orchestration.py)
+
+| Test Class | Tests |
+|------------|-------|
+| TestEnumValidation | 5 tests (LOCKED enum values) |
+| TestImmutability | 5 tests (frozen dataclasses) |
+| TestMissingInputs | 6 tests (all inputs mandatory) |
+| TestImmediateDenial | 5 tests (denial conditions) |
+| TestApprovalGrant | 5 tests (grant conditions) |
+| TestPendingState | 4 tests (pending reasons) |
+| TestDeterminism | 3 tests (same input = same output) |
+| TestAudit | 2 tests (audit creation, failure) |
+| TestApprovalStore | 6 tests (store operations) |
+| TestIntegration | 2 tests (full workflow) |
+
+**43 tests total.**
+
+---
+
 ## Important: Runtime Truth Validation (Phase 15.8)
 
 **All system validations now use RUNTIME TRUTH, not configuration presence.**
@@ -454,6 +1223,19 @@ See [CLAUDE_CLI_EXECUTION_MODEL.md](CLAUDE_CLI_EXECUTION_MODEL.md) for CLI detai
 | Dashboard Identity Grouping | Implemented | controller/dashboard_backend.py | Phase 16E: Group projects by fingerprint family |
 | Phase12 Router Integration | Updated | controller/phase12_router.py | Phase 16E: Decision engine before project creation |
 | Phase 16E Tests | Implemented | tests/test_phase16e.py | Phase 16E: 30 tests for identity, decision, integration |
+| Intent Baseline Manager | Implemented | controller/intent_baseline.py | Phase 16F: Immutable baseline storage, rebaseline workflow |
+| Intent Drift Engine | Implemented | controller/intent_drift_engine.py | Phase 16F: Drift detection, classification, scoring |
+| Intent Contract Enforcer | Implemented | controller/intent_contract.py | Phase 16F: Contract enforcement, confirmation workflow |
+| ExecutionGate + Drift | Updated | controller/execution_gate.py | Phase 16F: Drift checks integrated into execution gate |
+| Phase 16F Tests | Implemented | tests/test_phase16f.py | Phase 16F: 33 tests for baseline, drift, contract |
+| Runtime Intelligence Engine | Implemented | controller/runtime_intelligence.py | Phase 17A: OBSERVATION-ONLY signal collection and persistence |
+| RuntimeSignal Model | Implemented | controller/runtime_intelligence.py | Phase 17A: Frozen/immutable signal dataclass |
+| SignalCollector | Implemented | controller/runtime_intelligence.py | Phase 17A: Read-only system/worker/lifecycle signal collection |
+| SignalPersister | Implemented | controller/runtime_intelligence.py | Phase 17A: Append-only JSONL persistence with fsync |
+| Runtime API Endpoints | Implemented | controller/main.py | Phase 17A: GET /runtime/signals, /summary, /status |
+| Dashboard Observability | Updated | controller/dashboard_backend.py | Phase 17A: ObservabilityHealth, signal counts in summary |
+| Telegram Signal Commands | Implemented | telegram_bot_v2/bot.py | Phase 17A: /signals, /signals_recent, /runtime_status |
+| Phase 17A Tests | Implemented | tests/test_phase17a_runtime_intelligence.py | Phase 17A: 58 tests for observation-only behavior |
 
 ---
 
@@ -521,6 +1303,13 @@ None
 
 | Timestamp | Task | Status | Details |
 |-----------|------|--------|---------|
+| 2026-01-21 | Phase 18B complete | Completed | Human Approval Orchestration: DECISION-ONLY, HUMAN-GOVERNED, LOCKED enum ApprovalStatus (EXACTLY 3 values: GRANTED/DENIED/PENDING), frozen inputs, immediate denial rules, approval grant rules, pending states, self-approval blocked, expiry enforced, approval store (append-only JSONL), 100% deterministic, mandatory audit, NO execution/notifications/automation, 43 tests |
+| 2026-01-20 | Phase 18A complete | Completed | Automation Eligibility Engine: DECISION-ONLY, LOCKED enum EligibilityDecision (EXACTLY 3 values), frozen inputs (all 7 mandatory), hard-stop rules (drift/incidents/signals/environment/governance), 100% deterministic, mandatory audit, NO execution/scheduling/mutation, 39 tests |
+| 2026-01-20 | Phase 17C complete | Completed | Recommendation & Human-in-the-Loop Reasoning Layer: ADVISORY-ONLY recommendations, RecommendationType/Severity/Approval/Status LOCKED enums, frozen Recommendation dataclass, rule-based generation, UNKNOWN propagation, append-only JSONL with separate approval log, API endpoints (approve/dismiss), Telegram commands, dashboard integration, 50 tests |
+| 2026-01-20 | Phase 17B complete | Completed | Signal Interpretation & Incident Classification Layer: OBSERVATION-ONLY incidents, IncidentType/Severity/Scope LOCKED enums, frozen Incident dataclass, deterministic rule-based classification, UNKNOWN for missing data, append-only JSONL persistence, API endpoints, Telegram commands, dashboard incident integration, 52 tests |
+| 2026-01-20 | Phase 17A complete | Completed | Runtime Intelligence & Signal Collection Layer: OBSERVATION-ONLY signals, SignalType/Severity LOCKED enums, deterministic classification, UNKNOWN for missing data, append-only JSONL persistence, API endpoints, Telegram commands, dashboard observability integration, 58 tests |
+| 2026-01-20 | Phase 16F complete | Completed | Intent Drift, Regression & Contract Enforcement: Immutable baselines, drift detection (6 dimensions), contract enforcement (SOFT/CONFIRM/BLOCK), ExecutionGate integration, 33 tests |
+| 2026-01-20 | Phase 16E complete | Completed | Project Identity, Fingerprinting & Conflict Resolution: Deterministic fingerprinting, decision engine, conflict resolution UX |
 | 2026-01-19 | Phase 16C complete | Completed | Real Project Execution Stabilization: Project Registry, CHD Validator, Project Service, Telegram file uploads, 24 tests |
 | 2026-01-19 | Phase 16B complete | Completed | Platform Dashboard & Observability Layer: Read-only aggregation, API endpoints, Telegram integration, 21 tests |
 | 2026-01-19 | Phase 16A complete | Completed | Claude Execution Smoke Test: Real end-to-end job execution proven, README.md created with exact content |

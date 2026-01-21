@@ -86,7 +86,7 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.16.4"
+BOT_VERSION = "0.17.1"
 BOT_START_TIME = datetime.utcnow()
 
 # -----------------------------------------------------------------------------
@@ -855,6 +855,76 @@ class ControllerClient:
         """Get recent audit events (Phase 16B)."""
         return await self._request("GET", "/dashboard/audit", params={"limit": limit})
 
+    # Phase 17A: Runtime Intelligence Methods
+    async def get_runtime_signals(
+        self,
+        project_id: Optional[str] = None,
+        since_hours: int = 24,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Get runtime signals (Phase 17A)."""
+        params = {
+            "since_hours": since_hours,
+            "limit": limit,
+        }
+        if project_id:
+            params["project_id"] = project_id
+        return await self._request("GET", "/runtime/signals", params=params)
+
+    async def get_runtime_summary(self, since_hours: int = 24) -> Dict[str, Any]:
+        """Get runtime signal summary (Phase 17A)."""
+        return await self._request("GET", "/runtime/summary", params={"since_hours": since_hours})
+
+    async def get_runtime_status(self) -> Dict[str, Any]:
+        """Get runtime intelligence status (Phase 17A)."""
+        return await self._request("GET", "/runtime/status")
+
+    async def poll_runtime_signals(self) -> Dict[str, Any]:
+        """Trigger a manual signal poll (Phase 17A)."""
+        return await self._request("POST", "/runtime/poll")
+
+    # Phase 17B: Incident Classification Methods (READ-ONLY)
+    async def get_incidents(
+        self,
+        project_id: Optional[str] = None,
+        incident_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        since_hours: int = 24,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Get incidents with optional filtering (Phase 17B)."""
+        params = {
+            "since_hours": since_hours,
+            "limit": limit,
+        }
+        if project_id:
+            params["project_id"] = project_id
+        if incident_type:
+            params["incident_type"] = incident_type
+        if severity:
+            params["severity"] = severity
+        return await self._request("GET", "/incidents", params=params)
+
+    async def get_incidents_recent(
+        self,
+        hours: int = 24,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Get recent incidents (Phase 17B)."""
+        params = {
+            "hours": hours,
+            "limit": limit,
+        }
+        return await self._request("GET", "/incidents/recent", params=params)
+
+    async def get_incidents_summary(self, since_hours: int = 24) -> Dict[str, Any]:
+        """Get incident summary (Phase 17B)."""
+        return await self._request("GET", "/incidents/summary", params={"since_hours": since_hours})
+
+    async def get_incident_by_id(self, incident_id: str) -> Dict[str, Any]:
+        """Get a specific incident by ID (Phase 17B)."""
+        return await self._request("GET", f"/incidents/{incident_id}")
+
     async def get_notifications(self, project_name: Optional[str] = None) -> Dict[str, Any]:
         """Get pending notifications."""
         params = {"project_name": project_name} if project_name else None
@@ -1145,6 +1215,327 @@ def get_lifecycle_state_emoji(state: str) -> str:
         "rejected": "❌"
     }
     return emoji_map.get(state.lower(), "❓")
+
+
+def get_severity_emoji(severity: str) -> str:
+    """Get emoji for signal severity (Phase 17A)."""
+    emoji_map = {
+        "info": "ℹ️",
+        "warning": "⚠️",
+        "degraded": "🟡",
+        "critical": "🔴",
+        "unknown": "❓",
+    }
+    return emoji_map.get(severity.lower(), "❓")
+
+
+def get_signal_type_emoji(signal_type: str) -> str:
+    """Get emoji for signal type (Phase 17A)."""
+    emoji_map = {
+        "system_resource": "💻",
+        "worker_queue": "📋",
+        "job_failure": "❌",
+        "test_regression": "🧪",
+        "deployment_failure": "🚀",
+        "drift_warning": "📊",
+        "human_override": "👤",
+        "config_anomaly": "⚙️",
+    }
+    return emoji_map.get(signal_type.lower(), "📡")
+
+
+def format_signals_summary(summary: Dict[str, Any]) -> str:
+    """
+    Format runtime signals summary for Telegram (Phase 17A).
+
+    Returns: Summary of collected signals with severity breakdown and confidence indicators.
+    Rules:
+    - Summarized output only (never raw dumps)
+    - Always include confidence indicator
+    - READ-ONLY display
+    """
+    lines = []
+
+    lines.append("📡 *Runtime Intelligence Summary*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    # Collection status
+    poll_running = summary.get("poll_running", False)
+    status_emoji = "🟢" if poll_running else "⚪"
+    lines.append(f"{status_emoji} *Collection:* {'Active' if poll_running else 'Inactive'}")
+    lines.append("")
+
+    # Severity breakdown
+    by_severity = summary.get("by_severity", {})
+    lines.append("*📊 Severity Breakdown*")
+    for sev in ["critical", "degraded", "warning", "info", "unknown"]:
+        count = by_severity.get(sev, 0)
+        emoji = get_severity_emoji(sev)
+        if count > 0 or sev in ["critical", "unknown"]:
+            lines.append(f"  {emoji} {sev.upper()}: {count}")
+    lines.append("")
+
+    # Signal types
+    by_type = summary.get("by_type", {})
+    if by_type:
+        lines.append("*📈 Signal Types*")
+        for sig_type, count in sorted(by_type.items(), key=lambda x: -x[1])[:5]:
+            emoji = get_signal_type_emoji(sig_type)
+            lines.append(f"  {emoji} {sig_type}: {count}")
+        lines.append("")
+
+    # Recent signals (summarized)
+    recent = summary.get("recent_signals", [])
+    if recent:
+        lines.append("*🕐 Recent Signals*")
+        for sig in recent[:5]:
+            sev_emoji = get_severity_emoji(sig.get("severity", "unknown"))
+            type_emoji = get_signal_type_emoji(sig.get("signal_type", ""))
+            desc = sig.get("description", "No description")[:50]
+            confidence = sig.get("confidence", 0.0)
+            conf_indicator = "●" if confidence >= 0.8 else "◐" if confidence >= 0.5 else "○"
+            lines.append(f"  {sev_emoji}{type_emoji} {desc}... [{conf_indicator}]")
+        lines.append("")
+
+    # Totals
+    total = summary.get("total_signals", 0)
+    period = summary.get("period_hours", 24)
+    lines.append(f"*Total Signals ({period}h):* {total}")
+
+    # Timestamp
+    timestamp = summary.get("timestamp", "")
+    if timestamp:
+        lines.append(f"\n_Last updated: {timestamp[:19]}_")
+
+    # Confidence legend
+    lines.append("")
+    lines.append("_Confidence: ● high | ◐ medium | ○ low_")
+
+    return "\n".join(lines)
+
+
+def format_signals_list(signals_data: Dict[str, Any], limit: int = 10) -> str:
+    """
+    Format list of runtime signals for Telegram (Phase 17A).
+
+    Returns: Formatted list with summarized output and confidence indicators.
+    """
+    lines = []
+    signals = signals_data.get("signals", [])
+    total = signals_data.get("total", len(signals))
+
+    lines.append("📡 *Recent Runtime Signals*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    if not signals:
+        lines.append("_No signals found in the specified period._")
+        return "\n".join(lines)
+
+    for sig in signals[:limit]:
+        sev_emoji = get_severity_emoji(sig.get("severity", "unknown"))
+        type_emoji = get_signal_type_emoji(sig.get("signal_type", ""))
+
+        # Timestamp (shortened)
+        ts = sig.get("timestamp", "")[:16].replace("T", " ")
+
+        # Description (truncated)
+        desc = sig.get("description", "No description")
+        if len(desc) > 60:
+            desc = desc[:57] + "..."
+
+        # Confidence indicator
+        confidence = sig.get("confidence", 0.0)
+        conf_indicator = "●" if confidence >= 0.8 else "◐" if confidence >= 0.5 else "○"
+
+        # Project context
+        project = sig.get("project_id", "")
+        project_str = f" [{project}]" if project else ""
+
+        lines.append(f"{sev_emoji}{type_emoji} `{ts}`{project_str}")
+        lines.append(f"   {desc} [{conf_indicator}]")
+        lines.append("")
+
+    if total > limit:
+        lines.append(f"_...and {total - limit} more signals_")
+
+    # Confidence legend
+    lines.append("")
+    lines.append("_Confidence: ● high | ◐ medium | ○ low_")
+
+    return "\n".join(lines)
+
+
+# -----------------------------------------------------------------------------
+# Phase 17B: Incident Classification Formatting (READ-ONLY)
+# -----------------------------------------------------------------------------
+
+def get_incident_severity_emoji(severity: str) -> str:
+    """Get emoji for incident severity (Phase 17B)."""
+    emoji_map = {
+        "info": "ℹ️",
+        "low": "🟢",
+        "medium": "🟡",
+        "high": "🟠",
+        "critical": "🔴",
+        "unknown": "❓",
+    }
+    return emoji_map.get(severity.lower(), "❓")
+
+
+def get_incident_type_emoji(incident_type: str) -> str:
+    """Get emoji for incident type (Phase 17B)."""
+    emoji_map = {
+        "performance": "⚡",
+        "reliability": "🔧",
+        "security": "🔒",
+        "governance": "📋",
+        "resource": "💾",
+        "configuration": "⚙️",
+        "unknown": "❓",
+    }
+    return emoji_map.get(incident_type.lower(), "📋")
+
+
+def get_incident_scope_emoji(scope: str) -> str:
+    """Get emoji for incident scope (Phase 17B)."""
+    emoji_map = {
+        "system": "🌐",
+        "project": "📁",
+        "project_aspect": "📄",
+        "job": "⚙️",
+        "unknown": "❓",
+    }
+    return emoji_map.get(scope.lower(), "❓")
+
+
+def format_incidents_summary(summary: Dict[str, Any]) -> str:
+    """
+    Format incident summary for Telegram (Phase 17B).
+
+    Returns: Summary of classified incidents with severity/type breakdown.
+    Rules:
+    - Summarized output only (never raw dumps)
+    - Always include confidence indicator
+    - READ-ONLY display
+    - UNKNOWN incidents clearly labeled
+    """
+    lines = []
+
+    lines.append("🚨 *Incident Classification Summary*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    # Total incidents
+    total = summary.get("total_incidents", 0)
+    open_count = summary.get("open_count", 0)
+    unknown_count = summary.get("unknown_count", 0)
+
+    lines.append(f"*Total Incidents:* {total}")
+    lines.append(f"*Open:* {open_count} | *Unknown:* {unknown_count}")
+    lines.append("")
+
+    # Severity breakdown
+    by_severity = summary.get("by_severity", {})
+    lines.append("*📊 By Severity*")
+    for sev in ["critical", "high", "medium", "low", "info", "unknown"]:
+        count = by_severity.get(sev, 0)
+        emoji = get_incident_severity_emoji(sev)
+        if count > 0 or sev in ["critical", "unknown"]:
+            lines.append(f"  {emoji} {sev.upper()}: {count}")
+    lines.append("")
+
+    # Type breakdown
+    by_type = summary.get("by_type", {})
+    if by_type:
+        lines.append("*📈 By Type*")
+        for inc_type, count in sorted(by_type.items(), key=lambda x: -x[1])[:6]:
+            emoji = get_incident_type_emoji(inc_type)
+            lines.append(f"  {emoji} {inc_type}: {count}")
+        lines.append("")
+
+    # Recent incidents
+    recent = summary.get("recent_incidents", [])
+    if recent:
+        lines.append("*🕐 Recent Incidents*")
+        for inc in recent[:5]:
+            sev_emoji = get_incident_severity_emoji(inc.get("severity", "unknown"))
+            type_emoji = get_incident_type_emoji(inc.get("incident_type", "unknown"))
+            title = inc.get("title", "No title")[:40]
+            state = inc.get("state", "unknown")
+            state_indicator = "🟢" if state == "open" else "⚪"
+            lines.append(f"  {sev_emoji}{type_emoji} {title}")
+            lines.append(f"     {state_indicator} {state}")
+        lines.append("")
+
+    # Time window
+    start = summary.get("time_window_start", "")
+    end = summary.get("time_window_end", "")
+    if start and end:
+        start_short = start[:16].replace("T", " ")
+        end_short = end[:16].replace("T", " ")
+        lines.append(f"_Period: {start_short} to {end_short}_")
+
+    return "\n".join(lines)
+
+
+def format_incidents_list(incidents_data: Dict[str, Any], limit: int = 10) -> str:
+    """
+    Format list of incidents for Telegram (Phase 17B).
+
+    Returns: Formatted list with summarized output and confidence indicators.
+    """
+    lines = []
+    incidents = incidents_data.get("incidents", [])
+    total = incidents_data.get("total", len(incidents))
+
+    lines.append("🚨 *Recent Incidents*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    if not incidents:
+        lines.append("_No incidents found in the specified period._")
+        return "\n".join(lines)
+
+    for inc in incidents[:limit]:
+        sev_emoji = get_incident_severity_emoji(inc.get("severity", "unknown"))
+        type_emoji = get_incident_type_emoji(inc.get("incident_type", "unknown"))
+        scope_emoji = get_incident_scope_emoji(inc.get("scope", "unknown"))
+
+        # Timestamp (shortened)
+        ts = inc.get("created_at", "")[:16].replace("T", " ")
+
+        # Title (truncated)
+        title = inc.get("title", "No title")
+        if len(title) > 50:
+            title = title[:47] + "..."
+
+        # Confidence indicator
+        confidence = inc.get("confidence", 0.0)
+        conf_indicator = "●" if confidence >= 0.8 else "◐" if confidence >= 0.5 else "○"
+
+        # State indicator
+        state = inc.get("state", "unknown")
+        state_indicator = "🟢" if state == "open" else "⚪"
+
+        # Project context
+        project = inc.get("project_id", "")
+        project_str = f" [{project}]" if project else ""
+
+        lines.append(f"{sev_emoji}{type_emoji}{scope_emoji} `{ts}`{project_str}")
+        lines.append(f"   {title}")
+        lines.append(f"   {state_indicator} {state} | Signals: {inc.get('signal_count', 0)} [{conf_indicator}]")
+        lines.append("")
+
+    if total > limit:
+        lines.append(f"_...and {total - limit} more incidents_")
+
+    # Confidence legend
+    lines.append("")
+    lines.append("_Confidence: ● high | ◐ medium | ○ low_")
+
+    return "\n".join(lines)
 
 
 def get_feedback_keyboard(project_name: str, aspect: str) -> InlineKeyboardMarkup:
@@ -1832,6 +2223,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 /lifecycle\\_reject <id> <reason> - Reject lifecycle
 /lifecycle\\_feedback <id> <text> - Submit feedback
 /lifecycle\\_prod\\_approve <id> - Production approval
+
+*Runtime Intelligence (Phase 17A):*
+/signals [project] - View signals summary
+/signals\\_recent [hours] [limit] - Recent signals
+/runtime\\_status - Collection status
+
+*Incident Classification (Phase 17B):*
+/incidents [project] - View incidents summary
+/incidents\\_recent [hours] [limit] - Recent incidents
+/incidents\\_summary - Detailed incident statistics
 
 *Notifications:*
 /notifications - View pending actions
@@ -3803,6 +4204,387 @@ async def ingestion_status_command(update: Update, context: ContextTypes.DEFAULT
 
 
 # -----------------------------------------------------------------------------
+# Phase 17A: Runtime Intelligence Commands (READ-ONLY)
+# -----------------------------------------------------------------------------
+async def signals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /signals [project] - View runtime signals summary (Phase 17A)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Signal summary with severity breakdown and confidence indicators.
+
+    Rules:
+    - Summarized output only
+    - Never raw dumps
+    - Always include confidence indicator
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_signals", {})
+
+        # Optional project filter
+        project_id = context.args[0] if context.args else None
+
+        # Get summary from controller
+        summary = await controller.get_runtime_summary(since_hours=24)
+
+        if "error" in summary:
+            await update.message.reply_text(f"❌ Error: {summary.get('error')}")
+            return
+
+        # If project specified, also get project-specific signals
+        if project_id:
+            signals_data = await controller.get_runtime_signals(
+                project_id=project_id,
+                since_hours=24,
+                limit=10
+            )
+
+            if "error" not in signals_data:
+                # Modify summary to show project-filtered view
+                summary["project_filter"] = project_id
+                summary["filtered_signals"] = signals_data.get("signals", [])
+
+        text = format_signals_summary(summary)
+
+        # Add project filter note if applicable
+        if project_id:
+            text = text.replace(
+                "*Runtime Intelligence Summary*",
+                f"*Runtime Intelligence Summary*\n_Project: {project_id}_"
+            )
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in signals_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def signals_recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /signals_recent [hours] [limit] - View recent runtime signals (Phase 17A)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Recent signals list with summarized output.
+
+    Usage:
+    /signals_recent - Last 24 hours, 10 signals
+    /signals_recent 6 - Last 6 hours, 10 signals
+    /signals_recent 12 20 - Last 12 hours, 20 signals
+
+    Rules:
+    - Summarized output only
+    - Never raw dumps
+    - Always include confidence indicator
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_signals_recent", {})
+
+        # Parse arguments
+        since_hours = 24
+        limit = 10
+
+        if context.args:
+            try:
+                since_hours = int(context.args[0])
+                since_hours = min(max(since_hours, 1), 168)  # 1 hour to 1 week
+            except ValueError:
+                pass
+
+            if len(context.args) > 1:
+                try:
+                    limit = int(context.args[1])
+                    limit = min(max(limit, 1), 50)  # 1 to 50
+                except ValueError:
+                    pass
+
+        # Get signals from controller
+        signals_data = await controller.get_runtime_signals(
+            since_hours=since_hours,
+            limit=limit
+        )
+
+        if "error" in signals_data:
+            await update.message.reply_text(f"❌ Error: {signals_data.get('error')}")
+            return
+
+        text = format_signals_list(signals_data, limit=limit)
+
+        # Add period note
+        text = text.replace(
+            "*Recent Runtime Signals*",
+            f"*Recent Runtime Signals* (last {since_hours}h)"
+        )
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in signals_recent_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def runtime_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /runtime_status - View runtime intelligence collection status (Phase 17A)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Collection status, polling state, storage stats.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_runtime_status", {})
+
+        # Get status from controller
+        status = await controller.get_runtime_status()
+
+        if "error" in status:
+            await update.message.reply_text(f"❌ Error: {status.get('error')}")
+            return
+
+        lines = []
+        lines.append("📡 *Runtime Intelligence Status*")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("")
+
+        # Collection status
+        poll_running = status.get("poll_running", False)
+        poll_emoji = "🟢" if poll_running else "⚪"
+        lines.append(f"{poll_emoji} *Polling:* {'Active' if poll_running else 'Inactive'}")
+        lines.append(f"*Poll Interval:* {status.get('poll_interval_seconds', 'N/A')}s")
+        lines.append("")
+
+        # Storage stats
+        storage = status.get("storage", {})
+        lines.append("*📁 Storage*")
+        lines.append(f"  File: {storage.get('file_path', 'N/A')}")
+        lines.append(f"  Size: {storage.get('file_size_bytes', 0) / 1024:.1f} KB")
+        lines.append(f"  Signals: {storage.get('total_signals', 0)}")
+        lines.append("")
+
+        # In-memory buffer
+        lines.append("*🧠 Buffer*")
+        lines.append(f"  Signals: {status.get('buffer_size', 0)}")
+        lines.append(f"  Max: {status.get('buffer_max_size', 'N/A')}")
+        lines.append("")
+
+        # Last collection
+        last_poll = status.get("last_poll_timestamp", "")
+        if last_poll:
+            lines.append(f"*Last Poll:* {last_poll[:19]}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in runtime_status_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
+# Phase 17B: Incident Classification Commands (READ-ONLY)
+# -----------------------------------------------------------------------------
+async def incidents_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /incidents [project] - View incidents summary (Phase 17B)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Incident summary with severity/type breakdown and confidence indicators.
+
+    Rules:
+    - Summarized output only
+    - Never raw dumps
+    - Always include confidence indicator
+    - UNKNOWN incidents clearly labeled
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_incidents", {})
+
+        # Optional project filter
+        project_id = context.args[0] if context.args else None
+
+        # Get summary from controller
+        summary = await controller.get_incidents_summary(since_hours=24)
+
+        if "error" in summary:
+            await update.message.reply_text(f"❌ Error: {summary.get('error')}")
+            return
+
+        text = format_incidents_summary(summary)
+
+        # Add project filter note if applicable
+        if project_id:
+            text = text.replace(
+                "*Incident Classification Summary*",
+                f"*Incident Classification Summary*\n_Project: {project_id}_"
+            )
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in incidents_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def incidents_recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /incidents_recent [hours] [limit] - View recent incidents (Phase 17B)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Recent incidents list with summarized output.
+
+    Usage:
+    /incidents_recent - Last 24 hours, 10 incidents
+    /incidents_recent 6 - Last 6 hours, 10 incidents
+    /incidents_recent 12 20 - Last 12 hours, 20 incidents
+
+    Rules:
+    - Summarized output only
+    - Never raw dumps
+    - Always include confidence indicator
+    - UNKNOWN incidents clearly labeled
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_incidents_recent", {})
+
+        # Parse arguments
+        since_hours = 24
+        limit = 10
+
+        if context.args:
+            try:
+                since_hours = int(context.args[0])
+                since_hours = min(max(since_hours, 1), 168)  # 1 hour to 1 week
+            except ValueError:
+                pass
+
+            if len(context.args) > 1:
+                try:
+                    limit = int(context.args[1])
+                    limit = min(max(limit, 1), 50)  # 1 to 50
+                except ValueError:
+                    pass
+
+        # Get incidents from controller
+        incidents_data = await controller.get_incidents_recent(
+            hours=since_hours,
+            limit=limit
+        )
+
+        if "error" in incidents_data:
+            await update.message.reply_text(f"❌ Error: {incidents_data.get('error')}")
+            return
+
+        text = format_incidents_list(incidents_data, limit=limit)
+
+        # Add period note
+        text = text.replace(
+            "*Recent Incidents*",
+            f"*Recent Incidents* (last {since_hours}h)"
+        )
+
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in incidents_recent_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def incidents_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /incidents_summary - View detailed incident classification statistics (Phase 17B)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Detailed breakdown by severity, type, scope, and state.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_incidents_summary", {})
+
+        # Get summary from controller
+        summary = await controller.get_incidents_summary(since_hours=24)
+
+        if "error" in summary:
+            await update.message.reply_text(f"❌ Error: {summary.get('error')}")
+            return
+
+        lines = []
+        lines.append("🚨 *Incident Classification Statistics*")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("")
+
+        # Totals
+        total = summary.get("total_incidents", 0)
+        open_count = summary.get("open_count", 0)
+        unknown_count = summary.get("unknown_count", 0)
+
+        lines.append("*📊 Overview*")
+        lines.append(f"  Total: {total}")
+        lines.append(f"  Open: {open_count}")
+        lines.append(f"  Unknown: {unknown_count}")
+        lines.append("")
+
+        # Severity breakdown
+        by_severity = summary.get("by_severity", {})
+        lines.append("*🔴 By Severity*")
+        for sev in ["critical", "high", "medium", "low", "info", "unknown"]:
+            count = by_severity.get(sev, 0)
+            emoji = get_incident_severity_emoji(sev)
+            lines.append(f"  {emoji} {sev}: {count}")
+        lines.append("")
+
+        # Type breakdown
+        by_type = summary.get("by_type", {})
+        if by_type:
+            lines.append("*📋 By Type*")
+            for inc_type in ["performance", "reliability", "security", "governance", "resource", "configuration", "unknown"]:
+                count = by_type.get(inc_type, 0)
+                emoji = get_incident_type_emoji(inc_type)
+                if count > 0 or inc_type == "unknown":
+                    lines.append(f"  {emoji} {inc_type}: {count}")
+            lines.append("")
+
+        # Scope breakdown
+        by_scope = summary.get("by_scope", {})
+        if by_scope:
+            lines.append("*🌐 By Scope*")
+            for scope in ["system", "project", "project_aspect", "job", "unknown"]:
+                count = by_scope.get(scope, 0)
+                emoji = get_incident_scope_emoji(scope)
+                if count > 0 or scope == "unknown":
+                    lines.append(f"  {emoji} {scope}: {count}")
+            lines.append("")
+
+        # State breakdown
+        by_state = summary.get("by_state", {})
+        if by_state:
+            lines.append("*🔄 By State*")
+            open_c = by_state.get("open", 0)
+            closed_c = by_state.get("closed", 0)
+            unknown_s = by_state.get("unknown", 0)
+            lines.append(f"  🟢 open: {open_c}")
+            lines.append(f"  ⚪ closed: {closed_c}")
+            lines.append(f"  ❓ unknown: {unknown_s}")
+            lines.append("")
+
+        # Time window
+        start = summary.get("time_window_start", "")
+        end = summary.get("time_window_end", "")
+        if start and end:
+            start_short = start[:16].replace("T", " ")
+            end_short = end[:16].replace("T", " ")
+            lines.append(f"_Period: {start_short} to {end_short}_")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in incidents_summary_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
 # Phase 16C: Document Handler (File Upload Support)
 # -----------------------------------------------------------------------------
 @role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
@@ -3967,6 +4749,16 @@ def main():
     application.add_handler(CommandHandler("reject_ingestion", reject_ingestion_command))
     application.add_handler(CommandHandler("register_ingestion", register_ingestion_command))
     application.add_handler(CommandHandler("ingestion_status", ingestion_status_command))
+
+    # Phase 17A: Runtime Intelligence commands (READ-ONLY)
+    application.add_handler(CommandHandler("signals", signals_command))
+    application.add_handler(CommandHandler("signals_recent", signals_recent_command))
+    application.add_handler(CommandHandler("runtime_status", runtime_status_command))
+
+    # Phase 17B: Incident Classification commands (READ-ONLY)
+    application.add_handler(CommandHandler("incidents", incidents_command))
+    application.add_handler(CommandHandler("incidents_recent", incidents_recent_command))
+    application.add_handler(CommandHandler("incidents_summary", incidents_summary_command))
 
     # Callback query handler for inline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))

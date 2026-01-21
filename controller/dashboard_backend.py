@@ -1,5 +1,5 @@
 """
-Phase 16B-16E: Platform Dashboard & Observability Layer
+Phase 16B-17C: Platform Dashboard & Observability Layer
 
 READ-ONLY control plane for comprehensive system visibility.
 
@@ -18,12 +18,18 @@ This module provides:
 4. Deployment View - TEST/PROD deployments
 5. Security & Audit - Gate denials, policy violations
 6. Identity Grouping - Projects grouped by fingerprint (Phase 16E)
+7. Runtime Signal Health - Observability status (Phase 17A)
+8. Incident Classification Health - Incident indicators (Phase 17B)
+9. Recommendation Health - Advisory recommendation indicators (Phase 17C)
 
 All data is aggregated from existing sources:
 - lifecycle_v2.py - Lifecycle state and history
 - claude_backend.py - Job and scheduler state
 - execution_gate.py - Audit trail and gate decisions
 - project_registry.py - Project registry with identity (Phase 16E)
+- runtime_intelligence.py - Signal collection and health (Phase 17A)
+- incident_store.py - Incident classification and storage (Phase 17B)
+- recommendation_store.py - Recommendation storage and approvals (Phase 17C)
 """
 
 import json
@@ -214,6 +220,90 @@ class AuditEvent:
 
 
 @dataclass
+class ObservabilityHealth:
+    """Phase 17A: Runtime observability health status."""
+    status: str  # "healthy", "partial", "degraded", "no_data"
+    total_signals_24h: int
+    unknown_count: int
+    critical_count: int
+    warning_count: int
+    last_signal_timestamp: Optional[str]
+    poll_running: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "total_signals_24h": self.total_signals_24h,
+            "unknown_count": self.unknown_count,
+            "critical_count": self.critical_count,
+            "warning_count": self.warning_count,
+            "last_signal_timestamp": self.last_signal_timestamp,
+            "poll_running": self.poll_running,
+        }
+
+
+@dataclass
+class IncidentHealth:
+    """Phase 17B: Incident classification health status."""
+    status: str  # "healthy", "elevated", "critical", "no_data"
+    total_incidents_24h: int
+    open_count: int
+    unknown_count: int
+    by_severity: Dict[str, int]  # severity -> count
+    by_type: Dict[str, int]  # incident_type -> count
+    last_incident_timestamp: Optional[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "total_incidents_24h": self.total_incidents_24h,
+            "open_count": self.open_count,
+            "unknown_count": self.unknown_count,
+            "by_severity": self.by_severity,
+            "by_type": self.by_type,
+            "last_incident_timestamp": self.last_incident_timestamp,
+        }
+
+
+@dataclass
+class RecommendationHealth:
+    """
+    Phase 17C: Recommendation health status (ADVISORY ONLY).
+
+    CRITICAL: Recommendations are ADVISORY ONLY.
+    - They suggest actions, never execute them
+    - Human approval is required for any action
+    - NO automation, NO lifecycle mutation
+    """
+    status: str  # "healthy", "attention_needed", "no_data"
+    total_recommendations_7d: int
+    pending_count: int
+    pending_approval_count: int  # Those requiring explicit approval
+    approved_count: int
+    dismissed_count: int
+    unknown_count: int
+    by_severity: Dict[str, int]  # severity -> count
+    by_type: Dict[str, int]  # recommendation_type -> count
+    last_recommendation_timestamp: Optional[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "advisory_only": True,  # Always true - critical reminder
+            "no_execution": True,  # Always true - critical reminder
+            "total_recommendations_7d": self.total_recommendations_7d,
+            "pending_count": self.pending_count,
+            "pending_approval_count": self.pending_approval_count,
+            "approved_count": self.approved_count,
+            "dismissed_count": self.dismissed_count,
+            "unknown_count": self.unknown_count,
+            "by_severity": self.by_severity,
+            "by_type": self.by_type,
+            "last_recommendation_timestamp": self.last_recommendation_timestamp,
+        }
+
+
+@dataclass
 class DashboardSummary:
     """Top-level dashboard summary for quick overview."""
     system_health: SystemHealth
@@ -235,9 +325,15 @@ class DashboardSummary:
     claude_cli_available: bool
     telegram_bot_operational: bool
     controller_healthy: bool
+    # Phase 17A: Observability
+    observability: Optional[ObservabilityHealth] = None
+    # Phase 17B: Incidents
+    incidents: Optional[IncidentHealth] = None
+    # Phase 17C: Recommendations (ADVISORY ONLY)
+    recommendations: Optional[RecommendationHealth] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "system_health": self.system_health.value,
             "timestamp": self.timestamp,
             "projects": {
@@ -264,6 +360,16 @@ class DashboardSummary:
                 "controller": self.controller_healthy,
             },
         }
+        # Phase 17A: Include observability if available
+        if self.observability:
+            result["observability"] = self.observability.to_dict()
+        # Phase 17B: Include incidents if available
+        if self.incidents:
+            result["incidents"] = self.incidents.to_dict()
+        # Phase 17C: Include recommendations if available (ADVISORY ONLY)
+        if self.recommendations:
+            result["recommendations"] = self.recommendations.to_dict()
+        return result
 
 
 # -----------------------------------------------------------------------------
@@ -333,12 +439,24 @@ class DashboardBackend:
         # Check service health
         services = await self._check_service_health()
 
+        # Phase 17A: Get observability data
+        observability = await self._get_observability_health()
+
+        # Phase 17B: Get incident data
+        incidents = await self._get_incident_health()
+
+        # Phase 17C: Get recommendation data (ADVISORY ONLY)
+        recommendations = await self._get_recommendation_health()
+
         # Determine overall health
         health = self._determine_system_health(
             active_jobs=job_stats["active"],
             failed_today=job_stats["failed_today"],
             gate_denials=audit_stats["denials_today"],
             services=services,
+            observability=observability,
+            incidents=incidents,
+            recommendations=recommendations,
         )
 
         return DashboardSummary(
@@ -357,6 +475,9 @@ class DashboardBackend:
             claude_cli_available=services.get("claude_cli", False),
             telegram_bot_operational=services.get("telegram_bot", False),
             controller_healthy=services.get("controller", True),
+            observability=observability,
+            incidents=incidents,
+            recommendations=recommendations,
         )
 
     # -------------------------------------------------------------------------
@@ -1068,16 +1189,163 @@ class DashboardBackend:
 
         return services
 
+    async def _get_observability_health(self) -> Optional[ObservabilityHealth]:
+        """
+        Phase 17A: Get observability health status.
+
+        Reads from runtime intelligence module if available.
+        Returns None if runtime intelligence is not available.
+        """
+        try:
+            from .runtime_intelligence import get_signal_summary, get_runtime_engine
+
+            engine = get_runtime_engine()
+            status = engine.get_status()
+            summary = get_signal_summary()
+
+            # Count severities
+            critical_count = summary.by_severity.get("critical", 0)
+            warning_count = summary.by_severity.get("warning", 0) + \
+                           summary.by_severity.get("degraded", 0)
+
+            return ObservabilityHealth(
+                status=summary.observability_status,
+                total_signals_24h=summary.total_signals,
+                unknown_count=summary.unknown_count,
+                critical_count=critical_count,
+                warning_count=warning_count,
+                last_signal_timestamp=summary.last_signal_timestamp,
+                poll_running=status.get("running", False),
+            )
+
+        except ImportError:
+            logger.debug("Runtime intelligence not available")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get observability health: {e}")
+            return None
+
+    async def _get_incident_health(self) -> Optional[IncidentHealth]:
+        """
+        Phase 17B: Get incident classification health status.
+
+        Reads from incident store if available.
+        Returns None if incident store is not available.
+        """
+        try:
+            from .incident_store import get_incident_summary
+            from .incident_model import IncidentSeverity
+
+            summary = get_incident_summary(since_hours=24)
+
+            # Determine status based on severity counts
+            critical_count = summary.by_severity.get("critical", 0)
+            high_count = summary.by_severity.get("high", 0)
+
+            if critical_count > 3:
+                status = "critical"
+            elif critical_count > 0 or high_count > 5:
+                status = "elevated"
+            elif summary.total_incidents == 0:
+                status = "no_data"
+            else:
+                status = "healthy"
+
+            # Find last incident timestamp from recent incidents
+            last_timestamp = None
+            if summary.recent_incidents:
+                last_timestamp = summary.recent_incidents[0].get("created_at")
+
+            return IncidentHealth(
+                status=status,
+                total_incidents_24h=summary.total_incidents,
+                open_count=summary.open_count,
+                unknown_count=summary.unknown_count,
+                by_severity=summary.by_severity,
+                by_type=summary.by_type,
+                last_incident_timestamp=last_timestamp,
+            )
+
+        except ImportError:
+            logger.debug("Incident store not available")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get incident health: {e}")
+            return None
+
+    async def _get_recommendation_health(self) -> Optional[RecommendationHealth]:
+        """
+        Phase 17C: Get recommendation health status (ADVISORY ONLY).
+
+        Reads from recommendation store if available.
+        Returns None if recommendation store is not available.
+
+        CRITICAL: Recommendations are ADVISORY ONLY.
+        - They suggest actions, never execute them
+        - Human approval is required for any action
+        - NO automation, NO lifecycle mutation
+        """
+        try:
+            from .recommendation_store import get_recommendation_summary
+
+            summary = get_recommendation_summary(since_hours=168)  # 7 days
+
+            # Determine status based on pending counts
+            if summary.total_recommendations == 0:
+                status = "no_data"
+            elif summary.pending_approval_count > 10:
+                status = "attention_needed"
+            elif summary.pending_count > 20:
+                status = "attention_needed"
+            else:
+                status = "healthy"
+
+            # Find last recommendation timestamp from recent recommendations
+            last_timestamp = None
+            if summary.recent_recommendations:
+                last_timestamp = summary.recent_recommendations[0].get("created_at")
+
+            return RecommendationHealth(
+                status=status,
+                total_recommendations_7d=summary.total_recommendations,
+                pending_count=summary.pending_count,
+                pending_approval_count=summary.pending_approval_count,
+                approved_count=summary.by_status.get("approved", 0),
+                dismissed_count=summary.by_status.get("dismissed", 0),
+                unknown_count=summary.unknown_count,
+                by_severity=summary.by_severity,
+                by_type=summary.by_type,
+                last_recommendation_timestamp=last_timestamp,
+            )
+
+        except ImportError:
+            logger.debug("Recommendation store not available")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get recommendation health: {e}")
+            return None
+
     def _determine_system_health(
         self,
         active_jobs: int,
         failed_today: int,
         gate_denials: int,
         services: Dict[str, bool],
+        observability: Optional[ObservabilityHealth] = None,
+        incidents: Optional[IncidentHealth] = None,
+        recommendations: Optional[RecommendationHealth] = None,
     ) -> SystemHealth:
         """Determine overall system health based on metrics."""
         # Critical: Essential services down
         if not services.get("controller", True):
+            return SystemHealth.CRITICAL
+
+        # Phase 17A: Check observability for critical signals
+        if observability and observability.critical_count > 3:
+            return SystemHealth.CRITICAL
+
+        # Phase 17B: Check incidents for critical status
+        if incidents and incidents.status == "critical":
             return SystemHealth.CRITICAL
 
         # Degraded: High failure rate or many denials
@@ -1087,6 +1355,19 @@ class DashboardBackend:
         # Degraded: Claude CLI not available
         if not services.get("claude_cli", False):
             return SystemHealth.DEGRADED
+
+        # Phase 17A: Degraded if many unknowns in observability
+        if observability and observability.status == "degraded":
+            return SystemHealth.DEGRADED
+
+        # Phase 17B: Degraded if elevated incident status
+        if incidents and incidents.status == "elevated":
+            return SystemHealth.DEGRADED
+
+        # Phase 17C: Note - Recommendations do NOT affect system health
+        # Recommendations are ADVISORY ONLY - they inform but don't degrade
+        # They require human attention but the system is still healthy
+        # (recommendations.status == "attention_needed" is informational)
 
         # Healthy
         return SystemHealth.HEALTHY

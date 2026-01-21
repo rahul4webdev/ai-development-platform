@@ -1,7 +1,7 @@
 """
 Telegram Bot - Chat Interface
 
-Phase 6: Production Hardening & Explicit Go-Live Controls
+Phase 6-17C: Production Hardening & Explicit Go-Live Controls
 
 User-facing interface that:
 - Supports multiple users
@@ -95,6 +95,11 @@ class BotCommand(str, Enum):
     DEPLOY = "deploy"
     STATUS = "status"
     LIST = "list"
+    # Phase 17C: Recommendation commands (ADVISORY ONLY)
+    RECOMMENDATIONS = "recommendations"  # List recent recommendations
+    RECOMMENDATION = "recommendation"    # View specific recommendation
+    REC_APPROVE = "rec_approve"          # Approve recommendation
+    REC_DISMISS = "rec_dismiss"          # Dismiss recommendation
 
 
 class TaskType(str, Enum):
@@ -613,6 +618,100 @@ def call_controller_prod_rollback(
 
 
 # -----------------------------------------------------------------------------
+# Phase 17C Controller Communication - Recommendations (ADVISORY ONLY)
+# -----------------------------------------------------------------------------
+def call_controller_get_recommendations(limit: int = 20, status: str = None) -> dict:
+    """
+    Call GET /recommendations on controller (Phase 17C).
+
+    CRITICAL: Recommendations are ADVISORY ONLY.
+    - They suggest actions, never execute them
+    - Human must approve/dismiss
+    - NO automation, NO lifecycle mutation
+    """
+    logger.info(f"Controller call: get recommendations limit={limit}")
+    # TODO: Implement actual HTTP request
+    # import httpx
+    # params = {"limit": limit}
+    # if status:
+    #     params["status"] = status
+    # response = httpx.get(f"{CONTROLLER_BASE_URL}/recommendations", params=params)
+    # return response.json()
+    return {
+        "phase": "17C",
+        "advisory_only": True,
+        "no_execution": True,
+        "total": 0,
+        "recommendations": [],
+        "message": "Recommendations endpoint placeholder"
+    }
+
+
+def call_controller_get_recommendation(recommendation_id: str) -> dict:
+    """
+    Call GET /recommendations/{id} on controller (Phase 17C).
+
+    CRITICAL: Recommendations are ADVISORY ONLY.
+    """
+    logger.info(f"Controller call: get recommendation id={recommendation_id}")
+    # TODO: Implement actual HTTP request
+    return {
+        "phase": "17C",
+        "advisory_only": True,
+        "no_execution": True,
+        "recommendation": None,
+        "message": f"Recommendation {recommendation_id} not found (placeholder)"
+    }
+
+
+def call_controller_approve_recommendation(
+    recommendation_id: str,
+    user_id: str,
+    reason: str = None
+) -> dict:
+    """
+    Call POST /recommendations/{id}/approve on controller (Phase 17C).
+
+    CRITICAL: Approval does NOT trigger any automation.
+    - This is ADVISORY ONLY
+    - It marks the recommendation as approved for tracking
+    - NO execution, NO lifecycle changes, NO deployment
+    """
+    logger.info(f"Controller call: approve recommendation id={recommendation_id} user={user_id}")
+    # TODO: Implement actual HTTP request
+    return {
+        "phase": "17C",
+        "advisory_only": True,
+        "no_execution": True,
+        "approved": True,
+        "recommendation_id": recommendation_id,
+        "message": "Recommendation approved (placeholder). NOTE: This is advisory only - no automatic action taken."
+    }
+
+
+def call_controller_dismiss_recommendation(
+    recommendation_id: str,
+    user_id: str,
+    reason: str = None
+) -> dict:
+    """
+    Call POST /recommendations/{id}/dismiss on controller (Phase 17C).
+
+    CRITICAL: This is ADVISORY ONLY - no automation triggered.
+    """
+    logger.info(f"Controller call: dismiss recommendation id={recommendation_id} user={user_id}")
+    # TODO: Implement actual HTTP request
+    return {
+        "phase": "17C",
+        "advisory_only": True,
+        "no_execution": True,
+        "dismissed": True,
+        "recommendation_id": recommendation_id,
+        "message": "Recommendation dismissed (placeholder)."
+    }
+
+
+# -----------------------------------------------------------------------------
 # Command Handlers
 # -----------------------------------------------------------------------------
 def handle_start(user_id: str, username: Optional[str]) -> str:
@@ -623,7 +722,7 @@ def handle_start(user_id: str, username: Optional[str]) -> str:
 
 I help you manage AI-driven autonomous software development.
 
-Phase 6 Commands:
+Phase 17C Commands:
 
 Project Management:
 /bootstrap <name> <repo_url> - Create new project
@@ -657,14 +756,21 @@ Production (Phase 6 - DUAL APPROVAL):
 /prod_apply <task_id> confirm - Execute production deploy
 /prod_rollback <task_id> - Rollback production (break-glass)
 
+Recommendations (Phase 17C - ADVISORY ONLY):
+/recommendations - List recent recommendations
+/recommendation <id> - View recommendation details
+/rec_approve <id> [reason] - Approve recommendation
+/rec_dismiss <id> [reason] - Dismiss recommendation
+
 Other:
 /status - Get project status
 /help - Show full help
 
-SAFETY NOTE:
+SAFETY NOTES:
 - Apply/commit/deploy REQUIRE 'confirm' keyword
 - Production requires DUAL APPROVAL (different users)
 - All production actions are audited
+- Recommendations are ADVISORY ONLY - NO automatic execution
 
 Start by creating a project with /bootstrap"""
 
@@ -675,7 +781,7 @@ def handle_help(user_id: str) -> str:
     project_info = f"Current project: {session.current_project}" if session.current_project else "No project selected"
     task_info = f"Last task: {session.last_task_id}" if session.last_task_id else "No recent task"
 
-    return f"""AI Development Platform - Phase 6 Help
+    return f"""AI Development Platform - Phase 17C Help
 
 {project_info}
 {task_info}
@@ -779,15 +885,36 @@ PRODUCTION DEPLOYMENT (PHASE 6 - DUAL APPROVAL):
   Does NOT require dual approval (speed > ceremony)
   REQUIRES reason for audit trail
 
+RECOMMENDATIONS (PHASE 17C - ADVISORY ONLY):
+⚠️ Recommendations SUGGEST actions - they NEVER execute automatically
+
+/recommendations [pending|approved|dismissed] [limit]
+  List recent recommendations
+  Optional filters: status and limit
+
+/recommendation <id>
+  View full details of a recommendation
+  Shows suggested actions, rationale, severity
+
+/rec_approve <id> [reason]
+  Approve a recommendation
+  ⚠️ Does NOT trigger any automatic action
+  Only marks as "approved" for tracking
+
+/rec_dismiss <id> [reason]
+  Dismiss a recommendation
+  Logs decision for audit purposes
+
 STATUS:
 /status - Show project status and task counts
 
-SAFETY GUARANTEES (PHASE 6):
+SAFETY GUARANTEES (PHASE 17C):
 - Production deployment requires DUAL APPROVAL
 - Requester CANNOT approve their own request
 - All production actions logged to audit trail
 - Rollback always available (break-glass)
-- Testing MUST be deployed before production"""
+- Testing MUST be deployed before production
+- Recommendations are ADVISORY ONLY - NO automatic execution"""
 
 
 def handle_bootstrap(user_id: str, args: list[str]) -> str:
@@ -1919,6 +2046,265 @@ The rollback has been logged to the audit trail."""
 
 
 # -----------------------------------------------------------------------------
+# Phase 17C Command Handlers - Recommendations (ADVISORY ONLY)
+# -----------------------------------------------------------------------------
+def handle_recommendations(user_id: str, args: list[str]) -> str:
+    """
+    Handle /recommendations command - list recent recommendations (Phase 17C).
+
+    CRITICAL: Recommendations are ADVISORY ONLY.
+    - They suggest actions, never execute them
+    - Human must approve/dismiss
+    - NO automation, NO lifecycle mutation
+    """
+    # Parse optional arguments
+    status_filter = None
+    limit = 10
+
+    for arg in args:
+        if arg in ["pending", "approved", "dismissed"]:
+            status_filter = arg
+        elif arg.isdigit():
+            limit = min(int(arg), 50)  # Cap at 50
+
+    result = call_controller_get_recommendations(limit=limit, status=status_filter)
+
+    recommendations = result.get("recommendations", [])
+
+    if not recommendations:
+        return """📋 RECOMMENDATIONS (Phase 17C - ADVISORY ONLY)
+
+No recommendations found.
+
+Recommendations are generated from incident analysis.
+They suggest actions but NEVER execute automatically.
+
+Commands:
+/recommendations [pending|approved|dismissed] [limit]
+/recommendation <id> - View details
+/rec_approve <id> [reason] - Approve
+/rec_dismiss <id> [reason] - Dismiss
+
+⚠️ ADVISORY ONLY: Approval does NOT trigger any automation."""
+
+    # Build recommendation list
+    rec_list = []
+    for rec in recommendations[:limit]:
+        rec_id = rec.get("recommendation_id", "unknown")[:8]
+        rec_type = rec.get("recommendation_type", "unknown")
+        severity = rec.get("severity", "unknown")
+        status = rec.get("status", "pending")
+        title = rec.get("title", "No title")[:50]
+
+        severity_icon = {
+            "critical": "🔴",
+            "high": "🟠",
+            "medium": "🟡",
+            "low": "🟢",
+            "info": "ℹ️",
+            "unknown": "❓"
+        }.get(severity, "❓")
+
+        status_icon = {
+            "pending": "⏳",
+            "approved": "✅",
+            "dismissed": "❌",
+            "expired": "⏰"
+        }.get(status, "❓")
+
+        rec_list.append(f"{severity_icon} {status_icon} [{rec_id}] {rec_type}: {title}")
+
+    rec_str = "\n".join(rec_list)
+
+    return f"""📋 RECOMMENDATIONS (Phase 17C - ADVISORY ONLY)
+
+⚠️ These are ADVISORY suggestions - NO automatic execution
+
+Showing {len(recommendations)} recommendation(s):
+
+{rec_str}
+
+Commands:
+/recommendation <id> - View details
+/rec_approve <id> [reason] - Approve
+/rec_dismiss <id> [reason] - Dismiss
+
+⚠️ IMPORTANT: Approving a recommendation does NOT
+trigger any automatic action. Human action is required."""
+
+
+def handle_recommendation(user_id: str, args: list[str]) -> str:
+    """
+    Handle /recommendation command - view specific recommendation (Phase 17C).
+
+    CRITICAL: Recommendations are ADVISORY ONLY.
+    """
+    if not args:
+        return """Usage: /recommendation <recommendation_id>
+
+Example: /recommendation abc12345
+
+This shows the full details of a specific recommendation.
+
+⚠️ ADVISORY ONLY: Recommendations suggest, never execute."""
+
+    recommendation_id = args[0]
+    result = call_controller_get_recommendation(recommendation_id)
+
+    recommendation = result.get("recommendation")
+
+    if not recommendation:
+        return f"""Recommendation not found: {recommendation_id}
+
+Use /recommendations to list available recommendations."""
+
+    # Format recommendation details
+    rec_type = recommendation.get("recommendation_type", "unknown")
+    severity = recommendation.get("severity", "unknown")
+    status = recommendation.get("status", "pending")
+    title = recommendation.get("title", "No title")
+    description = recommendation.get("description", "No description")
+    rationale = recommendation.get("rationale", "No rationale")
+    actions = recommendation.get("suggested_actions", [])
+    approval_req = recommendation.get("approval_required", "unknown")
+    created_at = recommendation.get("created_at", "unknown")
+
+    severity_icon = {
+        "critical": "🔴 CRITICAL",
+        "high": "🟠 HIGH",
+        "medium": "🟡 MEDIUM",
+        "low": "🟢 LOW",
+        "info": "ℹ️ INFO",
+        "unknown": "❓ UNKNOWN"
+    }.get(severity, "❓ UNKNOWN")
+
+    actions_str = "\n".join(f"  • {a}" for a in actions) if actions else "  No suggested actions"
+
+    approval_text = {
+        "none_required": "None required (informational)",
+        "confirmation_required": "Simple confirmation required",
+        "explicit_approval_required": "Explicit approval required"
+    }.get(approval_req, approval_req)
+
+    return f"""📋 RECOMMENDATION DETAILS
+
+⚠️ ADVISORY ONLY - NO AUTOMATIC EXECUTION
+
+ID: {recommendation_id}
+Type: {rec_type}
+Severity: {severity_icon}
+Status: {status.upper()}
+Approval: {approval_text}
+Created: {created_at}
+
+TITLE:
+{title}
+
+DESCRIPTION:
+{description}
+
+RATIONALE:
+{rationale}
+
+SUGGESTED ACTIONS:
+{actions_str}
+
+ACTIONS:
+/rec_approve {recommendation_id} [reason] - Approve
+/rec_dismiss {recommendation_id} [reason] - Dismiss
+
+⚠️ CRITICAL: Approving this recommendation does NOT
+trigger any automatic action. You must take the
+suggested actions manually if appropriate."""
+
+
+def handle_rec_approve(user_id: str, args: list[str]) -> str:
+    """
+    Handle /rec_approve command - approve a recommendation (Phase 17C).
+
+    CRITICAL: Approval does NOT trigger any automation.
+    - This is ADVISORY ONLY
+    - It marks the recommendation as approved for tracking
+    - NO execution, NO lifecycle changes, NO deployment
+    """
+    if not args:
+        return """Usage: /rec_approve <recommendation_id> [reason]
+
+Example: /rec_approve abc12345 "Will address in next sprint"
+
+⚠️ CRITICAL: Approving does NOT trigger any automatic action.
+This only marks the recommendation as "approved" for tracking.
+You must take the suggested actions manually if appropriate."""
+
+    recommendation_id = args[0]
+    reason = " ".join(args[1:]) if len(args) > 1 else None
+
+    result = call_controller_approve_recommendation(
+        recommendation_id=recommendation_id,
+        user_id=user_id,
+        reason=reason
+    )
+
+    if result.get("error"):
+        return f"Error: {result.get('message', 'Approval failed')}"
+
+    return f"""✅ RECOMMENDATION APPROVED
+
+ID: {recommendation_id}
+Approved by: {user_id}
+{f"Reason: {reason}" if reason else ""}
+
+{result.get('message', '')}
+
+⚠️ CRITICAL REMINDER:
+This approval is ADVISORY ONLY. It does NOT:
+- Trigger any automatic action
+- Change any lifecycle state
+- Deploy anything
+- Execute any code
+
+You must take the suggested actions manually
+if you deem them appropriate."""
+
+
+def handle_rec_dismiss(user_id: str, args: list[str]) -> str:
+    """
+    Handle /rec_dismiss command - dismiss a recommendation (Phase 17C).
+
+    CRITICAL: This is ADVISORY ONLY - no automation triggered.
+    """
+    if not args:
+        return """Usage: /rec_dismiss <recommendation_id> [reason]
+
+Example: /rec_dismiss abc12345 "Not applicable to our setup"
+
+Dismissing marks the recommendation as reviewed and not needed."""
+
+    recommendation_id = args[0]
+    reason = " ".join(args[1:]) if len(args) > 1 else None
+
+    result = call_controller_dismiss_recommendation(
+        recommendation_id=recommendation_id,
+        user_id=user_id,
+        reason=reason
+    )
+
+    if result.get("error"):
+        return f"Error: {result.get('message', 'Dismissal failed')}"
+
+    return f"""❌ RECOMMENDATION DISMISSED
+
+ID: {recommendation_id}
+Dismissed by: {user_id}
+{f"Reason: {reason}" if reason else ""}
+
+{result.get('message', '')}
+
+The recommendation has been marked as dismissed.
+This decision is logged for audit purposes."""
+
+
+# -----------------------------------------------------------------------------
 # Message Router
 # -----------------------------------------------------------------------------
 def process_message(user_id: str, username: Optional[str], text: str) -> str:
@@ -1965,6 +2351,11 @@ def process_message(user_id: str, username: Optional[str], text: str) -> str:
         BotCommand.STATUS: lambda: handle_status(user_id),
         BotCommand.LIST: lambda: handle_list(user_id),
         BotCommand.DEPLOY: lambda: handle_deploy(user_id, parsed.args),
+        # Phase 17C: Recommendation commands (ADVISORY ONLY)
+        BotCommand.RECOMMENDATIONS: lambda: handle_recommendations(user_id, parsed.args),
+        BotCommand.RECOMMENDATION: lambda: handle_recommendation(user_id, parsed.args),
+        BotCommand.REC_APPROVE: lambda: handle_rec_approve(user_id, parsed.args),
+        BotCommand.REC_DISMISS: lambda: handle_rec_dismiss(user_id, parsed.args),
     }
 
     handler = handlers.get(parsed.command)
@@ -2002,16 +2393,16 @@ def run_bot():
 # Main Entry Point
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    logger.info("Telegram Bot starting (Phase 6)...")
+    logger.info("Telegram Bot starting (Phase 17C)...")
     logger.info(f"Controller URL: {CONTROLLER_BASE_URL}")
     logger.info(f"Bot token configured: {'Yes' if TELEGRAM_BOT_TOKEN else 'No'}")
 
     if not TELEGRAM_BOT_TOKEN:
         logger.warning("No bot token set. Running in test mode.")
 
-        # Test mode: demonstrate Phase 6 task lifecycle with Production deployment
+        # Test mode: demonstrate Phase 17C task lifecycle with Recommendations
         print("\n" + "="*60)
-        print("PHASE 6 TEST MODE - Full Lifecycle with Production Demo")
+        print("PHASE 17C TEST MODE - Full Lifecycle with Recommendations Demo")
         print("="*60 + "\n")
 
         print(process_message("test_user", "TestUser", "/start"))

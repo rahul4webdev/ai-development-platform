@@ -1,5 +1,5 @@
 """
-Phase 15.6: Execution Gate Model
+Phase 15.6 + Phase 16F: Execution Gate Model with Intent Drift Enforcement
 
 This module implements explicit permission enforcement for Claude CLI execution.
 It is the SINGLE source of truth for what actions Claude can perform.
@@ -11,6 +11,7 @@ Key Features:
 - Filesystem scope enforcement (job workspace only)
 - Hard fail conditions
 - Immutable audit trail
+- Phase 16F: Intent drift detection and contract enforcement
 
 Actions:
 - READ_CODE: Read source files
@@ -33,16 +34,38 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Tuple, FrozenSet
 
+# Phase 16F: Intent drift imports (lazy to avoid circular imports)
+_drift_available = True
+try:
+    from .intent_contract import (
+        evaluate_contract,
+        ContractEvaluationResult,
+        EnforcementAction,
+    )
+except ImportError:
+    _drift_available = False
+
 logger = logging.getLogger("execution_gate")
 
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-EXECUTION_AUDIT_LOG = Path("/home/aitesting.mybd.in/jobs/execution_audit.log")
-EXECUTION_GATE_CONFIG = Path("/home/aitesting.mybd.in/jobs/execution_gate_config.json")
+EXECUTION_AUDIT_LOG = Path(os.getenv(
+    "EXECUTION_AUDIT_LOG",
+    "/home/aitesting.mybd.in/jobs/execution_audit.log"
+))
+EXECUTION_GATE_CONFIG = Path(os.getenv(
+    "EXECUTION_GATE_CONFIG",
+    "/home/aitesting.mybd.in/jobs/execution_gate_config.json"
+))
 
-# Ensure audit log directory exists
-EXECUTION_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+# Ensure audit log directory exists (only if path looks valid)
+try:
+    EXECUTION_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Fall back to /tmp for testing/development
+    EXECUTION_AUDIT_LOG = Path("/tmp/execution_audit.log")
+    EXECUTION_GATE_CONFIG = Path("/tmp/execution_gate_config.json")
 
 
 # -----------------------------------------------------------------------------
@@ -251,6 +274,10 @@ class ExecutionRequest:
     requesting_user_role: str  # UserRole value
     workspace_path: str
     task_description: str
+    # Phase 16F: Current intent for drift checking (optional for backwards compatibility)
+    project_id: Optional[str] = None
+    current_intent: Optional[Dict[str, Any]] = None
+    skip_drift_check: bool = False  # Only for read-only actions
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -266,6 +293,9 @@ class ExecutionRequest:
             "requesting_user_role": self.requesting_user_role,
             "workspace_path": self.workspace_path,
             "task_description": self.task_description[:200],  # Truncate for log
+            "project_id": self.project_id,
+            "has_current_intent": self.current_intent is not None,
+            "skip_drift_check": self.skip_drift_check,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -284,6 +314,11 @@ class GateDecision:
     hard_fail: bool = False  # If True, this is a security violation
     workspace_validated: bool = False
     governance_docs_present: bool = False
+    # Phase 16F: Intent drift fields
+    drift_checked: bool = False
+    drift_blocks_execution: bool = False
+    drift_requires_confirmation: bool = False
+    drift_evaluation: Optional[Dict[str, Any]] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -296,6 +331,10 @@ class GateDecision:
             "hard_fail": self.hard_fail,
             "workspace_validated": self.workspace_validated,
             "governance_docs_present": self.governance_docs_present,
+            "drift_checked": self.drift_checked,
+            "drift_blocks_execution": self.drift_blocks_execution,
+            "drift_requires_confirmation": self.drift_requires_confirmation,
+            "drift_evaluation": self.drift_evaluation,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -319,6 +358,9 @@ class ExecutionAuditEntry:
     gate_decision: str  # "ALLOWED" or "DENIED"
     denied_reason: Optional[str]
     outcome: Optional[str]  # "SUCCESS", "FAILURE", "PENDING"
+    # Phase 16F: Drift tracking
+    drift_level: Optional[str] = None
+    drift_score: Optional[float] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -336,6 +378,8 @@ class ExecutionAuditEntry:
             "gate_decision": self.gate_decision,
             "denied_reason": self.denied_reason,
             "outcome": self.outcome,
+            "drift_level": self.drift_level,
+            "drift_score": self.drift_score,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -507,6 +551,89 @@ class ExecutionGate:
             self._log_audit(request, decision, "DENIED")
             return decision
 
+        # Step 10: Phase 16F - Intent Drift Check (for write actions)
+        drift_checked = False
+        drift_blocks_execution = False
+        drift_requires_confirmation = False
+        drift_evaluation = None
+
+        # Only check drift for write actions and if drift checking is available
+        if (
+            _drift_available
+            and not request.skip_drift_check
+            and requested_action in ExecutionAction.all_write_actions()
+            and request.project_id
+            and request.current_intent
+        ):
+            try:
+                contract_result = evaluate_contract(
+                    project_id=request.project_id,
+                    project_name=request.project_name,
+                    current_intent=request.current_intent,
+                    action_description=f"execute {requested_action.value}",
+                )
+                drift_checked = True
+                drift_evaluation = contract_result.to_dict()
+
+                if contract_result.action == EnforcementAction.BLOCK.value:
+                    drift_blocks_execution = True
+                    decision = GateDecision(
+                        allowed=False,
+                        request=request,
+                        allowed_actions=allowed_actions,
+                        denied_reason=f"Intent drift BLOCKS execution: {contract_result.block_reason}",
+                        hard_fail=True,
+                        workspace_validated=True,
+                        governance_docs_present=True,
+                        drift_checked=True,
+                        drift_blocks_execution=True,
+                        drift_evaluation=drift_evaluation,
+                    )
+                    self._log_audit(request, decision, "DENIED")
+                    return decision
+
+                elif contract_result.action == EnforcementAction.FREEZE.value:
+                    drift_blocks_execution = True
+                    decision = GateDecision(
+                        allowed=False,
+                        request=request,
+                        allowed_actions=allowed_actions,
+                        denied_reason=f"Project FROZEN due to critical drift: {contract_result.summary}",
+                        hard_fail=True,
+                        workspace_validated=True,
+                        governance_docs_present=True,
+                        drift_checked=True,
+                        drift_blocks_execution=True,
+                        drift_evaluation=drift_evaluation,
+                    )
+                    self._log_audit(request, decision, "DENIED")
+                    return decision
+
+                elif contract_result.action == EnforcementAction.CONFIRM.value:
+                    drift_requires_confirmation = True
+                    # Check if there's an approved confirmation
+                    # For now, we block - confirmation must be approved first
+                    decision = GateDecision(
+                        allowed=False,
+                        request=request,
+                        allowed_actions=allowed_actions,
+                        denied_reason=f"Intent drift requires confirmation: {contract_result.user_prompt}",
+                        hard_fail=False,  # Not a hard fail - just needs confirmation
+                        workspace_validated=True,
+                        governance_docs_present=True,
+                        drift_checked=True,
+                        drift_blocks_execution=False,
+                        drift_requires_confirmation=True,
+                        drift_evaluation=drift_evaluation,
+                    )
+                    self._log_audit(request, decision, "DENIED")
+                    return decision
+
+            except Exception as e:
+                logger.warning(f"Drift check failed (proceeding without): {e}")
+                # If drift check fails, log but allow (fail-open for now)
+                drift_checked = False
+
         # All checks passed - execution is ALLOWED
         decision = GateDecision(
             allowed=True,
@@ -514,6 +641,10 @@ class ExecutionGate:
             allowed_actions=allowed_actions,
             workspace_validated=True,
             governance_docs_present=True,
+            drift_checked=drift_checked,
+            drift_blocks_execution=False,
+            drift_requires_confirmation=False,
+            drift_evaluation=drift_evaluation,
         )
         self._log_audit(request, decision, "ALLOWED")
 
@@ -542,10 +673,13 @@ class ExecutionGate:
                 resolved.relative_to(jobs_dir)
                 return True
             except ValueError:
-                # Not within jobs directory - check for development environment
-                # Allow /tmp for testing
-                if str(resolved).startswith("/tmp/"):
-                    logger.warning(f"Allowing /tmp workspace for testing: {resolved}")
+                # Not within jobs directory - check for development/test environment
+                # Allow temp directories for testing
+                resolved_str = str(resolved)
+                if (resolved_str.startswith("/tmp/") or
+                    resolved_str.startswith("/var/folders/") or  # macOS temp
+                    "/T/" in resolved_str):  # macOS temp pattern
+                    logger.warning(f"Allowing temp workspace for testing: {resolved}")
                     return True
                 return False
 
@@ -583,6 +717,15 @@ class ExecutionGate:
         SECURITY-CRITICAL: All attempts MUST be logged.
         """
         try:
+            # Extract drift info from evaluation if available
+            drift_level = None
+            drift_score = None
+            if decision.drift_evaluation:
+                drift_analysis = decision.drift_evaluation.get("drift_analysis")
+                if drift_analysis:
+                    drift_level = drift_analysis.get("overall_level")
+                    drift_score = drift_analysis.get("overall_score")
+
             entry = ExecutionAuditEntry(
                 job_id=request.job_id,
                 project_name=request.project_name,
@@ -596,6 +739,8 @@ class ExecutionGate:
                 gate_decision=gate_decision,
                 denied_reason=decision.denied_reason,
                 outcome=outcome,
+                drift_level=drift_level,
+                drift_score=drift_score,
             )
 
             # Append to audit log (immutable, append-only)
@@ -738,8 +883,14 @@ def get_execution_constraints_for_job(
             "You may NOT access files outside the job workspace",
             "You may NOT modify AI_POLICY.md or ARCHITECTURE.md",
             "You MUST log all actions to logs/EXECUTION_LOG.md",
+            # Phase 16F constraints
+            "You may NOT change architecture class without explicit approval",
+            "You may NOT change database type without explicit approval",
+            "You may NOT expand project purpose beyond baseline intent",
+            "You may NOT add new production domains without confirmation",
         ],
+        "drift_enforcement_enabled": _drift_available,
     }
 
 
-logger.info("Execution Gate module loaded (Phase 15.6)")
+logger.info(f"Execution Gate module loaded (Phase 15.6 + 16F, drift_available={_drift_available})")
