@@ -86,7 +86,7 @@ logger.addHandler(console_handler)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONTROLLER_BASE_URL = os.getenv("CONTROLLER_URL", "http://127.0.0.1:8001")
 HTTP_TIMEOUT = 30.0
-BOT_VERSION = "0.17.1"
+BOT_VERSION = "0.18.1"
 BOT_START_TIME = datetime.utcnow()
 
 # -----------------------------------------------------------------------------

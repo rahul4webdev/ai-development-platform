@@ -3617,6 +3617,7 @@ async def get_claude_status():
     Check Claude CLI availability and status.
 
     Phase 15.5: Updated to support session-based authentication.
+    Phase 18B: Added 10-second timeout to prevent hanging on slow CLI.
 
     Returns information about:
     - Claude CLI installation and version
@@ -3633,7 +3634,22 @@ async def get_claude_status():
             "scheduler": None
         }
 
-    cli_status = await check_claude_availability()
+    # Phase 18B: Add timeout to prevent hanging on slow/unresponsive CLI
+    try:
+        cli_status = await asyncio.wait_for(
+            check_claude_availability(),
+            timeout=10.0  # 10 second timeout for detailed status
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Claude CLI status check timed out (10s limit)")
+        cli_status = {
+            "available": False,
+            "installed": None,
+            "version": None,
+            "authenticated": False,
+            "error": "Status check timed out - CLI may be slow or unresponsive"
+        }
+
     scheduler_status = await get_scheduler_status()
 
     # Phase 15.5: Use the new 'authenticated' field instead of requiring api_key
