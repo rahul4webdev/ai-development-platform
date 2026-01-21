@@ -1827,9 +1827,14 @@ async def health_check():
     }
 
     # Phase 15.5: Add Claude CLI status if backend is available
+    # Phase 18B Fix: Use short timeout (3s) to prevent health check from blocking
+    # The Claude CLI check can take 30+ seconds if the CLI is hanging
     if CLAUDE_BACKEND_AVAILABLE:
         try:
-            cli_status = await check_claude_availability()
+            cli_status = await asyncio.wait_for(
+                check_claude_availability(),
+                timeout=3.0  # Short timeout for health check responsiveness
+            )
             health_response["components"]["claude_cli"] = {
                 "available": cli_status.get("available", False),
                 "installed": cli_status.get("installed", False),
@@ -1840,6 +1845,12 @@ async def health_check():
             # Add capability if Claude is available
             if cli_status.get("available"):
                 health_response["capabilities"].append("claude_cli_execution")
+        except asyncio.TimeoutError:
+            logger.warning("Claude CLI check timed out in health endpoint (3s limit)")
+            health_response["components"]["claude_cli"] = {
+                "available": False,
+                "error": "Check timed out - CLI may be slow or unresponsive"
+            }
         except Exception as e:
             logger.warning(f"Error checking Claude CLI status: {e}")
             health_response["components"]["claude_cli"] = {
