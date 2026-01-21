@@ -1906,13 +1906,13 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user_id = update.effective_user.id
         safety.log_action(user_id, "health_check", {})
 
-        lines = ["*System Health Check*", ""]
+        lines = ["System Health Check", ""]
 
         # Phase 13.12: Show system mode prominently
         sys_status = system_state.get_status()
         mode = sys_status["mode"]
         mode_emoji = {"normal": "🟢", "degraded": "🟡", "critical": "🔴"}.get(mode, "⚪")
-        lines.append(f"{mode_emoji} *System Mode:* {mode.upper()}")
+        lines.append(f"{mode_emoji} System Mode: {mode.upper()}")
         if sys_status["degraded_reason"]:
             lines.append(f"   Reason: {sys_status['degraded_reason']}")
         if sys_status["owner_override_active"]:
@@ -1922,10 +1922,10 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Check controller health
         controller_health = await controller.health_check()
         if "error" in controller_health:
-            lines.append("❌ *Controller:* Unreachable")
-            lines.append(f"   Error: {escape_markdown(str(controller_health.get('error', '')))}")
+            lines.append("❌ Controller: Unreachable")
+            lines.append(f"   Error: {controller_health.get('error', '')}")
         else:
-            lines.append("✅ *Controller:* Healthy")
+            lines.append("✅ Controller: Healthy")
             controller_phase = controller_health.get('phase', 'unknown')
             controller_version = controller_health.get('version', 'unknown')
             lines.append(f"   Phase: {controller_phase}")
@@ -1945,7 +1945,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         f"controller reports {controller_phase}. Controller needs update!"
                     )
                     lines.append("")
-                    lines.append("⚠️ *WARNING: Version Mismatch*")
+                    lines.append("⚠️ WARNING: Version Mismatch")
                     lines.append(f"   Bot expects Phase 13+, controller reports {controller_phase}")
                     lines.append("   Controller metadata may need updating!")
             except (ValueError, IndexError) as e:
@@ -1958,14 +1958,14 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for svc in services:
             status = get_systemd_status(svc)
             emoji = "✅" if status.get("active") else "❌"
-            lines.append(f"{emoji} *{svc}:* {status.get('status')}")
+            lines.append(f"{emoji} {svc}: {status.get('status')}")
             if status.get("since") and status.get("since") != "unknown":
                 lines.append(f"   Since: {status.get('since')}")
 
         lines.append("")
 
         # Bot info
-        lines.append(f"🤖 *Bot Version:* {BOT_VERSION}")
+        lines.append(f"🤖 Bot Version: {BOT_VERSION}")
         lines.append("")
 
         # Last deployment info (from dashboard)
@@ -1982,22 +1982,22 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 latest_deploy = deploy_time
 
                 if latest_deploy:
-                    lines.append(f"📦 *Last Deployment:* {latest_deploy}")
+                    lines.append(f"📦 Last Deployment: {latest_deploy}")
                 else:
-                    lines.append("📦 *Last Deployment:* None recorded")
+                    lines.append("📦 Last Deployment: None recorded")
 
         # Phase 14/15.5: Claude CLI Status (updated for session-based auth)
         lines.append("")
         claude_status = await controller.get_claude_status()
         if "error" in claude_status:
-            lines.append("❓ *Claude CLI:* Status unknown")
+            lines.append("❓ Claude CLI: Status unknown")
         else:
             cli_info = claude_status.get("cli", {})
             scheduler_info = claude_status.get("scheduler", {})
 
             if claude_status.get("available"):
-                lines.append("✅ *Claude CLI:* Available")
-                lines.append(f"   Version: {escape_markdown(cli_info.get('version', 'unknown'))}")
+                lines.append("✅ Claude CLI: Available")
+                lines.append(f"   Version: {cli_info.get('version', 'unknown')}")
                 # Phase 15.5: Show auth type
                 auth_type = cli_info.get("auth_type", "unknown")
                 if auth_type == "cli_session":
@@ -2012,16 +2012,16 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     queued = scheduler_info.get('queued_jobs', 0)
                     lines.append(f"   Jobs: {active} running, {queued} queued")
             else:
-                lines.append("⚠️ *Claude CLI:* Not available")
+                lines.append("⚠️ Claude CLI: Not available")
                 # Phase 15.5: More specific error messages
                 if not cli_info.get("installed"):
                     lines.append("   CLI not installed")
                 elif not cli_info.get("authenticated"):
                     lines.append("   Not authenticated (run 'claude auth login')")
                 elif cli_info.get("error"):
-                    lines.append(f"   Error: {escape_markdown(cli_info.get('error', '')[:50])}")
+                    lines.append(f"   Error: {cli_info.get('error', '')[:50]}")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines))
     except Exception as e:
         logger.error(f"Error in health_command: {e}")
         await update.message.reply_text(f"❌ Error checking health: {str(e)}")
