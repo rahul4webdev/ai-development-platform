@@ -40,6 +40,7 @@ PHASE 5 CONSTRAINTS (inherited):
 - Commits are artifacts, not automatic actions
 """
 
+import asyncio
 import json
 import logging
 import shutil
