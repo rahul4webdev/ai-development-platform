@@ -3635,13 +3635,15 @@ async def get_claude_status():
         }
 
     # Phase 18B: Add timeout to prevent hanging on slow/unresponsive CLI
+    # Note: check_claude_availability() has internal 30s timeout for execution test
+    # We allow 35s total to give it time to complete properly
     try:
         cli_status = await asyncio.wait_for(
             check_claude_availability(),
-            timeout=10.0  # 10 second timeout for detailed status
+            timeout=35.0  # Allow time for internal 30s execution test
         )
     except asyncio.TimeoutError:
-        logger.warning("Claude CLI status check timed out (10s limit)")
+        logger.warning("Claude CLI status check timed out (35s limit)")
         cli_status = {
             "available": False,
             "installed": None,
