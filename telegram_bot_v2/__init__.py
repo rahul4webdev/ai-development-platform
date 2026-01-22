@@ -9,4 +9,4 @@ Supports natural language project creation and approval workflows.
 Note: Directory named telegram_bot_v2 to avoid conflict with python-telegram-bot package.
 """
 
-__version__ = "0.18.1"
+__version__ = "0.19.0"

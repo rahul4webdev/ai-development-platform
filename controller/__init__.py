@@ -99,11 +99,90 @@ Phase 18: Automation Eligibility & Controlled Execution
   * Mandatory audit: Every evaluation emits immutable audit record
   * If audit write fails → APPROVAL_DENIED
   * Approval store: Append-only JSONL persistence with fsync
+
+- Phase 18C: Controlled Execution Dispatcher - SINGLE EXECUTION POINT
+  * LOCKED enum ExecutionStatus (EXACTLY 4 values):
+    - EXECUTION_BLOCKED
+    - EXECUTION_PENDING
+    - EXECUTION_SUCCESS
+    - EXECUTION_FAILED
+  * Frozen dataclass inputs (all mandatory):
+    - ExecutionIntent, EligibilityResult, OrchestrationResult, ExecutionRequest
+  * Chain validation (in order):
+    - Eligibility check → Approval check → Gate check → Execute
+  * Block rules (ANY match → BLOCKED):
+    - Missing input, eligibility FORBIDDEN, action not in allowed list
+    - Approval DENIED/PENDING, gate denied/hard_fail/drift_blocks
+  * Success path:
+    - All validations pass → EXECUTION_PENDING
+    - Execution backend completes → SUCCESS or FAILED
+  * 100% deterministic: Same inputs = same validation outcome
+  * SINGLE EXECUTION POINT: ALL actions MUST flow through dispatcher
+  * Mandatory audit: Every dispatch emits immutable audit record
+  * If audit write fails → EXECUTION_BLOCKED
+  * Execution store: Append-only JSONL persistence with fsync
+
+- Phase 18D: Post-Execution Verification & Invariant Enforcement - VERIFICATION ONLY
+  * LOCKED enum VerificationStatus (EXACTLY 3 values):
+    - PASSED
+    - FAILED
+    - UNKNOWN
+  * LOCKED enum ViolationSeverity (EXACTLY 4 values):
+    - INFO, LOW, MEDIUM, HIGH
+  * LOCKED enum ViolationType (EXACTLY 6 verification domains):
+    - SCOPE_VIOLATION: Only approved files/modules touched
+    - ACTION_VIOLATION: Only approved action type executed
+    - BOUNDARY_VIOLATION: No production deploy, no external network
+    - INTENT_VIOLATION: No intent drift introduced
+    - INVARIANT_VIOLATION: Audit/approval chain intact
+    - OUTCOME_VIOLATION: SUCCESS/FAILURE matches logs
+  * Frozen dataclass inputs (immutable snapshots):
+    - ExecutionResultSnapshot, ExecutionIntentSnapshot, ExecutionAuditSnapshot
+    - LifecycleSnapshot, IntentBaselineSnapshot, ExecutionConstraints, ExecutionLogs
+  * FAIL CLOSED: Missing required data → UNKNOWN (never guess)
+  * 100% deterministic: Same inputs = same verification outcome
+  * VERIFICATION ONLY: Answers "Did execution respect constraints?" - NOTHING ELSE
+  * NO execution, NO retries, NO rollback, NO mutation
+  * NO recommendations, NO alerts, NO notifications
+  * Violations are RECORDED, not ACTED UPON
+  * Mandatory audit: Every verification emits immutable audit record
+  * Verification store: Append-only JSONL persistence with fsync
+  * API endpoints: GET /execution/{id}/verification, /execution/{id}/violations,
+    /execution/verification/recent, /execution/verification/summary
+  * Telegram commands: /execution_verify, /execution_violations (OBSERVATION ONLY)
+
+Phase 19: Learning, Memory & System Intelligence (NON-AUTONOMOUS)
+- Phase 19: Learning Layer - INSIGHT ONLY, NO BEHAVIORAL COUPLING
+  * LOCKED enums for patterns, trends, confidence, aggregates, memory
+    - PatternType: Execution, verification, approval, drift, incident patterns
+    - TrendDirection: INCREASING, DECREASING, STABLE, UNKNOWN (EXACTLY 4 values)
+    - ConfidenceLevel: HIGH, MEDIUM, LOW, INSUFFICIENT (EXACTLY 4 values)
+    - AggregateType: Failure rate, violation frequency, approval rejection rate, etc.
+    - MemoryEntryType: Execution, verification, approval, incident, drift outcomes
+  * Frozen dataclass outputs (immutable after creation):
+    - ObservedPattern: Pattern observations with statistical confidence
+    - HistoricalAggregate: Time-bounded aggregate statistics
+    - TrendObservation: Direction and change rate observations
+    - MemoryEntry: Append-only historical records
+    - LearningSummary: Human-readable insight reports
+  * CRITICAL CONSTRAINTS (NON-NEGOTIABLE):
+    - NO BEHAVIORAL COUPLING: Never influences eligibility, approval, execution
+    - NO THRESHOLD MODIFICATION: Never changes system thresholds or limits
+    - NO ML INFERENCE: No machine learning, no optimization, no prediction
+    - NO AUTOMATION: Never triggers any automated actions
+    - Statistical confidence ONLY (sample size + consistency, NOT ML confidence)
+  * 100% deterministic: Same inputs = same aggregates
+  * APPEND-ONLY: Memory is written, never modified or deleted
+  * API endpoints: GET /learning/patterns, /learning/trends, /learning/history,
+    /learning/summary, /learning/statistics
+  * Telegram commands: /learning_summary, /learning_patterns, /learning_trends,
+    /learning_stats (INSIGHT ONLY)
+  * This is MEMORY, not INTELLIGENCE - provides insight, not action
 """
 
-__version__ = "0.18.1"
+__version__ = "0.19.0"
 
 # Single source of truth for phase metadata
-CURRENT_PHASE = "18B"
-CURRENT_PHASE_NAME = "Human Approval Orchestration"
+CURRENT_PHASE = "19"
+CURRENT_PHASE_NAME = "Learning, Memory & System Intelligence"
 CURRENT_PHASE_FULL = f"Phase {CURRENT_PHASE}: {CURRENT_PHASE_NAME}"

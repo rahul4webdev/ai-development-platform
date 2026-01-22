@@ -941,6 +941,113 @@ class ControllerClient:
         """Get a specific incident by ID (Phase 17B)."""
         return await self._request("GET", f"/incidents/{incident_id}")
 
+    # Phase 18C: Execution Dispatcher Methods (CONTROLLED EXECUTION)
+    async def get_execution(self, execution_id: str) -> Dict[str, Any]:
+        """Get execution result by ID (Phase 18C)."""
+        return await self._request("GET", f"/execution/{execution_id}")
+
+    async def get_execution_recent(
+        self,
+        limit: int = 20,
+        status: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get recent executions (Phase 18C)."""
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        if project_id:
+            params["project_id"] = project_id
+        return await self._request("GET", "/execution/recent", params=params)
+
+    async def get_execution_summary(
+        self,
+        project_id: Optional[str] = None,
+        since_hours: int = 24,
+    ) -> Dict[str, Any]:
+        """Get execution summary (Phase 18C)."""
+        params = {"since_hours": since_hours}
+        if project_id:
+            params["project_id"] = project_id
+        return await self._request("GET", "/execution/summary", params=params)
+
+    # Phase 18D: Post-Execution Verification Methods (READ-ONLY)
+    async def get_execution_verification(self, execution_id: str) -> Dict[str, Any]:
+        """Get verification result for an execution (Phase 18D)."""
+        return await self._request("GET", f"/execution/{execution_id}/verification")
+
+    async def get_execution_violations(self, execution_id: str) -> Dict[str, Any]:
+        """Get violations for an execution (Phase 18D)."""
+        return await self._request("GET", f"/execution/{execution_id}/violations")
+
+    async def get_verification_recent(
+        self,
+        limit: int = 20,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get recent verification results (Phase 18D)."""
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        return await self._request("GET", "/execution/verification/recent", params=params)
+
+    async def get_verification_summary(
+        self,
+        since_hours: int = 24,
+    ) -> Dict[str, Any]:
+        """Get verification summary (Phase 18D)."""
+        params = {"since_hours": since_hours}
+        return await self._request("GET", "/execution/verification/summary", params=params)
+
+    # Phase 19: Learning, Memory & System Intelligence Methods (READ-ONLY)
+    async def get_learning_patterns(
+        self,
+        limit: int = 20,
+        pattern_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get observed patterns (Phase 19)."""
+        params = {"limit": limit}
+        if pattern_type:
+            params["pattern_type"] = pattern_type
+        return await self._request("GET", "/learning/patterns", params=params)
+
+    async def get_learning_trends(
+        self,
+        limit: int = 20,
+        metric_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get observed trends (Phase 19)."""
+        params = {"limit": limit}
+        if metric_name:
+            params["metric_name"] = metric_name
+        return await self._request("GET", "/learning/trends", params=params)
+
+    async def get_learning_history(
+        self,
+        limit: int = 20,
+        entry_type: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get memory history (Phase 19)."""
+        params = {"limit": limit}
+        if entry_type:
+            params["entry_type"] = entry_type
+        if project_id:
+            params["project_id"] = project_id
+        return await self._request("GET", "/learning/history", params=params)
+
+    async def get_learning_summary(self) -> Dict[str, Any]:
+        """Get latest learning summary (Phase 19)."""
+        return await self._request("GET", "/learning/summary")
+
+    async def get_learning_statistics(
+        self,
+        since_hours: int = 24,
+    ) -> Dict[str, Any]:
+        """Get learning statistics (Phase 19)."""
+        params = {"since_hours": since_hours}
+        return await self._request("GET", "/learning/statistics", params=params)
+
     async def get_notifications(self, project_name: Optional[str] = None) -> Dict[str, Any]:
         """Get pending notifications."""
         params = {"project_name": project_name} if project_name else None
@@ -4601,6 +4708,922 @@ async def incidents_summary_command(update: Update, context: ContextTypes.DEFAUL
 
 
 # -----------------------------------------------------------------------------
+# Phase 18C: Execution Dispatcher Commands (CONTROLLED EXECUTION)
+# -----------------------------------------------------------------------------
+
+def get_execution_status_emoji(status: str) -> str:
+    """Get emoji for execution status."""
+    status_emojis = {
+        "execution_blocked": "🚫",
+        "execution_pending": "⏳",
+        "execution_success": "✅",
+        "execution_failed": "❌",
+    }
+    return status_emojis.get(status, "❓")
+
+
+async def executions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /executions - View recent executions (Phase 18C)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Recent execution results with status and action type.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_executions", {})
+
+        # Parse arguments
+        args = context.args or []
+        limit = 10
+        status_filter = None
+
+        for arg in args:
+            if arg.isdigit():
+                limit = min(int(arg), 50)
+            elif arg in ["blocked", "pending", "success", "failed"]:
+                status_filter = f"execution_{arg}"
+
+        # Get executions from controller
+        result = await controller.get_execution_recent(
+            limit=limit,
+            status=status_filter,
+        )
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        executions = result.get("executions", [])
+
+        if not executions:
+            await update.message.reply_text(
+                "No recent executions found.\n\n"
+                "Executions appear here when actions flow through Phase 18C dispatcher."
+            )
+            return
+
+        lines = []
+        lines.append("Execution Results (Phase 18C)")
+        lines.append("=" * 35)
+        lines.append("")
+
+        for exec_data in executions[:limit]:
+            status = exec_data.get("status", "unknown")
+            status_emoji = get_execution_status_emoji(status)
+            exec_id = exec_data.get("execution_id", "unknown")[:20]
+            intent_id = exec_data.get("intent_id", "unknown")[:15]
+            timestamp = exec_data.get("timestamp", "")[:16].replace("T", " ")
+
+            lines.append(f"{status_emoji} {status.replace('execution_', '')}")
+            lines.append(f"   ID: {exec_id}")
+            lines.append(f"   Intent: {intent_id}")
+            lines.append(f"   Time: {timestamp}")
+
+            if exec_data.get("block_reason"):
+                lines.append(f"   Blocked: {exec_data['block_reason']}")
+            if exec_data.get("failure_reason"):
+                lines.append(f"   Failed: {exec_data['failure_reason']}")
+
+            lines.append("")
+
+        lines.append(f"Total: {len(executions)} executions")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in executions_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def execution_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /execution_status [execution_id] - View specific execution status (Phase 18C)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Detailed execution result for a specific execution ID.
+    """
+    try:
+        user_id = update.effective_user.id
+        args = context.args or []
+
+        if not args:
+            await update.message.reply_text(
+                "Usage: /execution_status <execution_id>\n\n"
+                "Example: /execution_status exec-2024-01-21..."
+            )
+            return
+
+        execution_id = args[0]
+        safety.log_action(user_id, "view_execution_status", {"execution_id": execution_id})
+
+        # Get execution from controller
+        result = await controller.get_execution(execution_id)
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        exec_result = result.get("result")
+        if not exec_result:
+            await update.message.reply_text(f"Execution not found: {execution_id}")
+            return
+
+        status = exec_result.get("status", "unknown")
+        status_emoji = get_execution_status_emoji(status)
+
+        lines = []
+        lines.append(f"{status_emoji} Execution Detail")
+        lines.append("=" * 35)
+        lines.append("")
+        lines.append(f"ID: {exec_result.get('execution_id', 'unknown')}")
+        lines.append(f"Intent: {exec_result.get('intent_id', 'unknown')}")
+        lines.append(f"Status: {status}")
+        lines.append(f"Timestamp: {exec_result.get('timestamp', 'unknown')[:19].replace('T', ' ')}")
+        lines.append(f"Version: {exec_result.get('dispatcher_version', 'unknown')}")
+        lines.append("")
+
+        if exec_result.get("block_reason"):
+            lines.append(f"Block Reason: {exec_result['block_reason']}")
+        if exec_result.get("failure_reason"):
+            lines.append(f"Failure Reason: {exec_result['failure_reason']}")
+        if exec_result.get("gate_decision_allowed") is not None:
+            gate = "Allowed" if exec_result["gate_decision_allowed"] else "Denied"
+            lines.append(f"Gate Decision: {gate}")
+        if exec_result.get("rollback_performed"):
+            lines.append("Rollback: Yes")
+        if exec_result.get("execution_output"):
+            output = exec_result["execution_output"][:200]
+            lines.append(f"Output: {output}...")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in execution_status_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def execution_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /execution_summary - View execution statistics (Phase 18C)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Summary counts by status, action type, and block reason.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_execution_summary", {})
+
+        # Parse arguments for hours
+        args = context.args or []
+        since_hours = 24
+        for arg in args:
+            if arg.isdigit():
+                since_hours = int(arg)
+
+        # Get summary from controller
+        result = await controller.get_execution_summary(since_hours=since_hours)
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        lines = []
+        lines.append("Execution Summary (Phase 18C)")
+        lines.append("=" * 35)
+        lines.append("")
+
+        total = result.get("total_executions", 0)
+        blocked = result.get("blocked_count", 0)
+        pending = result.get("pending_count", 0)
+        success = result.get("success_count", 0)
+        failed = result.get("failed_count", 0)
+
+        lines.append("Overview")
+        lines.append(f"  Total: {total}")
+        lines.append(f"  {get_execution_status_emoji('execution_blocked')} Blocked: {blocked}")
+        lines.append(f"  {get_execution_status_emoji('execution_pending')} Pending: {pending}")
+        lines.append(f"  {get_execution_status_emoji('execution_success')} Success: {success}")
+        lines.append(f"  {get_execution_status_emoji('execution_failed')} Failed: {failed}")
+        lines.append("")
+
+        # Success rate
+        if total > 0:
+            completed = success + failed
+            if completed > 0:
+                rate = (success / completed) * 100
+                lines.append(f"Success Rate: {rate:.1f}%")
+                lines.append("")
+
+        # By action type
+        by_action = result.get("by_action_type", {})
+        if by_action:
+            lines.append("By Action Type")
+            for action, count in sorted(by_action.items()):
+                lines.append(f"  {action}: {count}")
+            lines.append("")
+
+        # By block reason
+        by_block = result.get("by_block_reason", {})
+        if by_block:
+            lines.append("Block Reasons")
+            for reason, count in sorted(by_block.items()):
+                lines.append(f"  {reason}: {count}")
+            lines.append("")
+
+        lines.append(f"Period: last {since_hours} hours")
+        lines.append(f"Generated: {result.get('generated_at', '')[:19].replace('T', ' ')}")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in execution_summary_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
+# Phase 18D: Post-Execution Verification Commands (OBSERVATION ONLY)
+# -----------------------------------------------------------------------------
+def get_verification_status_emoji(status: str) -> str:
+    """Get emoji for verification status."""
+    status_emojis = {
+        "passed": "✅",
+        "failed": "❌",
+        "unknown": "❓",
+    }
+    return status_emojis.get(status, "❔")
+
+
+def get_violation_severity_emoji(severity: str) -> str:
+    """Get emoji for violation severity."""
+    severity_emojis = {
+        "info": "ℹ️",
+        "low": "🔵",
+        "medium": "🟡",
+        "high": "🔴",
+    }
+    return severity_emojis.get(severity, "❔")
+
+
+async def execution_verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /execution_verify [execution_id] - View verification result (Phase 18D)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Verification result for a specific execution.
+    OBSERVATION ONLY: Never suggests fixes, never escalates.
+    """
+    try:
+        user_id = update.effective_user.id
+        args = context.args or []
+
+        if not args:
+            await update.message.reply_text(
+                "Usage: /execution_verify <execution_id>\n\n"
+                "Example: /execution_verify exec-2024-01-21...\n\n"
+                "Shows verification result for an execution."
+            )
+            return
+
+        execution_id = args[0]
+        safety.log_action(user_id, "view_execution_verification", {"execution_id": execution_id})
+
+        # Get verification from controller
+        result = await controller.get_execution_verification(execution_id)
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        verification = result.get("verification")
+        if not verification:
+            await update.message.reply_text(
+                f"No verification found for execution: {execution_id}\n\n"
+                "Verification runs after execution completes."
+            )
+            return
+
+        status = verification.get("verification_status", "unknown")
+        status_emoji = get_verification_status_emoji(status)
+
+        lines = []
+        lines.append(f"{status_emoji} Execution Verification (Phase 18D)")
+        lines.append("=" * 40)
+        lines.append("")
+        lines.append(f"Verification ID: {verification.get('verification_id', 'unknown')[:25]}")
+        lines.append(f"Execution ID: {verification.get('execution_id', 'unknown')[:25]}")
+        lines.append(f"Status: {status.upper()}")
+        lines.append(f"Checked: {verification.get('checked_at', 'unknown')[:19].replace('T', ' ')}")
+        lines.append("")
+
+        # Violation summary
+        violation_count = verification.get("violation_count", 0)
+        high_count = verification.get("high_severity_count", 0)
+
+        if violation_count > 0:
+            lines.append(f"Violations: {violation_count}")
+            if high_count > 0:
+                lines.append(f"High Severity: {high_count}")
+            lines.append("")
+
+            # List violations
+            violations = verification.get("violations", [])
+            if violations:
+                lines.append("Violation Details:")
+                for i, v in enumerate(violations[:5], 1):
+                    v_type = v.get("violation_type", "unknown")
+                    severity = v.get("severity", "unknown")
+                    sev_emoji = get_violation_severity_emoji(severity)
+                    lines.append(f"  {i}. {sev_emoji} {v_type} ({severity})")
+                    if v.get("field"):
+                        lines.append(f"      Field: {v['field']}")
+                if len(violations) > 5:
+                    lines.append(f"  ... and {len(violations) - 5} more")
+                lines.append("")
+
+        if verification.get("unknown_reason"):
+            lines.append(f"Unknown Reason: {verification['unknown_reason']}")
+            lines.append("")
+
+        lines.append(f"Engine Version: {verification.get('engine_version', 'unknown')}")
+        lines.append("")
+        lines.append("(Observation only - no fixes suggested)")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in execution_verify_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def execution_violations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /execution_violations [execution_id] - View violations for execution (Phase 18D)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: All invariant violations detected for an execution.
+    OBSERVATION ONLY: Never suggests fixes, never escalates.
+    """
+    try:
+        user_id = update.effective_user.id
+        args = context.args or []
+
+        if not args:
+            await update.message.reply_text(
+                "Usage: /execution_violations <execution_id>\n\n"
+                "Example: /execution_violations exec-2024-01-21...\n\n"
+                "Shows all violations detected for an execution."
+            )
+            return
+
+        execution_id = args[0]
+        safety.log_action(user_id, "view_execution_violations", {"execution_id": execution_id})
+
+        # Get violations from controller
+        result = await controller.get_execution_violations(execution_id)
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        violations = result.get("violations", [])
+
+        if not violations:
+            await update.message.reply_text(
+                f"No violations found for execution: {execution_id}\n\n"
+                "Either verification hasn't run or execution passed all checks."
+            )
+            return
+
+        lines = []
+        lines.append("Execution Violations (Phase 18D)")
+        lines.append("=" * 40)
+        lines.append("")
+        lines.append(f"Execution: {execution_id[:30]}")
+        lines.append(f"Total Violations: {len(violations)}")
+        lines.append("")
+
+        # Group by severity
+        by_severity = {}
+        for v in violations:
+            sev = v.get("severity", "unknown")
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+
+        lines.append("By Severity:")
+        for sev in ["high", "medium", "low", "info"]:
+            if sev in by_severity:
+                emoji = get_violation_severity_emoji(sev)
+                lines.append(f"  {emoji} {sev.upper()}: {by_severity[sev]}")
+        lines.append("")
+
+        # List violations
+        lines.append("Violations:")
+        for i, v in enumerate(violations[:10], 1):
+            v_type = v.get("violation_type", "unknown")
+            severity = v.get("severity", "unknown")
+            sev_emoji = get_violation_severity_emoji(severity)
+            lines.append(f"")
+            lines.append(f"{i}. {sev_emoji} {v_type}")
+            lines.append(f"   Severity: {severity}")
+            if v.get("field"):
+                lines.append(f"   Field: {v['field']}")
+            if v.get("expected"):
+                lines.append(f"   Expected: {str(v['expected'])[:50]}")
+            if v.get("actual"):
+                lines.append(f"   Actual: {str(v['actual'])[:50]}")
+            if v.get("message"):
+                lines.append(f"   Message: {v['message'][:80]}")
+
+        if len(violations) > 10:
+            lines.append(f"")
+            lines.append(f"... and {len(violations) - 10} more violations")
+
+        lines.append("")
+        lines.append("(Observation only - no fixes suggested)")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in execution_violations_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def verification_recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /verification_recent [limit] [status] - View recent verifications (Phase 18D)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Recent verification results.
+    OBSERVATION ONLY: Never suggests fixes, never escalates.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_verification_recent", {})
+
+        # Parse arguments
+        args = context.args or []
+        limit = 10
+        status_filter = None
+
+        for arg in args:
+            if arg.isdigit():
+                limit = min(int(arg), 50)
+            elif arg in ["passed", "failed", "unknown"]:
+                status_filter = arg
+
+        # Get recent verifications from controller
+        result = await controller.get_verification_recent(
+            limit=limit,
+            status=status_filter,
+        )
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        verifications = result.get("verifications", [])
+
+        if not verifications:
+            await update.message.reply_text(
+                "No recent verifications found.\n\n"
+                "Verifications appear after execution completes."
+            )
+            return
+
+        lines = []
+        lines.append("Recent Verifications (Phase 18D)")
+        lines.append("=" * 40)
+        lines.append("")
+
+        for v in verifications[:limit]:
+            status = v.get("verification_status", "unknown")
+            status_emoji = get_verification_status_emoji(status)
+            v_id = v.get("verification_id", "unknown")[:20]
+            exec_id = v.get("execution_id", "unknown")[:15]
+            violation_count = v.get("violation_count", 0)
+            checked = v.get("checked_at", "")[:16].replace("T", " ")
+
+            lines.append(f"{status_emoji} {status.upper()}")
+            lines.append(f"   ID: {v_id}")
+            lines.append(f"   Exec: {exec_id}")
+            if violation_count > 0:
+                lines.append(f"   Violations: {violation_count}")
+            lines.append(f"   Time: {checked}")
+            lines.append("")
+
+        lines.append(f"Showing {len(verifications)} verifications")
+        lines.append("")
+        lines.append("(Observation only - no fixes suggested)")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in verification_recent_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def verification_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /verification_summary [hours] - View verification statistics (Phase 18D)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Summary counts by status, violation type, and severity.
+    OBSERVATION ONLY: Never suggests fixes, never escalates.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_verification_summary", {})
+
+        # Parse arguments for hours
+        args = context.args or []
+        since_hours = 24
+        for arg in args:
+            if arg.isdigit():
+                since_hours = int(arg)
+
+        # Get summary from controller
+        result = await controller.get_verification_summary(since_hours=since_hours)
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        lines = []
+        lines.append("Verification Summary (Phase 18D)")
+        lines.append("=" * 40)
+        lines.append("")
+
+        total = result.get("total_verifications", 0)
+        passed = result.get("passed_count", 0)
+        failed = result.get("failed_count", 0)
+        unknown = result.get("unknown_count", 0)
+        pass_rate = result.get("pass_rate", 0.0)
+
+        lines.append("Overview")
+        lines.append(f"  Total: {total}")
+        lines.append(f"  {get_verification_status_emoji('passed')} Passed: {passed}")
+        lines.append(f"  {get_verification_status_emoji('failed')} Failed: {failed}")
+        lines.append(f"  {get_verification_status_emoji('unknown')} Unknown: {unknown}")
+        lines.append(f"  Pass Rate: {pass_rate * 100:.1f}%")
+        lines.append("")
+
+        # Violation totals
+        total_violations = result.get("total_violations", 0)
+        high_severity = result.get("high_severity_violations", 0)
+
+        if total_violations > 0:
+            lines.append("Violations")
+            lines.append(f"  Total: {total_violations}")
+            if high_severity > 0:
+                lines.append(f"  High Severity: {high_severity}")
+            lines.append("")
+
+        # By violation type
+        by_type = result.get("by_violation_type", {})
+        if by_type:
+            lines.append("By Violation Type:")
+            for v_type, count in sorted(by_type.items()):
+                lines.append(f"  {v_type}: {count}")
+            lines.append("")
+
+        # By severity
+        by_severity = result.get("by_severity", {})
+        if by_severity:
+            lines.append("By Severity:")
+            for sev in ["high", "medium", "low", "info"]:
+                if sev in by_severity:
+                    emoji = get_violation_severity_emoji(sev)
+                    lines.append(f"  {emoji} {sev}: {by_severity[sev]}")
+            lines.append("")
+
+        lines.append(f"Period: last {since_hours} hours")
+        lines.append(f"Generated: {result.get('generated_at', '')[:19].replace('T', ' ')}")
+        lines.append("")
+        lines.append("(Observation only - no fixes suggested)")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in verification_summary_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
+# Phase 19: Learning, Memory & System Intelligence Commands (INSIGHT ONLY)
+# -----------------------------------------------------------------------------
+def get_trend_direction_emoji(direction: str) -> str:
+    """Get emoji for trend direction."""
+    direction_emojis = {
+        "increasing": "📈",
+        "decreasing": "📉",
+        "stable": "➡️",
+        "unknown": "❓",
+    }
+    return direction_emojis.get(direction, "❔")
+
+
+def get_confidence_emoji(confidence: str) -> str:
+    """Get emoji for confidence level."""
+    confidence_emojis = {
+        "high": "🟢",
+        "medium": "🟡",
+        "low": "🟠",
+        "insufficient": "⚪",
+    }
+    return confidence_emojis.get(confidence, "❔")
+
+
+async def learning_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /learning_summary - View latest learning summary (Phase 19)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Aggregate statistics and key metrics.
+    INSIGHT ONLY: Never suggests actions, never automates.
+    NO BEHAVIORAL COUPLING: Does not influence any other phase.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_learning_summary", {})
+
+        # Get summary from controller
+        result = await controller.get_learning_summary()
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        summary = result.get("summary")
+        if not summary:
+            await update.message.reply_text(
+                "No learning summary available yet.\n\n"
+                "Summaries are generated after system activity is analyzed."
+            )
+            return
+
+        lines = []
+        lines.append("Learning Summary (Phase 19)")
+        lines.append("=" * 40)
+        lines.append("")
+        lines.append("Activity Overview")
+        lines.append(f"  Executions: {summary.get('total_executions', 0)}")
+        lines.append(f"  Verifications: {summary.get('total_verifications', 0)}")
+        lines.append(f"  Approvals: {summary.get('total_approvals', 0)}")
+        lines.append(f"  Incidents: {summary.get('total_incidents', 0)}")
+        lines.append("")
+
+        # Rates
+        exec_rate = summary.get('execution_success_rate', 0) * 100
+        ver_rate = summary.get('verification_pass_rate', 0) * 100
+        appr_rate = summary.get('approval_grant_rate', 0) * 100
+
+        lines.append("Success Rates")
+        lines.append(f"  Execution: {exec_rate:.1f}%")
+        lines.append(f"  Verification: {ver_rate:.1f}%")
+        lines.append(f"  Approval: {appr_rate:.1f}%")
+        lines.append("")
+
+        # Patterns and trends
+        lines.append("Observations")
+        lines.append(f"  Patterns detected: {summary.get('pattern_count', 0)}")
+        lines.append(f"  Trends observed: {summary.get('trend_count', 0)}")
+        lines.append("")
+
+        # Period info
+        period_start = summary.get('period_start', '')[:10]
+        period_end = summary.get('period_end', '')[:10]
+        lines.append(f"Period: {period_start} to {period_end}")
+        lines.append(f"Generated: {summary.get('generated_at', '')[:19].replace('T', ' ')}")
+        lines.append("")
+        lines.append("(Insight only - no actions triggered)")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in learning_summary_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def learning_patterns_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /learning_patterns [limit] [type] - View observed patterns (Phase 19)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Detected patterns in system behavior.
+    INSIGHT ONLY: Never suggests actions, never automates.
+    NO BEHAVIORAL COUPLING: Does not influence any other phase.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_learning_patterns", {})
+
+        # Parse arguments
+        args = context.args or []
+        limit = 10
+        pattern_type = None
+
+        for arg in args:
+            if arg.isdigit():
+                limit = min(int(arg), 50)
+            else:
+                pattern_type = arg
+
+        # Get patterns from controller
+        result = await controller.get_learning_patterns(
+            limit=limit,
+            pattern_type=pattern_type,
+        )
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        patterns = result.get("patterns", [])
+
+        if not patterns:
+            await update.message.reply_text(
+                "No patterns observed yet.\n\n"
+                "Patterns emerge after sufficient system activity."
+            )
+            return
+
+        lines = []
+        lines.append("Observed Patterns (Phase 19)")
+        lines.append("=" * 40)
+        lines.append("")
+
+        for i, p in enumerate(patterns[:limit], 1):
+            p_type = p.get("pattern_type", "unknown")
+            confidence = p.get("confidence", "unknown")
+            conf_emoji = get_confidence_emoji(confidence)
+            frequency = p.get("frequency", 0)
+            description = p.get("description", "No description")[:60]
+
+            lines.append(f"{i}. {conf_emoji} {p_type}")
+            lines.append(f"   Frequency: {frequency}")
+            lines.append(f"   Confidence: {confidence}")
+            lines.append(f"   {description}")
+            lines.append("")
+
+        lines.append(f"Showing {len(patterns)} patterns")
+        lines.append("")
+        lines.append("(Insight only - no actions triggered)")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in learning_patterns_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def learning_trends_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /learning_trends [limit] [metric] - View observed trends (Phase 19)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Observed trends in system metrics.
+    INSIGHT ONLY: Never suggests actions, never predicts.
+    NO BEHAVIORAL COUPLING: Does not influence any other phase.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_learning_trends", {})
+
+        # Parse arguments
+        args = context.args or []
+        limit = 10
+        metric_name = None
+
+        for arg in args:
+            if arg.isdigit():
+                limit = min(int(arg), 50)
+            else:
+                metric_name = arg
+
+        # Get trends from controller
+        result = await controller.get_learning_trends(
+            limit=limit,
+            metric_name=metric_name,
+        )
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        trends = result.get("trends", [])
+
+        if not trends:
+            await update.message.reply_text(
+                "No trends observed yet.\n\n"
+                "Trends emerge after sufficient time-series data."
+            )
+            return
+
+        lines = []
+        lines.append("Observed Trends (Phase 19)")
+        lines.append("=" * 40)
+        lines.append("")
+
+        for i, t in enumerate(trends[:limit], 1):
+            metric = t.get("metric_name", "unknown")
+            direction = t.get("direction", "unknown")
+            dir_emoji = get_trend_direction_emoji(direction)
+            change_rate = t.get("change_rate", 0)
+            confidence = t.get("confidence", "unknown")
+            conf_emoji = get_confidence_emoji(confidence)
+            start_val = t.get("start_value", 0)
+            end_val = t.get("end_value", 0)
+
+            lines.append(f"{i}. {dir_emoji} {metric}")
+            lines.append(f"   Direction: {direction}")
+            lines.append(f"   Change: {change_rate:+.1f}%")
+            lines.append(f"   {conf_emoji} Confidence: {confidence}")
+            lines.append(f"   Values: {start_val:.2f} -> {end_val:.2f}")
+            lines.append("")
+
+        lines.append(f"Showing {len(trends)} trends")
+        lines.append("")
+        lines.append("(Insight only - no predictions made)")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in learning_trends_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+async def learning_statistics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /learning_stats [hours] - View learning statistics (Phase 19)
+
+    ALWAYS responds - no RBAC restriction (READ-ONLY).
+    Shows: Statistics about patterns, trends, and memory.
+    INSIGHT ONLY: Never suggests actions, never automates.
+    NO BEHAVIORAL COUPLING: Does not influence any other phase.
+    """
+    try:
+        user_id = update.effective_user.id
+        safety.log_action(user_id, "view_learning_statistics", {})
+
+        # Parse arguments for hours
+        args = context.args or []
+        since_hours = 24
+        for arg in args:
+            if arg.isdigit():
+                since_hours = int(arg)
+
+        # Get statistics from controller
+        result = await controller.get_learning_statistics(since_hours=since_hours)
+
+        if "error" in result:
+            await update.message.reply_text(f"Error: {result.get('error')}")
+            return
+
+        stats = result.get("statistics", {})
+
+        lines = []
+        lines.append("Learning Statistics (Phase 19)")
+        lines.append("=" * 40)
+        lines.append("")
+
+        lines.append("Counts")
+        lines.append(f"  Patterns: {stats.get('pattern_count', 0)}")
+        lines.append(f"  Trends: {stats.get('trend_count', 0)}")
+        lines.append(f"  Memory entries: {stats.get('memory_count', 0)}")
+        lines.append(f"  Aggregates: {stats.get('aggregate_count', 0)}")
+        lines.append(f"  Summaries: {stats.get('summary_count', 0)}")
+        lines.append("")
+
+        # By pattern type
+        by_pattern = stats.get("by_pattern_type", {})
+        if by_pattern:
+            lines.append("By Pattern Type:")
+            for p_type, count in sorted(by_pattern.items()):
+                lines.append(f"  {p_type}: {count}")
+            lines.append("")
+
+        # By trend direction
+        by_direction = stats.get("by_trend_direction", {})
+        if by_direction:
+            lines.append("By Trend Direction:")
+            for direction, count in sorted(by_direction.items()):
+                emoji = get_trend_direction_emoji(direction)
+                lines.append(f"  {emoji} {direction}: {count}")
+            lines.append("")
+
+        lines.append(f"Period: last {since_hours} hours")
+        lines.append(f"Generated: {stats.get('generated_at', '')[:19].replace('T', ' ')}")
+        lines.append("")
+        lines.append("(Insight only - no actions triggered)")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"Error in learning_statistics_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
 # Phase 16C: Document Handler (File Upload Support)
 # -----------------------------------------------------------------------------
 @role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
@@ -4775,6 +5798,23 @@ def main():
     application.add_handler(CommandHandler("incidents", incidents_command))
     application.add_handler(CommandHandler("incidents_recent", incidents_recent_command))
     application.add_handler(CommandHandler("incidents_summary", incidents_summary_command))
+
+    # Phase 18C: Execution Dispatcher commands (READ-ONLY status views)
+    application.add_handler(CommandHandler("executions", executions_command))
+    application.add_handler(CommandHandler("execution_status", execution_status_command))
+    application.add_handler(CommandHandler("execution_summary", execution_summary_command))
+
+    # Phase 18D: Post-Execution Verification commands (OBSERVATION ONLY)
+    application.add_handler(CommandHandler("execution_verify", execution_verify_command))
+    application.add_handler(CommandHandler("execution_violations", execution_violations_command))
+    application.add_handler(CommandHandler("verification_recent", verification_recent_command))
+    application.add_handler(CommandHandler("verification_summary", verification_summary_command))
+
+    # Phase 19: Learning, Memory & System Intelligence commands (INSIGHT ONLY)
+    application.add_handler(CommandHandler("learning_summary", learning_summary_command))
+    application.add_handler(CommandHandler("learning_patterns", learning_patterns_command))
+    application.add_handler(CommandHandler("learning_trends", learning_trends_command))
+    application.add_handler(CommandHandler("learning_stats", learning_statistics_command))
 
     # Callback query handler for inline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))
