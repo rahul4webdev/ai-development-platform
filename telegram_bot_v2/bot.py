@@ -1258,8 +1258,12 @@ def format_dashboard_enhanced(summary: Dict[str, Any]) -> str:
     """
     lines = []
 
+    # Phase 19 fix: Handle nested data structure from /dashboard endpoint
+    # The API returns {"phase": "16B", "data": {...}} format
+    data = summary.get("data", summary)  # Use nested data if present, else use summary directly
+
     # System health status with emoji
-    health = summary.get("system_health", "unknown")
+    health = data.get("system_health", "unknown")
     health_emoji = {
         "healthy": "🟢",
         "degraded": "🟡",
@@ -1273,16 +1277,25 @@ def format_dashboard_enhanced(summary: Dict[str, Any]) -> str:
     lines.append(f"{health_emoji} *System Health:* {health.upper()}")
     lines.append(f"")
 
-    # Summary counts
+    # Summary counts - handle both flat and nested structures
+    projects_data = data.get("projects", {})
+    jobs_data = data.get("jobs", {})
+    lifecycles_data = data.get("lifecycles", {})
+
+    total_projects = projects_data.get("total", data.get("total_projects", 0)) if isinstance(projects_data, dict) else 0
+    active_lifecycles = lifecycles_data.get("total", data.get("total_lifecycles", 0)) if isinstance(lifecycles_data, dict) else 0
+    pending_jobs = jobs_data.get("queued", data.get("pending_jobs", 0)) if isinstance(jobs_data, dict) else 0
+    active_workers = jobs_data.get("active", data.get("active_workers", 0)) if isinstance(jobs_data, dict) else 0
+
     lines.append(f"📈 *Summary Counts*")
-    lines.append(f"  Projects: {summary.get('total_projects', 0)}")
-    lines.append(f"  Active Lifecycles: {summary.get('total_lifecycles', 0)}")
-    lines.append(f"  Pending Jobs: {summary.get('pending_jobs', 0)}")
-    lines.append(f"  Active Workers: {summary.get('active_workers', 0)}/{summary.get('max_workers', 3)}")
+    lines.append(f"  Projects: {total_projects}")
+    lines.append(f"  Active Lifecycles: {active_lifecycles}")
+    lines.append(f"  Pending Jobs: {pending_jobs}")
+    lines.append(f"  Active Workers: {active_workers}/{data.get('max_workers', 3)}")
     lines.append(f"")
 
-    # Active projects (top 5)
-    active_projects = summary.get("active_projects", [])
+    # Active projects (top 5) - use data dict
+    active_projects = data.get("active_projects", [])
     if active_projects:
         lines.append(f"🚀 *Active Projects* ({len(active_projects)})")
         for proj in active_projects[:5]:
@@ -1294,8 +1307,8 @@ def format_dashboard_enhanced(summary: Dict[str, Any]) -> str:
             lines.append(f"  ... and {len(active_projects) - 5} more")
         lines.append(f"")
 
-    # Claude jobs activity
-    claude_activity = summary.get("claude_activity", {})
+    # Claude jobs activity - use data dict
+    claude_activity = data.get("claude_activity", {})
     if claude_activity:
         running = claude_activity.get("running_jobs", 0)
         queued = claude_activity.get("queued_jobs", 0)
@@ -1307,16 +1320,25 @@ def format_dashboard_enhanced(summary: Dict[str, Any]) -> str:
         lines.append(f"  Completed (24h): {completed_24h}")
         lines.append(f"")
 
-    # Security alerts (if any)
-    security = summary.get("security", {})
-    gate_denials = security.get("recent_gate_denials", 0)
+    # Security alerts (if any) - use data dict
+    security = data.get("security", {})
+    gate_denials = security.get("gate_denials_today", security.get("recent_gate_denials", 0))
     if gate_denials > 0:
         lines.append(f"🔒 *Security Alerts*")
         lines.append(f"  ⚠️ Gate Denials (24h): {gate_denials}")
         lines.append(f"")
 
-    # Timestamp
-    timestamp = summary.get("timestamp", "")
+    # Services status
+    services = data.get("services", {})
+    if services:
+        lines.append(f"🔧 *Services*")
+        for svc, status in services.items():
+            status_emoji = "✅" if status else "❌"
+            lines.append(f"  {status_emoji} {svc.replace('_', ' ').title()}")
+        lines.append(f"")
+
+    # Timestamp - use data dict
+    timestamp = data.get("timestamp", summary.get("timestamp", ""))
     if timestamp:
         lines.append(f"⏱️ _Updated: {timestamp[:19]}_")
 
@@ -3111,6 +3133,7 @@ async def create_project_from_file(
             "validating": "📋",
             "creating_project": "📁",
             "creating_lifecycles": "🔄",
+            "scheduling_planning": "🤖",
             "completed": "✅",
         }
 
@@ -3120,6 +3143,7 @@ async def create_project_from_file(
             "validating": "Validating execution plan",
             "creating_project": "Creating project",
             "creating_lifecycles": "Initializing aspects",
+            "scheduling_planning": "Scheduling Claude planning job",
             "completed": "Project created successfully",
         }
 
@@ -3149,12 +3173,16 @@ async def create_project_from_file(
     try:
         logger.info(f"Creating project from file: {filename}")
 
+        # Phase 19 fix: Show progress steps during file upload
+        await progress_callback("input_received", "in_progress", {"source": "file"})
+
         # Phase 19 fix: Use controller API for project creation
         # This ensures the controller's registry singleton is the single source of truth
 
         # Validate file extension
         ext = "." + filename.split(".")[-1].lower() if "." in filename else ""
         if ext not in [".md", ".txt", ".text"]:
+            await progress_callback("input_received", "failed", {"error": "invalid_type"})
             await update.message.reply_text(
                 f"❌ Invalid file type. Allowed: .md, .txt, .text"
             )
@@ -3167,13 +3195,24 @@ async def create_project_from_file(
             try:
                 content = file_content.decode("latin-1")
             except Exception:
+                await progress_callback("input_received", "failed", {"error": "decode_error"})
                 await update.message.reply_text("❌ Could not decode file content")
                 return
 
         # Check minimum content
         if len(content.strip()) < 20:
+            await progress_callback("input_received", "failed", {"error": "too_short"})
             await update.message.reply_text("❌ File content too short. Minimum: 20 characters")
             return
+
+        await progress_callback("input_received", "completed", {"size": len(content)})
+        await progress_callback("parsing", "in_progress", None)
+
+        # Short delay for visual feedback
+        await asyncio.sleep(0.3)
+        await progress_callback("validating", "in_progress", None)
+        await asyncio.sleep(0.3)
+        await progress_callback("creating_project", "in_progress", None)
 
         # Use controller API with file content as requirements
         # The first 500 chars as description, full content as requirements
@@ -3185,6 +3224,7 @@ async def create_project_from_file(
         )
 
         if not result.get("success", False):
+            await progress_callback("creating_project", "failed", None)
             error_msg = result.get("error", "Unknown error")
             await update.message.reply_text(
                 f"❌ *Error Creating Project*\n\n{error_msg}",
@@ -3192,17 +3232,35 @@ async def create_project_from_file(
             )
             return
 
+        # Show remaining progress steps
+        await progress_callback("creating_lifecycles", "in_progress", None)
+        await asyncio.sleep(0.2)
+        await progress_callback("scheduling_planning", "in_progress", None)
+        await asyncio.sleep(0.2)
+        await progress_callback("completed", "completed", None)
+
         # Success
         project_name = result.get("project_name", "Unknown")
-        aspects = result.get("aspects", [])
+        # Phase 19 fix: API returns aspects_initialized, not aspects
+        aspects = result.get("aspects_initialized", result.get("aspects", []))
+        next_steps = result.get("next_steps", [])
 
-        await update.message.reply_text(
+        # Build response message
+        aspects_str = ", ".join(aspects) if aspects else "None detected"
+        next_steps_str = "\n".join(f"  • {s}" for s in next_steps[:3]) if next_steps else ""
+
+        response_text = (
             f"🎉 *Project Created from File!*\n\n"
             f"*Name:* `{project_name}`\n"
-            f"*Aspects:* {', '.join(aspects)}\n\n"
-            f"Use /dashboard to view all projects.",
-            parse_mode="Markdown"
+            f"*Aspects:* {aspects_str}\n"
         )
+
+        if next_steps_str:
+            response_text += f"\n*Next Steps:*\n{next_steps_str}\n"
+
+        response_text += f"\nUse /dashboard to view all projects."
+
+        await update.message.reply_text(response_text, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Error creating project from file: {e}", exc_info=True)

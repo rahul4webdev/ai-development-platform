@@ -46,6 +46,17 @@ except ImportError:
     LIFECYCLE_AVAILABLE = False
     logger.warning("lifecycle_v2 module not available")
 
+# Try to import Claude backend for job scheduling (Phase 19 fix)
+try:
+    from controller.claude_backend import (
+        create_job as create_claude_job,
+        JobPriority,
+    )
+    CLAUDE_BACKEND_AVAILABLE = True
+except ImportError:
+    CLAUDE_BACKEND_AVAILABLE = False
+    logger.warning("claude_backend module not available - autonomous planning disabled")
+
 
 # -----------------------------------------------------------------------------
 # Progress Callback Types
@@ -300,20 +311,44 @@ class ProjectService:
                     ProjectStatus.PLANNING.value,
                 )
 
-            # Step 6: Completion
+            # Step 6: Schedule Claude planning job (Phase 19 fix - THIS WAS MISSING!)
+            if progress_callback:
+                await progress_callback("scheduling_planning", "in_progress", None)
+
+            job_ids = await self._schedule_planning_jobs(
+                project=project,
+                requirements_raw=requirements_raw,
+                user_id=user_id,
+            )
+            result["job_ids"] = job_ids
+
+            if progress_callback:
+                await progress_callback("scheduling_planning", "completed", {
+                    "job_ids": job_ids,
+                })
+
+            # Step 7: Completion
             if progress_callback:
                 await progress_callback("completed", "completed", {
                     "project_name": project.name,
                     "aspects": list(project.aspects.keys()),
+                    "jobs_scheduled": len(job_ids),
                 })
 
             result["success"] = True
-            result["next_steps"] = [
-                "Claude is analyzing your requirements",
-                "Planning phase will begin automatically",
-                "You will be notified when review is needed",
-                "Use /project_status to check progress",
-            ]
+            if job_ids:
+                result["next_steps"] = [
+                    f"Claude planning job scheduled (job ID: {job_ids[0][:8]}...)",
+                    "Planning phase has begun automatically",
+                    "You will be notified when review is needed",
+                    "Use /project_status to check progress",
+                ]
+            else:
+                result["next_steps"] = [
+                    "Project created but Claude backend unavailable",
+                    "Manual planning may be required",
+                    "Use /project_status to check progress",
+                ]
 
             logger.info(f"Project created successfully: {project.name}")
             return result
@@ -398,6 +433,84 @@ class ProjectService:
         }
 
         return mapping.get(aspect_name.lower())
+
+    async def _schedule_planning_jobs(
+        self,
+        project: Project,
+        requirements_raw: str,
+        user_id: str,
+    ) -> List[str]:
+        """
+        Schedule Claude planning job(s) for the project.
+
+        Phase 19 fix: THIS WAS THE MISSING PIECE!
+        Previously, project creation only set state to PLANNING but never
+        actually scheduled a Claude job to do the planning work.
+
+        Creates a planning job with HIGH priority to analyze requirements
+        and generate the implementation plan.
+        """
+        job_ids = []
+
+        if not CLAUDE_BACKEND_AVAILABLE:
+            logger.warning("Claude backend not available - cannot schedule planning jobs")
+            return job_ids
+
+        try:
+            # Create planning job description from requirements
+            task_description = f"""PLANNING PHASE - Analyze Requirements and Create Implementation Plan
+
+PROJECT: {project.name}
+ASPECTS: {', '.join(project.aspects.keys())}
+TECH STACK: {project.tech_stack}
+
+REQUIREMENTS:
+{requirements_raw[:2000]}
+
+YOUR TASK:
+1. Analyze the project requirements thoroughly
+2. Identify key features, components, and dependencies
+3. Create a detailed implementation plan for each aspect
+4. Estimate complexity and potential risks
+5. Define the file structure and architecture
+6. Output a structured plan in YAML format
+
+IMPORTANT:
+- Read all governance documents (AI_POLICY.md, ARCHITECTURE.md)
+- Follow the project's coding standards
+- Identify any clarifications needed before development
+- Be conservative with scope - focus on MVP features first
+
+OUTPUT FORMAT:
+Create a PLANNING_OUTPUT.yaml file with:
+- features: list of features to implement
+- architecture: proposed architecture decisions
+- file_structure: proposed file/folder structure
+- risks: identified risks and mitigations
+- questions: any questions for clarification
+- estimated_phases: breakdown of development phases
+"""
+
+            # Create job with HIGH priority (planning is critical path)
+            job = await create_claude_job(
+                project_name=project.name,
+                task_description=task_description,
+                task_type="planning",
+                created_by=user_id,
+                priority=JobPriority.HIGH.value,
+                aspect="core",  # Planning always goes to core
+                lifecycle_state="planning",
+                requested_action="write_code",  # Planning outputs files
+                user_role="owner",  # Owner-level permissions for planning
+            )
+
+            job_ids.append(job.job_id)
+            logger.info(f"Scheduled planning job {job.job_id} for project {project.name}")
+
+        except Exception as e:
+            logger.error(f"Error scheduling planning job: {e}", exc_info=True)
+
+        return job_ids
 
     def _generate_safe_name(self, description: str) -> str:
         """

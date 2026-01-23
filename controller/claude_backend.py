@@ -75,6 +75,13 @@ REQUIRED_DOCS = [
     "TESTING_STRATEGY.md",
 ]
 
+# Phase 19 fix: Claude availability cache to prevent sporadic timeout issues
+# The execution test can occasionally timeout due to CLI initialization delays
+# Cache successful results for 5 minutes to avoid repeated slow checks
+_claude_availability_cache: Optional[Dict[str, Any]] = None
+_claude_availability_cache_time: Optional[datetime] = None
+CLAUDE_AVAILABILITY_CACHE_TTL_SECONDS = 300  # 5 minutes
+
 
 # -----------------------------------------------------------------------------
 # Job State Management (Phase 14.10 Extended)
@@ -1653,6 +1660,7 @@ async def check_claude_availability() -> Dict[str, Any]:
     Check if Claude CLI is available, authenticated, AND can execute prompts.
 
     Phase 15.7: Updated to perform REAL execution test.
+    Phase 19 fix: Added caching to prevent sporadic timeout issues.
 
     CRITICAL DISTINCTION:
     - `claude --version` only checks if CLI binary is installed
@@ -1677,6 +1685,19 @@ async def check_claude_availability() -> Dict[str, Any]:
     - error: str or None
     - execution_test_output: str or None (output from real test)
     """
+    global _claude_availability_cache, _claude_availability_cache_time
+
+    # Phase 19 fix: Return cached result if available and still valid
+    # This prevents sporadic timeout issues from causing /health to show CLI as unavailable
+    if _claude_availability_cache and _claude_availability_cache_time:
+        cache_age = (datetime.utcnow() - _claude_availability_cache_time).total_seconds()
+        if cache_age < CLAUDE_AVAILABILITY_CACHE_TTL_SECONDS:
+            # Only return cached result if it was successful
+            # If cached result shows unavailable, we should recheck
+            if _claude_availability_cache.get("available"):
+                logger.debug(f"Returning cached Claude availability (age: {cache_age:.1f}s)")
+                return _claude_availability_cache.copy()
+
     result = {
         "available": False,
         "installed": False,
@@ -1703,7 +1724,7 @@ async def check_claude_availability() -> Dict[str, Any]:
         try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=5  # Short timeout for version check
+                timeout=15  # Phase 19 fix: Increased from 5s to 15s to handle CLI initialization
             )
         except asyncio.TimeoutError:
             # Kill subprocess on timeout
@@ -1713,7 +1734,7 @@ async def check_claude_availability() -> Dict[str, Any]:
             except Exception:
                 pass
             result["error"] = "Claude CLI version check timed out"
-            logger.warning("Claude CLI --version timed out - subprocess killed")
+            logger.warning("Claude CLI --version timed out after 15s - subprocess killed")
             return result
 
         if process.returncode == 0:
@@ -1793,6 +1814,12 @@ async def check_claude_availability() -> Dict[str, Any]:
                 f"Claude CLI VERIFIED EXECUTABLE: version={result['version']}, "
                 f"auth_type={result['auth_type']}"
             )
+
+            # Phase 19 fix: Cache successful result to prevent sporadic timeout issues
+            _claude_availability_cache = result.copy()
+            _claude_availability_cache_time = datetime.utcnow()
+            logger.debug("Cached Claude availability result")
+
             return result
 
         # Execution failed - parse the error

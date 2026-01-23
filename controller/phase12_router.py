@@ -243,6 +243,7 @@ async def create_project_from_natural_language(
             # If conflict detected, return for user resolution
             if decision.requires_user_confirmation:
                 return CreateProjectResponse(
+                    success=False,  # Phase 19 fix: Mark as not successful for bot
                     project_name=project_name,
                     contract_id=None,
                     aspects_initialized=[],
@@ -259,6 +260,7 @@ async def create_project_from_natural_language(
             if decision.decision == DecisionType.CHANGE_MODE:
                 # Redirect to change mode on existing project
                 return CreateProjectResponse(
+                    success=False,  # Phase 19 fix: Mark as not successful
                     project_name=decision.existing_project_name,
                     contract_id=None,
                     aspects_initialized=[],
@@ -350,6 +352,7 @@ async def create_project_from_natural_language(
         logger.info(f"Created project: {project_name} with all aspects initialized")
 
         return CreateProjectResponse(
+            success=True,  # Phase 19 fix: Explicit success for bot compatibility
             project_name=project_name,
             contract_id=ipc.contract_id,
             aspects_initialized=[a.value for a in ProjectAspect],

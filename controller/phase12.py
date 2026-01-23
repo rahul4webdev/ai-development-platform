@@ -422,11 +422,13 @@ class CreateProjectRequest(BaseModel):
 
 class CreateProjectResponse(BaseModel):
     """Response for project creation."""
+    success: bool = True  # Phase 19 fix: Added for bot compatibility
     project_name: str
-    contract_id: str
-    aspects_initialized: List[str]
-    next_steps: List[str]
-    message: str
+    contract_id: Optional[str] = None  # May be None for conflict responses
+    aspects_initialized: List[str] = []
+    next_steps: List[str] = []
+    message: str = ""
+    metadata: Optional[Dict[str, Any]] = None  # For conflict details etc.
 
 
 class SubmitFeedbackRequest(BaseModel):
