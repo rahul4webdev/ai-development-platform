@@ -3032,21 +3032,13 @@ async def create_project_from_description(
         except ImportError as e:
             logger.warning(f"Decision engine not available: {e}")
 
-        # Try new ProjectService first (Phase 16C)
-        try:
-            from controller.project_service import create_project_from_text
-            result = await create_project_from_text(
-                description=description,
-                user_id=user_id,
-                progress_callback=progress_callback,
-            )
-        except ImportError:
-            # Fallback to legacy controller
-            logger.warning("ProjectService not available, using legacy controller")
-            result = await controller.create_project(
-                description=description,
-                user_id=user_id
-            )
+        # Phase 19 fix: Use controller API for project creation
+        # This ensures the controller's registry singleton is the single source of truth
+        # The bot should NOT directly import project_service to avoid registry split-brain
+        result = await controller.create_project(
+            description=description,
+            user_id=user_id
+        )
 
         if not result.get("success", False) and "error" in result:
             error_msg = result.get("error", "Unknown error")
@@ -3157,20 +3149,40 @@ async def create_project_from_file(
     try:
         logger.info(f"Creating project from file: {filename}")
 
-        try:
-            from controller.project_service import create_project_from_file as service_create_from_file
-            result = await service_create_from_file(
-                filename=filename,
-                file_content=file_content,
-                user_id=user_id,
-                progress_callback=progress_callback,
-            )
-        except ImportError:
+        # Phase 19 fix: Use controller API for project creation
+        # This ensures the controller's registry singleton is the single source of truth
+
+        # Validate file extension
+        ext = "." + filename.split(".")[-1].lower() if "." in filename else ""
+        if ext not in [".md", ".txt", ".text"]:
             await update.message.reply_text(
-                "❌ File-based project creation is not available.\n"
-                "Please describe your project with /new_project instead."
+                f"❌ Invalid file type. Allowed: .md, .txt, .text"
             )
             return
+
+        # Decode file content
+        try:
+            content = file_content.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                content = file_content.decode("latin-1")
+            except Exception:
+                await update.message.reply_text("❌ Could not decode file content")
+                return
+
+        # Check minimum content
+        if len(content.strip()) < 20:
+            await update.message.reply_text("❌ File content too short. Minimum: 20 characters")
+            return
+
+        # Use controller API with file content as requirements
+        # The first 500 chars as description, full content as requirements
+        # The CHD validator will extract project_name from the requirements
+        result = await controller.create_project(
+            description=content[:500],
+            user_id=user_id,
+            requirements=[content]  # Pass full content so CHD can extract project_name
+        )
 
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")

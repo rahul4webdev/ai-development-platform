@@ -192,9 +192,12 @@ async def create_project_from_natural_language(
     """
     try:
         # Phase 16C: Validate requirements first
+        validation = None
         try:
             from controller.chd_validator import validate_requirements
-            validation = validate_requirements(request.description)
+            # Validate with both description and requirements for full CHD extraction
+            requirements_text = "\n".join(request.requirements) if request.requirements else None
+            validation = validate_requirements(request.description, requirements_text)
             if not validation.is_valid:
                 raise HTTPException(
                     status_code=400,
@@ -207,8 +210,14 @@ async def create_project_from_natural_language(
         except ImportError:
             logger.warning("CHD validator not available, skipping validation")
 
-        # Normalize project name from description
-        project_name = _normalize_project_name(request.description)
+        # Phase 19 fix: Use CHD-extracted project_name if available
+        # This ensures file-based projects get the name from the CHD document
+        if validation and validation.extracted_project_name:
+            project_name = validation.extracted_project_name
+            logger.info(f"Using CHD-extracted project_name: {project_name}")
+        else:
+            # Fallback to normalizing from description
+            project_name = _normalize_project_name(request.description)
 
         # Phase 16E: Run decision engine BEFORE any writes
         try:
