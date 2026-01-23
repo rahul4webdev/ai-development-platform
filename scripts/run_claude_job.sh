@@ -127,11 +127,21 @@ if [[ ! -f "$TASK_FILE" ]]; then
     exit 3
 fi
 
-# Check API key is configured
-if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-    log_error "ANTHROPIC_API_KEY is not configured"
-    log_error "Please add your API key to $ENV_FILE"
+# Check authentication is configured (API key or OAuth)
+# Claude CLI can authenticate via:
+# 1. ANTHROPIC_API_KEY environment variable
+# 2. OAuth tokens from 'claude setup-token' (stored in ~/.claude/.credentials.json)
+OAUTH_CREDS="${HOME}/.claude/.credentials.json"
+if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && [[ ! -f "$OAUTH_CREDS" ]]; then
+    log_error "No authentication configured"
+    log_error "Either set ANTHROPIC_API_KEY in $ENV_FILE or run 'claude setup-token'"
     exit 5
+fi
+
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    log_info "Using API key authentication"
+elif [[ -f "$OAUTH_CREDS" ]]; then
+    log_info "Using OAuth token authentication"
 fi
 
 # Check and copy required documents
