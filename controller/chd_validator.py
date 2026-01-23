@@ -78,6 +78,9 @@ class ValidationResult:
     extracted_tech: Dict[str, str] = field(default_factory=dict)
     extracted_database: Optional[str] = None
     suggestions: List[str] = field(default_factory=list)
+    # Phase 19 fix: CHD project_name takes precedence
+    extracted_project_name: Optional[str] = None
+    extracted_description: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -88,6 +91,8 @@ class ValidationResult:
             "extracted_tech": self.extracted_tech,
             "extracted_database": self.extracted_database,
             "suggestions": self.suggestions,
+            "extracted_project_name": self.extracted_project_name,
+            "extracted_description": self.extracted_description,
         }
 
     def get_user_message(self) -> str:
@@ -132,7 +137,13 @@ class CHDValidator:
         Returns ValidationResult with errors/warnings.
         """
         result = ValidationResult(is_valid=True)
-        content = f"{description} {requirements or ''}".lower()
+
+        # Use raw content (not lowercased) for project_name extraction
+        raw_content = f"{description} {requirements or ''}"
+        content = raw_content.lower()
+
+        # 0. Extract project_name from CHD (TAKES PRECEDENCE - Phase 19 fix)
+        self._extract_project_name(raw_content, result)
 
         # 1. Check for at least one aspect
         self._validate_aspects(content, result)
@@ -153,6 +164,48 @@ class CHDValidator:
         result.is_valid = len(result.errors) == 0
 
         return result
+
+    def _extract_project_name(self, content: str, result: ValidationResult) -> None:
+        """
+        Extract project_name from CHD content.
+
+        CRITICAL: CHD project_name is the SINGLE source of truth.
+        NO fallback to inferred text, system prompts, or descriptions.
+
+        Supported formats:
+        - project_name: my-project
+        - project_name: "my project"
+        - name: my-project (YAML style)
+        """
+        # Pattern 1: project_name: "quoted value" or 'quoted value'
+        pattern_quoted = r'project_name:\s*["\']([^"\']+)["\']'
+        match = re.search(pattern_quoted, content, re.IGNORECASE)
+        if match:
+            result.extracted_project_name = match.group(1).strip()
+            logger.info(f"Extracted quoted project_name from CHD: {result.extracted_project_name}")
+            return
+
+        # Pattern 2: project_name: unquoted-value (single token, no spaces)
+        # Matches: project_name: my-project-name
+        # Stops at: whitespace, newline, or non-name characters
+        pattern_unquoted = r'project_name:\s*([a-zA-Z0-9][a-zA-Z0-9_-]*)'
+        match = re.search(pattern_unquoted, content, re.IGNORECASE)
+        if match:
+            result.extracted_project_name = match.group(1).strip()
+            logger.info(f"Extracted unquoted project_name from CHD: {result.extracted_project_name}")
+            return
+
+        # Pattern 3: name: value at start of line (YAML style)
+        pattern_name = r'^name:\s*["\']?([a-zA-Z0-9][a-zA-Z0-9_-]*)["\']?'
+        match = re.search(pattern_name, content, re.IGNORECASE | re.MULTILINE)
+        if match:
+            result.extracted_project_name = match.group(1).strip()
+            logger.info(f"Extracted name from CHD: {result.extracted_project_name}")
+            return
+
+        # NO FALLBACK - if project_name not found, leave it None
+        # The service layer will handle this appropriately
+        logger.warning("No project_name found in CHD content")
 
     def _validate_aspects(self, content: str, result: ValidationResult) -> None:
         """Ensure at least one buildable aspect is defined."""

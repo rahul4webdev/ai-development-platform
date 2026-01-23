@@ -186,6 +186,9 @@ class ProjectService:
         2. Create project in registry
         3. Create lifecycle instances
         4. Schedule planning job
+
+        CRITICAL (Phase 19 fix): project_name from CHD takes ABSOLUTE precedence.
+        NO fallback to inferred text, system prompts, or descriptions.
         """
         result = {
             "success": False,
@@ -228,9 +231,23 @@ class ProjectService:
             if progress_callback:
                 await progress_callback("creating_project", "in_progress", None)
 
+            # CRITICAL (Phase 19 fix): Use CHD project_name if available
+            # For file-based projects, CHD project_name is the SINGLE source of truth
+            # For text-based projects, generate a safe name from description
+            if requirements_source == "file" and validation.extracted_project_name:
+                # CHD project_name takes ABSOLUTE precedence
+                project_name = validation.extracted_project_name
+                project_description = validation.extracted_description or description[:500]
+                logger.info(f"Using CHD project_name: {project_name}")
+            else:
+                # Text-based input: generate safe name from description
+                project_name = self._generate_safe_name(description)
+                project_description = description[:500]
+                logger.info(f"Generated project name from description: {project_name}")
+
             success, message, project = self._registry.create_project(
-                name=description,
-                description=description,
+                name=project_name,
+                description=project_description,
                 created_by=user_id,
                 requirements_raw=requirements_raw,
                 requirements_source=requirements_source,
@@ -381,6 +398,46 @@ class ProjectService:
         }
 
         return mapping.get(aspect_name.lower())
+
+    def _generate_safe_name(self, description: str) -> str:
+        """
+        Generate a safe project name from description.
+
+        Used ONLY for text-based input where no CHD project_name exists.
+        For file-based input, CHD project_name takes absolute precedence.
+        """
+        import re
+
+        # Extract first meaningful line or phrase
+        first_line = description.strip().split('\n')[0][:100]
+
+        # Remove common prefixes that aren't project names
+        prefixes_to_remove = [
+            r'^build\s+(a\s+)?',
+            r'^create\s+(a\s+)?',
+            r'^make\s+(a\s+)?',
+            r'^develop\s+(a\s+)?',
+            r'^i\s+want\s+(a\s+)?',
+            r'^i\s+need\s+(a\s+)?',
+        ]
+        cleaned = first_line.lower()
+        for prefix in prefixes_to_remove:
+            cleaned = re.sub(prefix, '', cleaned, flags=re.IGNORECASE)
+
+        # Extract words and create slug
+        words = re.findall(r'[a-zA-Z0-9]+', cleaned)
+        if not words:
+            return f"project-{uuid.uuid4().hex[:8]}"
+
+        # Take first 4 meaningful words
+        name_words = words[:4]
+        name = '-'.join(name_words)
+
+        # Ensure reasonable length
+        if len(name) > 50:
+            name = name[:50].rsplit('-', 1)[0]
+
+        return name or f"project-{uuid.uuid4().hex[:8]}"
 
 
 # -----------------------------------------------------------------------------
