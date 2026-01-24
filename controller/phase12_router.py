@@ -44,6 +44,16 @@ from .phase12 import (
 
 from .lifecycle_engine import get_lifecycle_engine, LifecycleEngine
 
+# Phase 19 fix: Import Claude backend for autonomous planning job scheduling
+try:
+    from .claude_backend import (
+        create_job as create_claude_job,
+        JobPriority,
+    )
+    CLAUDE_BACKEND_AVAILABLE = True
+except ImportError:
+    CLAUDE_BACKEND_AVAILABLE = False
+
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
@@ -351,17 +361,81 @@ async def create_project_from_natural_language(
 
         logger.info(f"Created project: {project_name} with all aspects initialized")
 
+        # Phase 19 fix: Schedule Claude planning job (THIS WAS THE MISSING PIECE!)
+        job_id = None
+        if CLAUDE_BACKEND_AVAILABLE:
+            try:
+                requirements_raw = "\n".join(request.requirements) if request.requirements else request.description
+                task_description = f"""PLANNING PHASE - Analyze Requirements and Create Implementation Plan
+
+PROJECT: {project_name}
+ASPECTS: {', '.join([a.value for a in ProjectAspect])}
+
+REQUIREMENTS:
+{requirements_raw[:3000]}
+
+YOUR TASK:
+1. Analyze the project requirements thoroughly
+2. Identify key features, components, and dependencies
+3. Create a detailed implementation plan for each aspect
+4. Estimate complexity and potential risks
+5. Define the file structure and architecture
+6. Output a structured plan in YAML format
+
+IMPORTANT:
+- Read all governance documents (AI_POLICY.md, ARCHITECTURE.md)
+- Follow the project's coding standards
+- Identify any clarifications needed before development
+- Be conservative with scope - focus on MVP features first
+
+OUTPUT FORMAT:
+Create a PLANNING_OUTPUT.yaml file with:
+- features: list of features to implement
+- architecture: proposed architecture decisions
+- file_structure: proposed file/folder structure
+- risks: identified risks and mitigations
+- questions: any questions for clarification
+- estimated_phases: breakdown of development phases
+"""
+                job = await create_claude_job(
+                    project_name=project_name,
+                    task_description=task_description,
+                    task_type="planning",
+                    created_by=request.user_id,
+                    priority=JobPriority.HIGH.value,
+                    aspect="core",
+                    lifecycle_state="planning",
+                    requested_action="write_code",
+                    user_role="owner",
+                )
+                job_id = job.job_id
+                logger.info(f"Scheduled planning job {job_id} for project {project_name}")
+            except Exception as e:
+                logger.error(f"Failed to schedule planning job: {e}", exc_info=True)
+        else:
+            logger.warning("Claude backend not available - planning job not scheduled")
+
+        # Build next_steps based on whether job was scheduled
+        if job_id:
+            next_steps = [
+                f"Claude planning job scheduled (job ID: {job_id[:8]}...)",
+                "Planning phase has begun automatically",
+                "You will be notified when review is needed",
+                "Use /project_status to check progress"
+            ]
+        else:
+            next_steps = [
+                "Project created but Claude backend unavailable",
+                "Manual planning may be required",
+                "Use /project_status to check progress"
+            ]
+
         return CreateProjectResponse(
             success=True,  # Phase 19 fix: Explicit success for bot compatibility
             project_name=project_name,
             contract_id=ipc.contract_id,
             aspects_initialized=[a.value for a in ProjectAspect],
-            next_steps=[
-                "Autonomous planning will begin",
-                "Development will proceed automatically",
-                "You will be notified when testing is ready",
-                "Approval required before production deployment"
-            ],
+            next_steps=next_steps,
             message=f"Project '{project_name}' created successfully. Autonomous development starting."
         )
 
