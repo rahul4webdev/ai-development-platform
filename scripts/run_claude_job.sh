@@ -214,12 +214,15 @@ STDOUT_FILE="$WORKING_DIR/logs/stdout.log"
 STDERR_FILE="$WORKING_DIR/logs/stderr.log"
 
 # Execute with timeout
+# Phase 19 fix: Use --permission-mode acceptEdits instead of --dangerously-skip-permissions
+# The --dangerously-skip-permissions flag causes Claude CLI to crash (core dump)
+# The --permission-mode acceptEdits allows file writes in automation without crashing
 set +e
 timeout "$CLAUDE_TIMEOUT" claude \
     --print \
     --output-format json \
     --max-turns "$CLAUDE_MAX_TURNS" \
-    --dangerously-skip-permissions \
+    --permission-mode acceptEdits \
     --append-system-prompt "$SYSTEM_PROMPT" \
     "Read TASK.md and execute the task following all policy documents." \
     > "$STDOUT_FILE" 2> "$STDERR_FILE"
