@@ -135,12 +135,44 @@ def extract_api_error(result: dict) -> str:
     {
         "error": "simple string message"
     }
+    or for conflict detection (Phase 16E):
+    {
+        "success": false,
+        "message": "Conflict detected...",
+        "metadata": {
+            "conflict_detected": true,
+            "decision": {"explanation": "...", ...}
+        }
+    }
     """
     if not result:
         return "Unknown error"
 
+    # Phase 16E: Check for conflict detection response (no error field)
+    metadata = result.get("metadata", {})
+    if metadata.get("conflict_detected"):
+        decision = metadata.get("decision", {})
+        explanation = decision.get("explanation", "")
+        if explanation:
+            return explanation
+        # Fallback to message field
+        message = result.get("message", "")
+        if message:
+            return message
+
+    # Check for redirect to change mode
+    if metadata.get("redirect_to_change_mode"):
+        existing = metadata.get("existing_project", "")
+        message = result.get("message", "")
+        if message:
+            return f"{message} (existing project: {existing})"
+
     error = result.get("error")
     if not error:
+        # No error field - check for message field
+        message = result.get("message", "")
+        if message and "conflict" in message.lower():
+            return message
         return "Unknown error"
 
     # If error is a simple string
@@ -3276,6 +3308,9 @@ async def create_project_from_file(
 
         if not result.get("success", False):
             await progress_callback("creating_project", "failed", None)
+            # Log full result for debugging conflict detection
+            metadata = result.get("metadata", {})
+            logger.info(f"Project creation failed - metadata: {metadata}, message: {result.get('message')}")
             error_msg = extract_api_error(result)
             logger.info(f"Extracted error message: {error_msg}")
             safe_error = escape_markdown(error_msg)
