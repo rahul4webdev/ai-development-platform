@@ -120,6 +120,50 @@ def escape_markdown(text: str) -> str:
     return text
 
 
+def extract_api_error(result: dict) -> str:
+    """
+    Extract a human-readable error message from API response.
+
+    API returns errors in format:
+    {
+        "error": {
+            "code": "HTTP_400",
+            "message": {"error": "...", "errors": [...], "suggestions": [...]}
+        }
+    }
+    or
+    {
+        "error": "simple string message"
+    }
+    """
+    if not result:
+        return "Unknown error"
+
+    error = result.get("error")
+    if not error:
+        return "Unknown error"
+
+    # If error is a simple string
+    if isinstance(error, str):
+        return error
+
+    # If error is a dict (structured API response)
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str):
+            return message
+        if isinstance(message, dict):
+            # Extract the main error and any sub-errors
+            main_error = message.get("error", "")
+            errors = message.get("errors", [])
+            if errors:
+                return f"{main_error}: {'; '.join(errors)}"
+            return main_error or "Unknown error"
+        return str(error.get("code", "Unknown error"))
+
+    return str(error)
+
+
 # -----------------------------------------------------------------------------
 # Phase 13.4: Role System
 # -----------------------------------------------------------------------------
@@ -3063,16 +3107,18 @@ async def create_project_from_description(
         )
 
         if not result.get("success", False) and "error" in result:
-            error_msg = result.get("error", "Unknown error")
+            error_msg = extract_api_error(result)
             validation = result.get("validation_result", {})
 
-            error_lines = [f"*Error Creating Project*", "", f"❌ {error_msg}"]
+            # Escape all dynamic content to prevent Markdown parsing errors
+            safe_error_msg = escape_markdown(error_msg)
+            error_lines = [f"*Error Creating Project*", "", f"❌ {safe_error_msg}"]
 
             if validation.get("suggestions"):
                 error_lines.append("")
                 error_lines.append("*Suggestions:*")
                 for suggestion in validation.get("suggestions", []):
-                    error_lines.append(f"  • {suggestion}")
+                    error_lines.append(f"  • {escape_markdown(suggestion)}")
 
             await update.message.reply_text("\n".join(error_lines), parse_mode="Markdown")
             return
@@ -3083,13 +3129,16 @@ async def create_project_from_description(
         aspects = result.get("aspects", result.get("aspects_initialized", []))
         next_steps = result.get("next_steps", [])
 
-        aspects_list = "\n".join(f"  • {a}" for a in aspects) if aspects else "  • None"
-        next_steps_list = "\n".join(f"  • {s}" for s in next_steps) if next_steps else ""
+        # Escape all dynamic content to prevent Markdown parsing errors
+        safe_project_name = escape_markdown(project_name)
+        safe_project_id = escape_markdown(project_id[:8])
+        aspects_list = "\n".join(f"  • {escape_markdown(a)}" for a in aspects) if aspects else "  • None"
+        next_steps_list = "\n".join(f"  • {escape_markdown(s)}" for s in next_steps) if next_steps else ""
 
         success_text = (
             f"🎉 *Project Created Successfully!*\n\n"
-            f"*Name:* `{project_name}`\n"
-            f"*ID:* `{project_id[:8]}...`\n\n"
+            f"*Name:* `{safe_project_name}`\n"
+            f"*ID:* `{safe_project_id}...`\n\n"
             f"*Aspects:*\n{aspects_list}\n"
         )
 
@@ -3102,11 +3151,11 @@ async def create_project_from_description(
 
     except Exception as e:
         logger.error(f"Error in create_project_from_description: {e}", exc_info=True)
+        # Don't use Markdown in error message to avoid parsing issues with dynamic content
         await update.message.reply_text(
-            f"❌ *Error creating project*\n\n"
+            f"❌ Error creating project\n\n"
             f"An unexpected error occurred: {str(e)}\n\n"
-            f"Please try again or contact support.",
-            parse_mode="Markdown"
+            f"Please try again or contact support."
         )
 
 
@@ -3217,17 +3266,21 @@ async def create_project_from_file(
         # Use controller API with file content as requirements
         # The first 500 chars as description, full content as requirements
         # The CHD validator will extract project_name from the requirements
+        logger.info(f"Calling controller.create_project with description length={len(content[:500])}, user_id={user_id}")
         result = await controller.create_project(
             description=content[:500],
             user_id=user_id,
             requirements=[content]  # Pass full content so CHD can extract project_name
         )
+        logger.info(f"Controller response: success={result.get('success')}, has_error={'error' in result}, result_keys={list(result.keys())}")
 
         if not result.get("success", False):
             await progress_callback("creating_project", "failed", None)
-            error_msg = result.get("error", "Unknown error")
+            error_msg = extract_api_error(result)
+            logger.info(f"Extracted error message: {error_msg}")
+            safe_error = escape_markdown(error_msg)
             await update.message.reply_text(
-                f"❌ *Error Creating Project*\n\n{error_msg}",
+                f"❌ *Error Creating Project*\n\n{safe_error}",
                 parse_mode="Markdown"
             )
             return
@@ -3247,12 +3300,16 @@ async def create_project_from_file(
 
         # Build response message
         aspects_str = ", ".join(aspects) if aspects else "None detected"
-        next_steps_str = "\n".join(f"  • {s}" for s in next_steps[:3]) if next_steps else ""
+        next_steps_str = "\n".join(f"  • {escape_markdown(s)}" for s in next_steps[:3]) if next_steps else ""
+
+        # Escape all dynamic content to prevent Markdown parsing errors
+        safe_project_name = escape_markdown(project_name)
+        safe_aspects_str = escape_markdown(aspects_str)
 
         response_text = (
             f"🎉 *Project Created from File!*\n\n"
-            f"*Name:* `{project_name}`\n"
-            f"*Aspects:* {aspects_str}\n"
+            f"*Name:* `{safe_project_name}`\n"
+            f"*Aspects:* {safe_aspects_str}\n"
         )
 
         if next_steps_str:
@@ -3264,9 +3321,9 @@ async def create_project_from_file(
 
     except Exception as e:
         logger.error(f"Error creating project from file: {e}", exc_info=True)
+        # Don't use Markdown in error message to avoid parsing issues
         await update.message.reply_text(
-            f"❌ Error processing file: {str(e)}",
-            parse_mode="Markdown"
+            f"❌ Error processing file: {str(e)}"
         )
 
 
