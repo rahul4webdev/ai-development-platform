@@ -6050,6 +6050,10 @@ async def job_monitor_task(application):
                 if not job_id:
                     continue
 
+                # Skip if this job is already in our completed set (from startup or previous processing)
+                if job_id in _completed_job_ids:
+                    continue
+
                 # Get tracking info for this job
                 job_tracking = _notified_jobs.get(job_id, {})
                 last_notified_state = job_tracking.get("state")
@@ -6057,10 +6061,6 @@ async def job_monitor_task(application):
 
                 # Skip if we already notified about this exact state
                 if last_notified_state == state:
-                    continue
-
-                # Skip if this job already completed (prevent re-processing on restart)
-                if job_id in _completed_job_ids and state == "completed":
                     continue
 
                 # Notify on completion or failure
@@ -6626,18 +6626,26 @@ def main():
         """Start background tasks after bot is initialized."""
         global _completed_job_ids, _notified_jobs
 
-        # Pre-populate completed jobs to prevent re-notification on restart
-        logger.info("Loading existing completed jobs...")
+        # Pre-populate all existing jobs to prevent re-notification on restart
+        logger.info("Loading existing jobs to skip re-notification...")
         try:
             result = await controller.list_claude_jobs(limit=100)
             jobs = result.get("jobs", [])
+            running_count = 0
+            completed_count = 0
             for job in jobs:
                 job_id = job.get("job_id")
                 state = job.get("state")
-                if job_id and state in ("completed", "failed"):
-                    _completed_job_ids.add(job_id)
-                    _notified_jobs[job_id] = {"state": state, "phase_triggered": True}
-            logger.info(f"Loaded {len(_completed_job_ids)} completed/failed jobs to skip")
+                if not job_id:
+                    continue
+                # Mark ALL existing jobs as already processed
+                _completed_job_ids.add(job_id)
+                _notified_jobs[job_id] = {"state": state, "phase_triggered": True}
+                if state in ("completed", "failed"):
+                    completed_count += 1
+                elif state == "running":
+                    running_count += 1
+            logger.info(f"Loaded {completed_count} completed/failed, {running_count} running jobs to skip")
         except Exception as e:
             logger.warning(f"Failed to load existing jobs: {e}")
 
