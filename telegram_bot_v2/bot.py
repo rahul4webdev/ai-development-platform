@@ -5911,7 +5911,7 @@ CI_MAX_AUTO_FIX_ATTEMPTS = 3
 
 
 async def send_notification(application, message: str, parse_mode: str = "Markdown"):
-    """Send notification to all owners."""
+    """Send notification to all owners with fallback for markdown errors."""
     for chat_id in NOTIFICATION_CHAT_IDS:
         try:
             await application.bot.send_message(
@@ -5921,7 +5921,21 @@ async def send_notification(application, message: str, parse_mode: str = "Markdo
             )
             logger.info(f"Notification sent to {chat_id}")
         except Exception as e:
-            logger.error(f"Failed to send notification to {chat_id}: {e}")
+            error_str = str(e)
+            # If markdown parsing fails, retry without parse mode
+            if "parse entities" in error_str.lower() or "parse_mode" in error_str.lower():
+                try:
+                    # Strip markdown and send as plain text
+                    plain_message = message.replace("*", "").replace("`", "").replace("_", "")
+                    await application.bot.send_message(
+                        chat_id=chat_id,
+                        text=plain_message
+                    )
+                    logger.info(f"Notification sent to {chat_id} (plain text fallback)")
+                except Exception as e2:
+                    logger.error(f"Failed to send notification to {chat_id} even in plain text: {e2}")
+            else:
+                logger.error(f"Failed to send notification to {chat_id}: {e}")
 
 
 async def job_monitor_task(application):
