@@ -696,9 +696,18 @@ class PersistentJobStore:
     async def save_job(self, job: ClaudeJob) -> None:
         """Save or update a job in persistent storage."""
         async with self._lock:
+            logger.debug(f"    save_job: Loading state...")
             state = await self._load_state()
+            logger.debug(f"    save_job: State loaded, type(state['jobs'])={type(state.get('jobs', 'MISSING'))}")
+
+            # Ensure jobs is a dict, not a list (fix corrupted state)
+            if not isinstance(state.get("jobs"), dict):
+                logger.warning(f"    save_job: FIXING corrupted state - jobs was {type(state.get('jobs'))}, resetting to dict")
+                state["jobs"] = {}
+
             state["jobs"][job.job_id] = job.to_dict()
             state["last_updated"] = datetime.utcnow().isoformat()
+            logger.debug(f"    save_job: Saving state...")
             await self._save_state(state)
             logger.debug(f"Persisted job {job.job_id} state: {job.state.value}")
 
@@ -752,13 +761,27 @@ class PersistentJobStore:
 
     async def _load_state(self) -> Dict[str, Any]:
         """Load state from file."""
+        default_state = {"jobs": {}, "created_at": datetime.utcnow().isoformat()}
+
         if not self._state_file.exists():
-            return {"jobs": {}, "created_at": datetime.utcnow().isoformat()}
+            return default_state
         try:
-            return json.loads(self._state_file.read_text())
+            state = json.loads(self._state_file.read_text())
+
+            # Ensure state has correct structure
+            if not isinstance(state, dict):
+                logger.warning(f"State file is not a dict (was {type(state)}), resetting")
+                return default_state
+
+            # Ensure jobs is a dict, not a list
+            if "jobs" not in state or not isinstance(state["jobs"], dict):
+                logger.warning(f"State jobs field missing or invalid (was {type(state.get('jobs'))}), resetting jobs")
+                state["jobs"] = {}
+
+            return state
         except (json.JSONDecodeError, IOError) as e:
             logger.error(f"Failed to load state file: {e}")
-            return {"jobs": {}, "created_at": datetime.utcnow().isoformat()}
+            return default_state
 
     async def _save_state(self, state: Dict[str, Any]) -> None:
         """Save state to file atomically."""
@@ -1148,14 +1171,29 @@ class MultiWorkerScheduler:
 
     async def enqueue_job(self, job: ClaudeJob) -> str:
         """Add a job to the queue."""
-        # Persist immediately
-        await persistent_store.save_job(job)
+        try:
+            # Step 1: Persist immediately
+            logger.debug(f"  enqueue_job Step 1: Persisting job {job.job_id}...")
+            await persistent_store.save_job(job)
+            logger.debug(f"  enqueue_job Step 1: DONE")
 
-        # Also add to in-memory queue for legacy compatibility
-        await job_queue.enqueue(job)
+            # Step 2: Also add to in-memory queue for legacy compatibility
+            logger.debug(f"  enqueue_job Step 2: Adding to in-memory queue...")
+            await job_queue.enqueue(job)
+            logger.debug(f"  enqueue_job Step 2: DONE")
 
-        logger.info(f"Job {job.job_id} enqueued (position: {await self._get_queue_position(job.job_id)})")
-        return job.job_id
+            # Step 3: Get queue position for logging
+            logger.debug(f"  enqueue_job Step 3: Getting queue position...")
+            position = await self._get_queue_position(job.job_id)
+            logger.debug(f"  enqueue_job Step 3: DONE (position={position})")
+
+            logger.info(f"Job {job.job_id} enqueued (position: {position})")
+            return job.job_id
+        except Exception as e:
+            logger.error(f"  enqueue_job FAILED at step: {e.__class__.__name__}: {e}")
+            import traceback
+            logger.error(f"  Traceback: {traceback.format_exc()}")
+            raise
 
     async def get_status(self) -> Dict[str, Any]:
         """
