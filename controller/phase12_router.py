@@ -200,15 +200,26 @@ async def create_project_from_natural_language(
     6. Initialize all aspects (Core, Backend, Frontend)
     7. Begin autonomous planning phase
     """
+    logger.info("=" * 60)
+    logger.info("PROJECT CREATION - START")
+    logger.info(f"  User ID: {request.user_id}")
+    logger.info(f"  Description length: {len(request.description)} chars")
+    logger.info(f"  Requirements count: {len(request.requirements) if request.requirements else 0}")
+    logger.info("=" * 60)
+
     try:
-        # Phase 16C: Validate requirements first
+        # STEP 1: Validate requirements (CHD layer)
+        logger.info("[STEP 1/7] CHD Validation - Starting...")
         validation = None
         try:
             from controller.chd_validator import validate_requirements
             # Validate with both description and requirements for full CHD extraction
             requirements_text = "\n".join(request.requirements) if request.requirements else None
+            logger.info(f"  Calling validate_requirements with desc={len(request.description)} chars, req={len(requirements_text) if requirements_text else 0} chars")
             validation = validate_requirements(request.description, requirements_text)
+            logger.info(f"  Validation result: is_valid={validation.is_valid}, errors={len(validation.errors)}, extracted_name={validation.extracted_project_name}")
             if not validation.is_valid:
+                logger.warning(f"  CHD validation FAILED: {validation.errors}")
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -217,19 +228,22 @@ async def create_project_from_natural_language(
                         "suggestions": validation.suggestions,
                     }
                 )
-        except ImportError:
-            logger.warning("CHD validator not available, skipping validation")
+            logger.info("[STEP 1/7] CHD Validation - PASSED")
+        except ImportError as e:
+            logger.warning(f"[STEP 1/7] CHD validator not available: {e}, skipping validation")
 
-        # Phase 19 fix: Use CHD-extracted project_name if available
-        # This ensures file-based projects get the name from the CHD document
+        # STEP 2: Extract project name
+        logger.info("[STEP 2/7] Project Name Extraction - Starting...")
         if validation and validation.extracted_project_name:
             project_name = validation.extracted_project_name
-            logger.info(f"Using CHD-extracted project_name: {project_name}")
+            logger.info(f"  Using CHD-extracted project_name: {project_name}")
         else:
-            # Fallback to normalizing from description
             project_name = _normalize_project_name(request.description)
+            logger.info(f"  Using normalized project_name: {project_name}")
+        logger.info("[STEP 2/7] Project Name Extraction - DONE")
 
-        # Phase 16E: Run decision engine BEFORE any writes
+        # STEP 3: Run decision engine for conflict detection
+        logger.info("[STEP 3/7] Decision Engine - Starting...")
         try:
             from controller.project_registry import get_registry
             from controller.project_decision_engine import (
@@ -239,38 +253,42 @@ async def create_project_from_natural_language(
 
             registry = get_registry()
             existing_identities = registry.get_all_identities()
+            logger.info(f"  Found {len(existing_identities)} existing project identities")
 
             # Evaluate for conflicts
             requirements_raw = "\n".join(request.requirements) if request.requirements else None
             decision = evaluate_project_creation(
                 description=request.description,
                 requirements=requirements_raw,
-                tech_stack=None,  # Could be parsed from description
-                aspects=None,  # Will be extracted
+                tech_stack=None,
+                aspects=None,
                 existing_identities=existing_identities,
             )
+            logger.info(f"  Decision: {decision.decision.value}, requires_confirmation={decision.requires_user_confirmation}")
+            logger.info(f"  Confidence: {decision.confidence}, conflict_type={decision.conflict_type.value}")
 
             # If conflict detected, return for user resolution
             if decision.requires_user_confirmation:
+                logger.warning(f"  CONFLICT DETECTED: {decision.explanation}")
+                logger.info("[STEP 3/7] Decision Engine - CONFLICT, returning to user")
                 return CreateProjectResponse(
-                    success=False,  # Phase 19 fix: Mark as not successful for bot
+                    success=False,
                     project_name=project_name,
                     contract_id=None,
                     aspects_initialized=[],
                     next_steps=[],
                     message="Conflict detected - user confirmation required",
-                    # Include decision details for client to handle
                     metadata={
                         "conflict_detected": True,
                         "decision": decision.to_dict(),
                     }
                 )
 
-            # If decision is not NEW_PROJECT, handle accordingly
+            # If decision is CHANGE_MODE
             if decision.decision == DecisionType.CHANGE_MODE:
-                # Redirect to change mode on existing project
+                logger.info(f"  CHANGE_MODE: Redirecting to existing project {decision.existing_project_name}")
                 return CreateProjectResponse(
-                    success=False,  # Phase 19 fix: Mark as not successful
+                    success=False,
                     project_name=decision.existing_project_name,
                     contract_id=None,
                     aspects_initialized=[],
@@ -282,8 +300,9 @@ async def create_project_from_natural_language(
                     }
                 )
 
+            # If decision is NEW_VERSION
             if decision.decision == DecisionType.NEW_VERSION:
-                # Create new version
+                logger.info(f"  NEW_VERSION: Creating new version of {decision.existing_project_name}")
                 existing_project = registry.get_project(decision.existing_project_name)
                 if existing_project:
                     success, message, project = registry.create_project_version(
@@ -294,25 +313,35 @@ async def create_project_from_natural_language(
                     )
                     if success:
                         project_name = project.name
+                        logger.info(f"  Created new version: {project_name}")
                     else:
+                        logger.error(f"  Failed to create version: {message}")
                         raise HTTPException(status_code=400, detail=message)
 
-        except ImportError as e:
-            logger.warning(f"Decision engine not available: {e}")
+            logger.info("[STEP 3/7] Decision Engine - PASSED (NEW_PROJECT)")
 
-        # Check if project already exists (legacy check)
-        if _load_ipc(project_name):
+        except ImportError as e:
+            logger.warning(f"[STEP 3/7] Decision engine not available: {e}")
+
+        # STEP 4: Legacy IPC check
+        logger.info("[STEP 4/7] Legacy IPC Check - Starting...")
+        existing_ipc = _load_ipc(project_name)
+        if existing_ipc:
+            logger.error(f"  Project '{project_name}' already exists as IPC file")
             raise HTTPException(
                 status_code=400,
                 detail=f"Project '{project_name}' already exists"
             )
+        logger.info("[STEP 4/7] Legacy IPC Check - PASSED (no existing IPC)")
 
-        # Phase 16E: Register in Project Registry with identity
+        # STEP 5: Register in Project Registry with identity
+        logger.info("[STEP 5/7] Registry Registration - Starting...")
         try:
             from controller.project_registry import get_registry
             registry = get_registry()
 
             # Use create_project_with_identity for fingerprint tracking
+            logger.info(f"  Calling registry.create_project_with_identity for '{project_name}'")
             success, message, project = registry.create_project_with_identity(
                 name=project_name,
                 description=request.description,
@@ -321,17 +350,22 @@ async def create_project_from_natural_language(
                 requirements_source="api",
             )
             if not success:
+                logger.error(f"  Registry registration FAILED: {message}")
                 raise HTTPException(status_code=400, detail=message)
-        except ImportError:
-            logger.warning("Project registry not available")
+            logger.info(f"  Registry registration SUCCESS: project_id={project.project_id}")
+            logger.info("[STEP 5/7] Registry Registration - PASSED")
+        except ImportError as e:
+            logger.warning(f"[STEP 5/7] Project registry not available: {e}")
 
-        # Create IPC
+        # STEP 6: Create Internal Project Contract (IPC)
+        logger.info("[STEP 6/7] IPC Creation - Starting...")
         ipc = create_default_ipc(
             project_name=project_name,
             description=request.description,
             user_id=request.user_id,
             repo_url=request.repo_url
         )
+        logger.info(f"  Created IPC: contract_id={ipc.contract_id}")
 
         # Add requirements
         ipc.original_requirements = request.requirements
@@ -339,14 +373,17 @@ async def create_project_from_natural_language(
 
         # Save IPC
         _save_ipc(ipc)
+        logger.info(f"  Saved IPC to filesystem")
 
-        # Phase 16C: Link IPC to registry
+        # Link IPC to registry
         try:
             registry.update_project(project_name, {"ipc_contract_id": ipc.contract_id})
-        except:
-            pass
+            logger.info(f"  Linked IPC to registry")
+        except Exception as e:
+            logger.warning(f"  Failed to link IPC to registry: {e}")
 
-        # Get engine and start planning for each aspect
+        # Initialize aspects via lifecycle engine
+        logger.info("  Initializing aspects...")
         engine = _get_engine()
         for aspect in ProjectAspect:
             engine.transition_phase(
@@ -356,14 +393,16 @@ async def create_project_from_natural_language(
                 actor=request.user_id,
                 reason="Project created"
             )
+            logger.info(f"    {aspect.value}: transitioned to PLANNING")
 
         _save_ipc(ipc)
+        logger.info("[STEP 6/7] IPC Creation - PASSED")
 
-        logger.info(f"Created project: {project_name} with all aspects initialized")
-
-        # Phase 19 fix: Schedule Claude planning job (THIS WAS THE MISSING PIECE!)
+        # STEP 7: Schedule Claude planning job
+        logger.info("[STEP 7/7] Job Scheduling - Starting...")
         job_id = None
         if CLAUDE_BACKEND_AVAILABLE:
+            logger.info("  Claude backend is available")
             try:
                 requirements_raw = "\n".join(request.requirements) if request.requirements else request.description
                 task_description = f"""PLANNING PHASE - Analyze Requirements and Create Implementation Plan
@@ -397,6 +436,7 @@ Create a PLANNING_OUTPUT.yaml file with:
 - questions: any questions for clarification
 - estimated_phases: breakdown of development phases
 """
+                logger.info(f"  Creating planning job for project '{project_name}'...")
                 job = await create_claude_job(
                     project_name=project_name,
                     task_description=task_description,
@@ -409,11 +449,14 @@ Create a PLANNING_OUTPUT.yaml file with:
                     user_role="owner",
                 )
                 job_id = job.job_id
-                logger.info(f"Scheduled planning job {job_id} for project {project_name}")
+                logger.info(f"  Job created: job_id={job_id}, state={job.state.value}")
+                logger.info("[STEP 7/7] Job Scheduling - PASSED")
             except Exception as e:
-                logger.error(f"Failed to schedule planning job: {e}", exc_info=True)
+                logger.error(f"  Job scheduling FAILED: {e}", exc_info=True)
+                logger.info("[STEP 7/7] Job Scheduling - FAILED (but project created)")
         else:
-            logger.warning("Claude backend not available - planning job not scheduled")
+            logger.warning("  Claude backend NOT available - skipping job scheduling")
+            logger.info("[STEP 7/7] Job Scheduling - SKIPPED")
 
         # Build next_steps based on whether job was scheduled
         if job_id:
@@ -430,8 +473,15 @@ Create a PLANNING_OUTPUT.yaml file with:
                 "Use /project_status to check progress"
             ]
 
+        logger.info("=" * 60)
+        logger.info("PROJECT CREATION - SUCCESS")
+        logger.info(f"  Project: {project_name}")
+        logger.info(f"  Contract ID: {ipc.contract_id}")
+        logger.info(f"  Job ID: {job_id or 'None'}")
+        logger.info("=" * 60)
+
         return CreateProjectResponse(
-            success=True,  # Phase 19 fix: Explicit success for bot compatibility
+            success=True,
             project_name=project_name,
             contract_id=ipc.contract_id,
             aspects_initialized=[a.value for a in ProjectAspect],
@@ -439,10 +489,14 @@ Create a PLANNING_OUTPUT.yaml file with:
             message=f"Project '{project_name}' created successfully. Autonomous development starting."
         )
 
-    except HTTPException:
+    except HTTPException as he:
+        logger.error(f"PROJECT CREATION - HTTP ERROR: {he.detail}")
         raise
     except Exception as e:
-        logger.error(f"Error creating project: {e}", exc_info=True)
+        logger.error("=" * 60)
+        logger.error("PROJECT CREATION - FAILED")
+        logger.error(f"  Error: {e}", exc_info=True)
+        logger.error("=" * 60)
         raise HTTPException(
             status_code=500,
             detail=f"Internal error creating project: {str(e)}"

@@ -136,32 +136,52 @@ class CHDValidator:
 
         Returns ValidationResult with errors/warnings.
         """
+        logger.info("CHD Validation - START")
+        logger.info(f"  Description length: {len(description)} chars")
+        logger.info(f"  Requirements length: {len(requirements) if requirements else 0} chars")
+
         result = ValidationResult(is_valid=True)
 
         # Use raw content (not lowercased) for project_name extraction
         raw_content = f"{description} {requirements or ''}"
         content = raw_content.lower()
+        logger.info(f"  Combined content length: {len(raw_content)} chars")
 
         # 0. Extract project_name from CHD (TAKES PRECEDENCE - Phase 19 fix)
+        logger.info("  Step 0: Extracting project_name...")
         self._extract_project_name(raw_content, result)
+        logger.info(f"    Extracted project_name: {result.extracted_project_name}")
 
         # 1. Check for at least one aspect
+        logger.info("  Step 1: Validating aspects...")
         self._validate_aspects(content, result)
+        logger.info(f"    Extracted aspects: {result.extracted_aspects}")
 
         # 2. Check database requirements
+        logger.info("  Step 2: Validating database...")
         self._validate_database(content, result)
+        logger.info(f"    Extracted database: {result.extracted_database}")
 
         # 3. Check for dangerous flags
+        logger.info("  Step 3: Checking for dangerous flags...")
         self._validate_no_dangerous_flags(content, result)
 
         # 4. Extract tech stack
+        logger.info("  Step 4: Extracting tech stack...")
         self._extract_tech_stack(content, result)
+        logger.info(f"    Extracted tech: {result.extracted_tech}")
 
         # 5. Validate completeness
+        logger.info("  Step 5: Validating completeness...")
         self._validate_completeness(content, result)
 
         # Set overall validity
         result.is_valid = len(result.errors) == 0
+
+        logger.info("CHD Validation - COMPLETE")
+        logger.info(f"  is_valid: {result.is_valid}")
+        logger.info(f"  errors: {result.errors}")
+        logger.info(f"  warnings: {result.warnings}")
 
         return result
 

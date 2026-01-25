@@ -1511,12 +1511,26 @@ async def create_job(
     Returns:
         The created ClaudeJob
     """
+    logger.info("=" * 50)
+    logger.info("CREATE_JOB - START")
+    logger.info(f"  project_name: {project_name}")
+    logger.info(f"  task_type: {task_type}")
+    logger.info(f"  task_description length: {len(task_description)} chars")
+    logger.info(f"  created_by: {created_by}")
+    logger.info(f"  priority: {priority}")
+    logger.info(f"  aspect: {aspect}")
+    logger.info(f"  lifecycle_state: {lifecycle_state}")
+    logger.info(f"  requested_action: {requested_action}")
+    logger.info(f"  user_role: {user_role}")
+
     # Phase 14.11: Validate and normalize priority
     validated_priority = max(JobPriority.LOW.value, min(priority, JobPriority.EMERGENCY.value))
+    logger.info(f"  Validated priority: {validated_priority}")
 
     # Phase 15.2: Validate aspect
     valid_aspects = ["core", "backend", "frontend_web", "frontend_mobile", "admin", "custom"]
     validated_aspect = aspect if aspect in valid_aspects else "core"
+    logger.info(f"  Validated aspect: {validated_aspect}")
 
     # Phase 15.6: Validate lifecycle state and action
     valid_lifecycle_states = [
@@ -1531,6 +1545,7 @@ async def create_job(
     valid_roles = ["owner", "admin", "developer", "tester", "viewer"]
     validated_role = user_role if user_role in valid_roles else "developer"
 
+    logger.info("  Creating ClaudeJob object...")
     job = ClaudeJob(
         job_id=str(uuid.uuid4()),
         project_name=project_name,
@@ -1547,17 +1562,35 @@ async def create_job(
         requested_action=validated_action,
         user_role=validated_role,
     )
+    logger.info(f"  Job created: job_id={job.job_id}")
 
     # Create workspace early so it's ready
-    job.workspace_dir = WorkspaceManager.create_workspace(job.job_id, project_name)
+    logger.info("  Creating workspace...")
+    try:
+        job.workspace_dir = WorkspaceManager.create_workspace(job.job_id, project_name)
+        logger.info(f"  Workspace created: {job.workspace_dir}")
+    except Exception as e:
+        logger.error(f"  Workspace creation FAILED: {e}", exc_info=True)
+        raise
 
     # Use multi-worker scheduler (Phase 14.10)
-    await multi_scheduler.enqueue_job(job)
+    logger.info("  Checking scheduler status...")
+    if not multi_scheduler.running:
+        logger.error("  SCHEDULER NOT RUNNING - cannot enqueue job")
+        raise RuntimeError("Job scheduler is not running")
 
-    logger.info(
-        f"Created job {job.job_id} for project {project_name}/{validated_aspect} "
-        f"(priority: {validated_priority})"
-    )
+    logger.info("  Enqueuing job to scheduler...")
+    try:
+        await multi_scheduler.enqueue_job(job)
+        logger.info(f"  Job enqueued successfully")
+    except Exception as e:
+        logger.error(f"  Job enqueue FAILED: {e}", exc_info=True)
+        raise
+
+    logger.info("CREATE_JOB - SUCCESS")
+    logger.info(f"  Job ID: {job.job_id}")
+    logger.info(f"  State: {job.state.value}")
+    logger.info("=" * 50)
     return job
 
 
