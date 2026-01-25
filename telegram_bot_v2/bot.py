@@ -5913,6 +5913,93 @@ CI_MAX_AUTO_FIX_ATTEMPTS = 3
 # Track completed jobs to prevent re-triggering phases
 _completed_job_ids: set = set()  # Jobs that have completed (persistent for session)
 
+# Project deployment URLs cache
+_project_urls_cache: Dict[str, Dict[str, str]] = {}
+
+
+async def get_project_deployment_urls(project_name: str) -> Dict[str, str]:
+    """
+    Get deployment URLs for a project from its contract/config.
+    Returns dict with keys like 'api', 'frontend', 'admin', 'docs'.
+    """
+    global _project_urls_cache
+
+    # Check cache first
+    if project_name in _project_urls_cache:
+        return _project_urls_cache[project_name]
+
+    urls = {}
+    import re
+
+    try:
+        # Try to get project details from controller
+        result = await controller.get_project(project_name)
+        if result and "project" in result:
+            project_data = result["project"]
+
+            # Check for deployment_targets in original requirements or config
+            if "original_requirements" in project_data:
+                req_text = str(project_data.get("original_requirements", ""))
+                urls = _extract_urls_from_text(req_text)
+
+            # Also check aspects for testing_url/production_url
+            aspects = project_data.get("aspects", {})
+            for aspect_name, aspect_data in aspects.items():
+                if isinstance(aspect_data, dict):
+                    testing_url = aspect_data.get("testing_url")
+                    if testing_url:
+                        urls[aspect_name] = testing_url
+
+    except Exception as e:
+        logger.debug(f"Controller project lookup failed for {project_name}: {e}")
+
+    # Fallback: Try reading project contract directly from filesystem
+    if not urls:
+        try:
+            import yaml
+            contract_path = Path(f"/home/aitesting.mybd.in/public_html/projects/{project_name}/INTERNAL_PROJECT_CONTRACT.yaml")
+            if contract_path.exists():
+                with open(contract_path) as f:
+                    contract = yaml.safe_load(f)
+
+                # Check original_requirements in contract
+                orig_reqs = contract.get("original_requirements", [])
+                if orig_reqs:
+                    req_text = str(orig_reqs[0]) if isinstance(orig_reqs, list) else str(orig_reqs)
+                    urls = _extract_urls_from_text(req_text)
+        except Exception as e:
+            logger.debug(f"Contract file lookup failed for {project_name}: {e}")
+
+    # Cache the result
+    if urls:
+        _project_urls_cache[project_name] = urls
+
+    return urls
+
+
+def _extract_urls_from_text(text: str) -> Dict[str, str]:
+    """Extract deployment URLs from requirements text."""
+    import re
+    urls = {}
+
+    # Look for domain patterns in YAML-like structure
+    api_match = re.search(r'api:\s*\n\s*domain:\s*([^\s\n]+)', text)
+    frontend_match = re.search(r'frontend_web:\s*\n\s*domain:\s*([^\s\n]+)', text)
+    admin_match = re.search(r'admin_panel:\s*\n\s*domain:\s*([^\s\n]+)', text)
+
+    if api_match:
+        domain = api_match.group(1).strip()
+        urls['api'] = f"https://{domain}"
+        urls['docs'] = f"https://{domain}/docs"
+    if frontend_match:
+        domain = frontend_match.group(1).strip()
+        urls['frontend'] = f"https://{domain}"
+    if admin_match:
+        domain = admin_match.group(1).strip()
+        urls['admin'] = f"https://{domain}"
+
+    return urls
+
 
 async def send_notification(application, message: str, parse_mode: str = "Markdown"):
     """Send notification to all owners with fallback for markdown errors."""
@@ -6002,16 +6089,41 @@ async def job_monitor_task(application):
                             message += "🚀 *Triggering deployment phase...*"
                             asyncio.create_task(trigger_deployment_phase(application, project, job))
                         elif task_type == "deployment":
+                            # Get deployment URLs for the project
+                            urls = await get_project_deployment_urls(project)
+                            message += "\n\n✅ *Deployment complete!*\n"
+
+                            if urls:
+                                message += "\n📍 *Testing URLs:*\n"
+                                if urls.get('frontend'):
+                                    message += f"• Frontend: {urls['frontend']}\n"
+                                if urls.get('api'):
+                                    message += f"• API: {urls['api']}\n"
+                                if urls.get('docs'):
+                                    message += f"• API Docs: {urls['docs']}\n"
+                                if urls.get('admin'):
+                                    message += f"• Admin: {urls['admin']}\n"
+
                             message += (
-                                "\n\n✅ *Deployment complete!*\n"
-                                "Please test the application and provide feedback:\n"
+                                "\nPlease test the application and provide feedback:\n"
                                 "• `/approve <project>` - Approve for production\n"
                                 "• `/feedback <project> <issues>` - Report issues"
                             )
                     else:
                         # Phase already triggered, just show completion
                         if task_type == "deployment":
+                            # Get deployment URLs for the project
+                            urls = await get_project_deployment_urls(project)
                             message += "\n\n✅ *Deployment workflow finished.*"
+
+                            if urls:
+                                message += "\n\n📍 *Testing URLs:*\n"
+                                if urls.get('frontend'):
+                                    message += f"• Frontend: {urls['frontend']}\n"
+                                if urls.get('api'):
+                                    message += f"• API: {urls['api']}\n"
+                                if urls.get('docs'):
+                                    message += f"• API Docs: {urls['docs']}\n"
 
                     await send_notification(application, message)
 
