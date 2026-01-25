@@ -1575,7 +1575,7 @@ async def create_job(
 
     # Use multi-worker scheduler (Phase 14.10)
     logger.info("  Checking scheduler status...")
-    if not multi_scheduler.running:
+    if not multi_scheduler._running:
         logger.error("  SCHEDULER NOT RUNNING - cannot enqueue job")
         raise RuntimeError("Job scheduler is not running")
 
