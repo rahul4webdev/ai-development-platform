@@ -57,6 +57,9 @@ from pydantic import BaseModel, Field
 # Phase 12: Multi-Aspect Project Router
 from .phase12_router import router as phase12_router
 
+# Web Dashboard with Login
+from .web_dashboard import router as dashboard_router
+
 # Import phase metadata from single source of truth
 from . import __version__, CURRENT_PHASE, CURRENT_PHASE_NAME, CURRENT_PHASE_FULL
 
@@ -1748,6 +1751,9 @@ app = FastAPI(
 
 # Include Phase 12 router for multi-aspect projects
 app.include_router(phase12_router)
+
+# Include Web Dashboard with login authentication
+app.include_router(dashboard_router)
 
 
 # -----------------------------------------------------------------------------
@@ -3516,6 +3522,9 @@ class ClaudeJobRequest(BaseModel):
     project_name: str = Field(..., description="Project name")
     task_description: str = Field(..., min_length=10, description="Task description")
     task_type: str = Field(default="feature_development", description="Task type")
+    # Phase 20: Artifact copying
+    copy_from_job: Optional[str] = Field(default=None, description="Job ID to copy artifacts from")
+    copy_artifacts: Optional[List[str]] = Field(default=None, description="List of artifact filenames to copy")
 
 
 class ClaudeJobResponse(BaseModel):
@@ -3546,6 +3555,8 @@ async def create_claude_job(request: ClaudeJobRequest):
         project_name=request.project_name,
         task_description=request.task_description,
         task_type=request.task_type,
+        copy_from_job=request.copy_from_job,
+        copy_artifacts=request.copy_artifacts,
     )
 
     return ClaudeJobResponse(

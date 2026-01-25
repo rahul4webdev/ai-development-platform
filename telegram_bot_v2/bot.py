@@ -1150,16 +1150,23 @@ class ControllerClient:
         self,
         project_name: str,
         task_description: str,
-        task_type: str = "feature_development"
+        task_type: str = "feature_development",
+        copy_from_job: Optional[str] = None,
+        copy_artifacts: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """Create a new Claude CLI job."""
+        """Create a new Claude CLI job with optional artifact copying."""
+        data = {
+            "project_name": project_name,
+            "task_description": task_description,
+            "task_type": task_type
+        }
+        if copy_from_job:
+            data["copy_from_job"] = copy_from_job
+        if copy_artifacts:
+            data["copy_artifacts"] = copy_artifacts
         return await self._request(
             "POST", "/claude/job",
-            data={
-                "project_name": project_name,
-                "task_description": task_description,
-                "task_type": task_type
-            },
+            data=data,
             action_name="create_claude_job"
         )
 
@@ -5885,10 +5892,272 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # -----------------------------------------------------------------------------
+# Phase 20: Job Monitor & Notification System
+# -----------------------------------------------------------------------------
+# Track jobs we've already notified about to avoid duplicates
+_notified_jobs: Dict[str, str] = {}  # job_id -> last_state_notified
+_job_monitor_running = False
+JOB_MONITOR_INTERVAL = 10  # seconds between checks
+NOTIFICATION_CHAT_IDS: List[int] = []  # Will be populated from ROLE_OWNERS
+
+
+async def send_notification(application, message: str, parse_mode: str = "Markdown"):
+    """Send notification to all owners."""
+    for chat_id in NOTIFICATION_CHAT_IDS:
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode=parse_mode
+            )
+            logger.info(f"Notification sent to {chat_id}")
+        except Exception as e:
+            logger.error(f"Failed to send notification to {chat_id}: {e}")
+
+
+async def job_monitor_task(application):
+    """Background task to monitor job status changes and send notifications."""
+    global _notified_jobs, _job_monitor_running
+    _job_monitor_running = True
+    logger.info("Job monitor started")
+
+    while _job_monitor_running:
+        try:
+            # Get all jobs
+            result = await controller.list_claude_jobs(limit=50)
+            jobs = result.get("jobs", [])
+
+            for job in jobs:
+                job_id = job.get("job_id")
+                state = job.get("state")
+                project = job.get("project_name", "unknown")
+                task_type = job.get("task_type", "unknown")
+
+                if not job_id:
+                    continue
+
+                last_notified = _notified_jobs.get(job_id)
+
+                # Skip if we already notified about this state
+                if last_notified == state:
+                    continue
+
+                # Notify on completion or failure
+                if state == "completed":
+                    _notified_jobs[job_id] = state
+                    result_summary = job.get("result_summary", "")[:500]
+                    message = (
+                        f"✅ *Job Completed*\n\n"
+                        f"*Project:* {escape_markdown(project)}\n"
+                        f"*Type:* {task_type}\n"
+                        f"*Job ID:* `{job_id[:12]}...`\n\n"
+                    )
+                    if result_summary:
+                        message += f"*Summary:*\n{escape_markdown(result_summary[:300])}...\n\n"
+
+                    # Automatic phase progression
+                    if task_type == "planning":
+                        message += "🚀 *Triggering development phase...*"
+                        asyncio.create_task(trigger_development_phase(application, project, job))
+                    elif task_type == "development":
+                        message += "🚀 *Triggering deployment phase...*"
+                        asyncio.create_task(trigger_deployment_phase(application, project, job))
+                    elif task_type == "deployment":
+                        message += (
+                            "\n\n✅ *Deployment complete!*\n"
+                            "Please test the application and provide feedback:\n"
+                            "• `/approve <project>` - Approve for production\n"
+                            "• `/feedback <project> <issues>` - Report issues"
+                        )
+
+                    await send_notification(application, message)
+
+                elif state == "failed":
+                    _notified_jobs[job_id] = state
+                    error = job.get("error_message", "Unknown error")[:300]
+                    exit_code = job.get("exit_code", "N/A")
+                    message = (
+                        f"❌ *Job Failed*\n\n"
+                        f"*Project:* {escape_markdown(project)}\n"
+                        f"*Type:* {task_type}\n"
+                        f"*Job ID:* `{job_id[:12]}...`\n"
+                        f"*Exit Code:* {exit_code}\n\n"
+                        f"*Error:*\n```\n{error}\n```\n\n"
+                        f"Use /dashboard to view details."
+                    )
+                    await send_notification(application, message)
+
+                elif state == "running" and last_notified is None:
+                    # First time seeing this job - notify it started
+                    _notified_jobs[job_id] = "started"
+                    message = (
+                        f"🔄 *Job Started*\n\n"
+                        f"*Project:* {escape_markdown(project)}\n"
+                        f"*Type:* {task_type}\n"
+                        f"*Job ID:* `{job_id[:12]}...`\n\n"
+                        f"View live logs: /dashboard → Live"
+                    )
+                    await send_notification(application, message)
+
+            # Clean up old notified jobs (keep last 100)
+            if len(_notified_jobs) > 100:
+                # Remove oldest entries
+                keys_to_remove = list(_notified_jobs.keys())[:-100]
+                for key in keys_to_remove:
+                    del _notified_jobs[key]
+
+        except Exception as e:
+            logger.error(f"Job monitor error: {e}")
+
+        await asyncio.sleep(JOB_MONITOR_INTERVAL)
+
+
+async def trigger_development_phase(application, project_name: str, planning_job: Dict):
+    """Trigger development phase after planning completes."""
+    try:
+        logger.info(f"Triggering development phase for {project_name}")
+
+        # Get planning job ID to copy artifacts
+        planning_job_id = planning_job.get("job_id")
+
+        # Create development task
+        task_description = f"""DEVELOPMENT PHASE - Implement Features from Planning
+
+PROJECT: {project_name}
+
+INSTRUCTIONS:
+1. Read PLANNING_OUTPUT.yaml (copied from planning phase) in your workspace
+2. Implement Phase 1 features as defined in the plan
+3. Create all necessary files and code for the FastAPI backend
+4. Write unit tests for implemented features
+5. Update CURRENT_STATE.md with progress
+6. Follow all governance documents (AI_POLICY.md, ARCHITECTURE.md)
+
+IMPORTANT:
+- The PLANNING_OUTPUT.yaml file is in your workspace - read it first
+- Start with the first implementation phase from the plan
+- Create working, tested code
+- Do NOT deploy - just implement and test locally
+- Report any blockers in logs/BLOCKERS.md
+
+After completing this phase, the next job will handle deployment.
+"""
+
+        # Copy PLANNING_OUTPUT.yaml from planning job to development job
+        result = await controller.create_claude_job(
+            project_name=project_name,
+            task_description=task_description,
+            task_type="development",
+            copy_from_job=planning_job_id,
+            copy_artifacts=["PLANNING_OUTPUT.yaml", "CURRENT_STATE.md"]
+        )
+
+        if result.get("job_id"):
+            message = (
+                f"🚀 *Development Phase Started*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Job ID:* `{result['job_id'][:12]}...`\n\n"
+                f"Claude is now implementing features from the planning output."
+            )
+            await send_notification(application, message)
+        else:
+            error = extract_api_error(result)
+            message = (
+                f"⚠️ *Failed to Start Development Phase*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Error:* {escape_markdown(error)}"
+            )
+            await send_notification(application, message)
+
+    except Exception as e:
+        logger.error(f"Failed to trigger development phase: {e}")
+        message = f"⚠️ *Error triggering development phase for {project_name}:* {str(e)}"
+        await send_notification(application, message)
+
+
+async def trigger_deployment_phase(application, project_name: str, dev_job: Dict):
+    """Trigger deployment to testing after development completes."""
+    try:
+        logger.info(f"Triggering deployment phase for {project_name}")
+
+        # Get development job ID to copy artifacts
+        dev_job_id = dev_job.get("job_id")
+
+        task_description = f"""DEPLOYMENT PHASE - Deploy to Testing Environment
+
+PROJECT: {project_name}
+
+INSTRUCTIONS:
+1. Read PLANNING_OUTPUT.yaml for deployment targets and configuration
+2. Read DEPLOYMENT.md for deployment procedures
+3. The project code has been copied to your workspace in the "{project_name}/" directory
+4. Deploy to the TESTING environment only
+5. Verify deployment is successful
+6. Update CURRENT_STATE.md with deployment status
+
+PROJECT CODE LOCATION:
+- The complete project code from development is in: ./{project_name}/
+- Backend: ./{project_name}/backend/
+- Frontend: ./{project_name}/frontend/
+
+DEPLOYMENT TARGETS (from project config):
+- API: Deploy backend to configured API domain
+- Frontend: Deploy frontend to configured web domain
+- Verify both are accessible
+
+IMPORTANT:
+- Deploy to TESTING only, NOT production
+- Run smoke tests after deployment
+- Report deployment URLs in logs/DEPLOYMENT_LOG.md
+- Note any issues in logs/BLOCKERS.md
+
+After deployment, human validation will be required before production.
+"""
+
+        # Copy artifacts from development job - including the project directory
+        result = await controller.create_claude_job(
+            project_name=project_name,
+            task_description=task_description,
+            task_type="deployment",
+            copy_from_job=dev_job_id,
+            copy_artifacts=["PLANNING_OUTPUT.yaml", "CURRENT_STATE.md", project_name]
+        )
+
+        if result.get("job_id"):
+            message = (
+                f"🚀 *Deployment Phase Started*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Job ID:* `{result['job_id'][:12]}...`\n\n"
+                f"Claude is deploying to testing environment."
+            )
+            await send_notification(application, message)
+        else:
+            error = extract_api_error(result)
+            message = (
+                f"⚠️ *Failed to Start Deployment Phase*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Error:* {escape_markdown(error)}"
+            )
+            await send_notification(application, message)
+
+    except Exception as e:
+        logger.error(f"Failed to trigger deployment phase: {e}")
+
+
+def stop_job_monitor():
+    """Stop the job monitor."""
+    global _job_monitor_running
+    _job_monitor_running = False
+    logger.info("Job monitor stopped")
+
+
+# -----------------------------------------------------------------------------
 # Main Entry Point
 # -----------------------------------------------------------------------------
 def main():
     """Start the bot."""
+    global NOTIFICATION_CHAT_IDS
+
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
         sys.exit(1)
@@ -5897,10 +6166,13 @@ def main():
     logger.info(f"Controller URL: {CONTROLLER_BASE_URL}")
     logger.info(f"Bot Version: {BOT_VERSION}")
 
-    # Log role configuration
+    # Log role configuration and set up notification recipients
     for role, users in ROLE_CONFIG.items():
         if users:
             logger.info(f"Role {role.value}: {len(users)} users configured")
+            if role == UserRole.OWNER:
+                NOTIFICATION_CHAT_IDS = users.copy()
+                logger.info(f"Notification recipients: {NOTIFICATION_CHAT_IDS}")
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -5989,6 +6261,14 @@ def main():
 
     # Error handler
     application.add_error_handler(error_handler)
+
+    # Phase 20: Start job monitor as background task
+    async def post_init(app):
+        """Start background tasks after bot is initialized."""
+        logger.info("Starting job monitor background task...")
+        asyncio.create_task(job_monitor_task(app))
+
+    application.post_init = post_init
 
     # Start polling
     logger.info("Bot started. Polling for updates...")

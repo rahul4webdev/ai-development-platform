@@ -51,6 +51,19 @@ DOCS_DIR = Path(os.getenv("CLAUDE_DOCS_DIR", "/home/aitesting.mybd.in/public_htm
 WRAPPER_SCRIPT = Path("/home/aitesting.mybd.in/public_html/scripts/run_claude_job.sh")
 JOB_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "600"))
 
+# Phase 20: Task-type-specific timeouts (in seconds)
+# Development and planning tasks need more time due to file creation
+TASK_TIMEOUTS = {
+    "planning": 900,       # 15 minutes - reading docs and creating plans
+    "development": 1800,   # 30 minutes - creating many files
+    "feature_development": 1800,  # 30 minutes
+    "bug_fix": 900,        # 15 minutes
+    "refactoring": 1200,   # 20 minutes
+    "deployment": 600,     # 10 minutes - mostly shell commands
+    "testing": 900,        # 15 minutes
+    "default": 600,        # 10 minutes fallback
+}
+
 # Phase 14.10: Multi-worker configuration
 MAX_CONCURRENT_JOBS = 3  # Maximum concurrent Claude CLI jobs
 WORKER_NICE_VALUE = 10   # CPU nice value for worker processes (lower priority)
@@ -191,6 +204,8 @@ class ClaudeJob:
     user_role: str = "developer"  # Role of requesting user
     gate_allowed: Optional[bool] = None  # Result of execution gate check
     gate_denied_reason: Optional[str] = None  # Reason if gate denied
+    # Phase 20: Task-specific timeout
+    timeout: int = JOB_TIMEOUT  # Timeout in seconds, can vary by task type
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -221,6 +236,8 @@ class ClaudeJob:
             "user_role": self.user_role,
             "gate_allowed": self.gate_allowed,
             "gate_denied_reason": self.gate_denied_reason,
+            # Phase 20: Task-specific timeout
+            "timeout": self.timeout,
         }
 
     def get_wait_time_seconds(self) -> float:
@@ -380,6 +397,53 @@ class WorkspaceManager:
 
         logger.info(f"Created workspace: {workspace}")
         return workspace
+
+    @staticmethod
+    def copy_artifacts_from_job(workspace: Path, source_job_id: str, artifacts: List[str]) -> List[str]:
+        """
+        Copy artifacts from a previous job workspace to the current workspace.
+
+        Phase 20: Now supports copying both files and directories.
+
+        Args:
+            workspace: Current job workspace
+            source_job_id: ID of the job to copy artifacts from
+            artifacts: List of file/directory names to copy (e.g., ["PLANNING_OUTPUT.yaml", "health-tracker-app/"])
+
+        Returns:
+            List of successfully copied artifacts
+        """
+        copied = []
+        source_workspace = JOBS_BASE_DIR / f"job-{source_job_id}"
+
+        if not source_workspace.exists():
+            logger.warning(f"Source job workspace not found: {source_workspace}")
+            return copied
+
+        for artifact in artifacts:
+            src = source_workspace / artifact.rstrip('/')  # Remove trailing slash if present
+            dst = workspace / artifact.rstrip('/')
+
+            if src.exists():
+                try:
+                    if src.is_dir():
+                        # Copy directory recursively
+                        if dst.exists():
+                            shutil.rmtree(dst)  # Remove existing to replace
+                        shutil.copytree(src, dst)
+                        copied.append(artifact)
+                        logger.info(f"Copied directory: {artifact} from job {source_job_id}")
+                    else:
+                        # Copy file
+                        shutil.copy2(src, dst)
+                        copied.append(artifact)
+                        logger.info(f"Copied file: {artifact} from job {source_job_id}")
+                except Exception as e:
+                    logger.error(f"Failed to copy artifact {artifact}: {e}")
+            else:
+                logger.warning(f"Artifact not found: {src}")
+
+        return copied
 
     @staticmethod
     def create_task_file(workspace: Path, task_description: str, task_type: str, metadata: Dict[str, Any]) -> Path:
@@ -546,15 +610,18 @@ class ClaudeExecutor:
             self._process = process
 
             try:
+                # Phase 20: Use job-specific timeout
+                job_timeout = job.timeout if hasattr(job, 'timeout') and job.timeout else JOB_TIMEOUT
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
-                    timeout=JOB_TIMEOUT
+                    timeout=job_timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
                 job.state = JobState.TIMEOUT
-                job.error_message = f"Job timed out after {JOB_TIMEOUT}s"
+                job_timeout = job.timeout if hasattr(job, 'timeout') and job.timeout else JOB_TIMEOUT
+                job.error_message = f"Job timed out after {job_timeout}s"
                 job.completed_at = datetime.utcnow()
                 return job
 
@@ -816,6 +883,15 @@ class PersistentJobStore:
             result_summary=data.get("result_summary"),
             # Phase 15.2: Aspect isolation with default for backwards compatibility
             aspect=data.get("aspect", "core"),
+            # Phase 15.6: Execution Gate fields with defaults
+            lifecycle_id=data.get("lifecycle_id"),
+            lifecycle_state=data.get("lifecycle_state", "development"),
+            requested_action=data.get("requested_action", "write_code"),
+            user_role=data.get("user_role", "developer"),
+            gate_allowed=data.get("gate_allowed"),
+            gate_denied_reason=data.get("gate_denied_reason"),
+            # Phase 20: Task-specific timeout with default
+            timeout=data.get("timeout", JOB_TIMEOUT),
         )
 
 
@@ -967,29 +1043,50 @@ class ClaudeWorker:
             # Use nice for CPU priority and ulimit for memory
             cmd = self._build_command(job, task_file)
 
+            # Build environment for subprocess
+            # Ensure Claude CLI authentication is passed to the wrapper script
+            subprocess_env = os.environ.copy()
+            # Ensure HOME is set correctly for Claude CLI
+            subprocess_env["HOME"] = os.environ.get("HOME", "/home/aitesting.mybd.in")
+            # Pass OAuth token if available
+            if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+                subprocess_env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
+            # Ensure PATH includes Claude CLI
+            subprocess_env["PATH"] = os.environ.get(
+                "PATH",
+                "/home/aitesting.mybd.in/.local/bin:/usr/local/bin:/usr/bin:/bin"
+            )
+
             # Execute
+            # NOTE: Disabled preexec_fn resource limits as they cause Claude CLI to crash
+            # The 2GB RLIMIT_AS appears too restrictive for bun-based Claude CLI
             process = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(job.workspace_dir),
-                preexec_fn=self._setup_resource_limits,
+                env=subprocess_env,
+                # preexec_fn=self._setup_resource_limits,  # Disabled - causes core dump
             )
 
             self._process = process
 
             try:
+                # Phase 20: Use job-specific timeout
+                job_timeout = job.timeout if hasattr(job, 'timeout') and job.timeout else JOB_TIMEOUT
+                logger.info(f"Worker {self.worker_id}: Job timeout set to {job_timeout}s")
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
-                    timeout=JOB_TIMEOUT
+                    timeout=job_timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
                 job.state = JobState.TIMEOUT
-                job.error_message = f"Job timed out after {JOB_TIMEOUT}s"
+                job_timeout = job.timeout if hasattr(job, 'timeout') and job.timeout else JOB_TIMEOUT
+                job.error_message = f"Job timed out after {job_timeout}s"
                 job.completed_at = datetime.utcnow()
-                logger.warning(f"Worker {self.worker_id}: Job {job.job_id} timed out")
+                logger.warning(f"Worker {self.worker_id}: Job {job.job_id} timed out after {job_timeout}s")
                 # Log outcome to execution gate audit
                 if gate_available:
                     execution_gate.log_execution_outcome(request, "TIMEOUT", job.error_message)
@@ -1525,6 +1622,9 @@ async def create_job(
     lifecycle_state: str = "development",
     requested_action: str = "write_code",
     user_role: str = "developer",
+    # Phase 20: Artifact copying from previous jobs
+    copy_from_job: Optional[str] = None,
+    copy_artifacts: Optional[List[str]] = None,
 ) -> ClaudeJob:
     """
     Create and enqueue a new Claude CLI job.
@@ -1533,6 +1633,7 @@ async def create_job(
     Phase 14.11: Added priority parameter for scheduling.
     Phase 15.2: Added aspect parameter for scheduler isolation.
     Phase 15.6: Added lifecycle and execution gate parameters.
+    Phase 20: Added artifact copying from previous jobs.
 
     Args:
         project_name: Name of the project
@@ -1545,6 +1646,8 @@ async def create_job(
         lifecycle_state: Current lifecycle state (development, testing, etc.)
         requested_action: Action being requested (read_code, write_code, run_tests, etc.)
         user_role: Role of requesting user (owner, admin, developer, tester, viewer)
+        copy_from_job: Job ID to copy artifacts from
+        copy_artifacts: List of artifact filenames to copy (e.g., ["PLANNING_OUTPUT.yaml"])
 
     Returns:
         The created ClaudeJob
@@ -1583,6 +1686,10 @@ async def create_job(
     valid_roles = ["owner", "admin", "developer", "tester", "viewer"]
     validated_role = user_role if user_role in valid_roles else "developer"
 
+    # Phase 20: Get task-specific timeout
+    job_timeout = TASK_TIMEOUTS.get(task_type, TASK_TIMEOUTS["default"])
+    logger.info(f"  Task timeout for {task_type}: {job_timeout}s")
+
     logger.info("  Creating ClaudeJob object...")
     job = ClaudeJob(
         job_id=str(uuid.uuid4()),
@@ -1599,6 +1706,8 @@ async def create_job(
         lifecycle_state=validated_lifecycle_state,
         requested_action=validated_action,
         user_role=validated_role,
+        # Phase 20: Task-specific timeout
+        timeout=job_timeout,
     )
     logger.info(f"  Job created: job_id={job.job_id}")
 
@@ -1607,6 +1716,14 @@ async def create_job(
     try:
         job.workspace_dir = WorkspaceManager.create_workspace(job.job_id, project_name)
         logger.info(f"  Workspace created: {job.workspace_dir}")
+
+        # Phase 20: Copy artifacts from previous job if specified
+        if copy_from_job and copy_artifacts:
+            logger.info(f"  Copying artifacts from job {copy_from_job}: {copy_artifacts}")
+            copied = WorkspaceManager.copy_artifacts_from_job(
+                job.workspace_dir, copy_from_job, copy_artifacts
+            )
+            logger.info(f"  Copied {len(copied)} artifacts: {copied}")
     except Exception as e:
         logger.error(f"  Workspace creation FAILED: {e}", exc_info=True)
         raise
