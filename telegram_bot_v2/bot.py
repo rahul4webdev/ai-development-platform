@@ -5896,7 +5896,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # Phase 21: CI Monitor Integration
 # -----------------------------------------------------------------------------
 # Track jobs we've already notified about to avoid duplicates
-_notified_jobs: Dict[str, str] = {}  # job_id -> last_state_notified
+# Format: job_id -> {"state": last_state, "notified_at": timestamp, "phase_triggered": bool}
+_notified_jobs: Dict[str, Dict] = {}
 _job_monitor_running = False
 _ci_monitor_running = False
 JOB_MONITOR_INTERVAL = 10  # seconds between checks
@@ -5908,6 +5909,9 @@ _monitored_repos: Dict[str, str] = {}  # project_name -> repo (owner/repo)
 _ci_processed_runs: set = set()  # Processed workflow run IDs
 _ci_fix_attempts: Dict[str, int] = {}  # repo -> fix attempt count
 CI_MAX_AUTO_FIX_ATTEMPTS = 3
+
+# Track completed jobs to prevent re-triggering phases
+_completed_job_ids: set = set()  # Jobs that have completed (persistent for session)
 
 
 async def send_notification(application, message: str, parse_mode: str = "Markdown"):
@@ -5940,7 +5944,7 @@ async def send_notification(application, message: str, parse_mode: str = "Markdo
 
 async def job_monitor_task(application):
     """Background task to monitor job status changes and send notifications."""
-    global _notified_jobs, _job_monitor_running
+    global _notified_jobs, _job_monitor_running, _completed_job_ids
     _job_monitor_running = True
     logger.info("Job monitor started")
 
@@ -5959,15 +5963,25 @@ async def job_monitor_task(application):
                 if not job_id:
                     continue
 
-                last_notified = _notified_jobs.get(job_id)
+                # Get tracking info for this job
+                job_tracking = _notified_jobs.get(job_id, {})
+                last_notified_state = job_tracking.get("state")
+                phase_triggered = job_tracking.get("phase_triggered", False)
 
-                # Skip if we already notified about this state
-                if last_notified == state:
+                # Skip if we already notified about this exact state
+                if last_notified_state == state:
+                    continue
+
+                # Skip if this job already completed (prevent re-processing on restart)
+                if job_id in _completed_job_ids and state == "completed":
                     continue
 
                 # Notify on completion or failure
                 if state == "completed":
-                    _notified_jobs[job_id] = state
+                    # Mark as completed immediately to prevent duplicates
+                    _completed_job_ids.add(job_id)
+                    _notified_jobs[job_id] = {"state": state, "phase_triggered": phase_triggered}
+
                     result_summary = job.get("result_summary", "")[:500]
                     message = (
                         f"✅ *Job Completed*\n\n"
@@ -5978,25 +5992,31 @@ async def job_monitor_task(application):
                     if result_summary:
                         message += f"*Summary:*\n{escape_markdown(result_summary[:300])}...\n\n"
 
-                    # Automatic phase progression
-                    if task_type == "planning":
-                        message += "🚀 *Triggering development phase...*"
-                        asyncio.create_task(trigger_development_phase(application, project, job))
-                    elif task_type == "development":
-                        message += "🚀 *Triggering deployment phase...*"
-                        asyncio.create_task(trigger_deployment_phase(application, project, job))
-                    elif task_type == "deployment":
-                        message += (
-                            "\n\n✅ *Deployment complete!*\n"
-                            "Please test the application and provide feedback:\n"
-                            "• `/approve <project>` - Approve for production\n"
-                            "• `/feedback <project> <issues>` - Report issues"
-                        )
+                    # Automatic phase progression - only if not already triggered
+                    if not phase_triggered:
+                        _notified_jobs[job_id]["phase_triggered"] = True
+                        if task_type == "planning":
+                            message += "🚀 *Triggering development phase...*"
+                            asyncio.create_task(trigger_development_phase(application, project, job))
+                        elif task_type == "development":
+                            message += "🚀 *Triggering deployment phase...*"
+                            asyncio.create_task(trigger_deployment_phase(application, project, job))
+                        elif task_type == "deployment":
+                            message += (
+                                "\n\n✅ *Deployment complete!*\n"
+                                "Please test the application and provide feedback:\n"
+                                "• `/approve <project>` - Approve for production\n"
+                                "• `/feedback <project> <issues>` - Report issues"
+                            )
+                    else:
+                        # Phase already triggered, just show completion
+                        if task_type == "deployment":
+                            message += "\n\n✅ *Deployment workflow finished.*"
 
                     await send_notification(application, message)
 
                 elif state == "failed":
-                    _notified_jobs[job_id] = state
+                    _notified_jobs[job_id] = {"state": state, "phase_triggered": False}
                     error = job.get("error_message", "Unknown error")[:300]
                     exit_code = job.get("exit_code", "N/A")
                     message = (
@@ -6010,9 +6030,9 @@ async def job_monitor_task(application):
                     )
                     await send_notification(application, message)
 
-                elif state == "running" and last_notified is None:
+                elif state == "running" and last_notified_state is None:
                     # First time seeing this job - notify it started
-                    _notified_jobs[job_id] = "started"
+                    _notified_jobs[job_id] = {"state": "started", "phase_triggered": False}
                     message = (
                         f"🔄 *Job Started*\n\n"
                         f"*Project:* {escape_markdown(project)}\n"
@@ -6022,12 +6042,18 @@ async def job_monitor_task(application):
                     )
                     await send_notification(application, message)
 
-            # Clean up old notified jobs (keep last 100)
-            if len(_notified_jobs) > 100:
+            # Clean up old notified jobs (keep last 200)
+            if len(_notified_jobs) > 200:
                 # Remove oldest entries
-                keys_to_remove = list(_notified_jobs.keys())[:-100]
+                keys_to_remove = list(_notified_jobs.keys())[:-200]
                 for key in keys_to_remove:
                     del _notified_jobs[key]
+
+            # Keep completed job IDs set manageable (last 500)
+            if len(_completed_job_ids) > 500:
+                # Convert to list, keep last 500
+                completed_list = list(_completed_job_ids)
+                _completed_job_ids = set(completed_list[-500:])
 
         except Exception as e:
             logger.error(f"Job monitor error: {e}")
@@ -6486,6 +6512,23 @@ def main():
     # Phase 20-21: Start background monitoring tasks
     async def post_init(app):
         """Start background tasks after bot is initialized."""
+        global _completed_job_ids, _notified_jobs
+
+        # Pre-populate completed jobs to prevent re-notification on restart
+        logger.info("Loading existing completed jobs...")
+        try:
+            result = await controller.list_claude_jobs(limit=100)
+            jobs = result.get("jobs", [])
+            for job in jobs:
+                job_id = job.get("job_id")
+                state = job.get("state")
+                if job_id and state in ("completed", "failed"):
+                    _completed_job_ids.add(job_id)
+                    _notified_jobs[job_id] = {"state": state, "phase_triggered": True}
+            logger.info(f"Loaded {len(_completed_job_ids)} completed/failed jobs to skip")
+        except Exception as e:
+            logger.warning(f"Failed to load existing jobs: {e}")
+
         logger.info("Starting job monitor background task...")
         asyncio.create_task(job_monitor_task(app))
 
