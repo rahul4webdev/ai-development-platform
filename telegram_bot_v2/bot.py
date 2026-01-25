@@ -5893,12 +5893,21 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # -----------------------------------------------------------------------------
 # Phase 20: Job Monitor & Notification System
+# Phase 21: CI Monitor Integration
 # -----------------------------------------------------------------------------
 # Track jobs we've already notified about to avoid duplicates
 _notified_jobs: Dict[str, str] = {}  # job_id -> last_state_notified
 _job_monitor_running = False
+_ci_monitor_running = False
 JOB_MONITOR_INTERVAL = 10  # seconds between checks
+CI_MONITOR_INTERVAL = 60  # seconds between CI checks
 NOTIFICATION_CHAT_IDS: List[int] = []  # Will be populated from ROLE_OWNERS
+
+# Phase 21: CI Monitor state
+_monitored_repos: Dict[str, str] = {}  # project_name -> repo (owner/repo)
+_ci_processed_runs: set = set()  # Processed workflow run IDs
+_ci_fix_attempts: Dict[str, int] = {}  # repo -> fix attempt count
+CI_MAX_AUTO_FIX_ATTEMPTS = 3
 
 
 async def send_notification(application, message: str, parse_mode: str = "Markdown"):
@@ -6152,6 +6161,204 @@ def stop_job_monitor():
 
 
 # -----------------------------------------------------------------------------
+# Phase 21: CI Monitor for Auto-Detection and Self-Healing
+# -----------------------------------------------------------------------------
+def register_project_repo(project_name: str, github_repo: str):
+    """Register a project's GitHub repo for CI monitoring."""
+    global _monitored_repos
+    _monitored_repos[project_name] = github_repo
+    logger.info(f"Registered CI monitoring for {project_name}: {github_repo}")
+
+
+async def ci_monitor_task(application):
+    """Background task to monitor GitHub CI status and trigger auto-fixes."""
+    global _ci_monitor_running, _ci_processed_runs, _ci_fix_attempts
+    _ci_monitor_running = True
+
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not github_token:
+        logger.warning("GITHUB_TOKEN not set, CI monitor disabled")
+        return
+
+    logger.info(f"CI Monitor started, checking every {CI_MONITOR_INTERVAL}s")
+
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+    while _ci_monitor_running:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                for project_name, repo in list(_monitored_repos.items()):
+                    try:
+                        # Get recent workflow runs
+                        response = await client.get(
+                            f"https://api.github.com/repos/{repo}/actions/runs",
+                            headers=headers,
+                            params={"per_page": 5}
+                        )
+
+                        if response.status_code != 200:
+                            continue
+
+                        runs = response.json().get("workflow_runs", [])
+
+                        for run in runs:
+                            run_id = run["id"]
+
+                            # Skip already processed
+                            if run_id in _ci_processed_runs:
+                                continue
+
+                            # Only process completed runs
+                            if run["status"] != "completed":
+                                continue
+
+                            _ci_processed_runs.add(run_id)
+
+                            conclusion = run["conclusion"]
+                            workflow_name = run["name"]
+
+                            if conclusion == "failure":
+                                # CI Failed - notify and attempt auto-fix
+                                attempts = _ci_fix_attempts.get(repo, 0)
+
+                                if attempts < CI_MAX_AUTO_FIX_ATTEMPTS:
+                                    message = (
+                                        f"🔴 *CI Failed*\n\n"
+                                        f"*Project:* {escape_markdown(project_name)}\n"
+                                        f"*Repo:* {repo}\n"
+                                        f"*Workflow:* {workflow_name}\n"
+                                        f"*Attempt:* {attempts + 1}/{CI_MAX_AUTO_FIX_ATTEMPTS}\n\n"
+                                        f"🔧 *Creating auto-fix job...*"
+                                    )
+                                    await send_notification(application, message)
+
+                                    # Create bug_fix job
+                                    fix_task = f"""CI FIX - Auto-remediation for {workflow_name}
+
+PROJECT: {project_name}
+REPO: {repo}
+RUN: {run_id}
+
+INSTRUCTIONS:
+1. Clone the repository: git clone https://github.com/{repo}.git
+2. Analyze the CI failure (check GitHub Actions logs)
+3. Fix the identified issues
+4. Run black and flake8 to fix Python formatting/linting
+5. For React: ensure useCallback is used properly
+6. Commit and push the fix
+7. The CI will automatically re-run
+
+Common fixes:
+- Remove unused imports (flake8 F401)
+- Use npm install --legacy-peer-deps for npm issues
+- Pin bcrypt>=4.0.0,<4.2.0 for passlib compatibility
+- Add useCallback for React hooks
+"""
+                                    result = await controller.create_claude_job(
+                                        project_name=project_name,
+                                        task_description=fix_task,
+                                        task_type="bug_fix"
+                                    )
+
+                                    _ci_fix_attempts[repo] = attempts + 1
+
+                                    if result.get("job_id"):
+                                        logger.info(f"Created auto-fix job {result['job_id']} for {repo}")
+                                else:
+                                    # Max attempts reached
+                                    message = (
+                                        f"⚠️ *CI Auto-Fix Limit Reached*\n\n"
+                                        f"*Project:* {escape_markdown(project_name)}\n"
+                                        f"*Repo:* {repo}\n\n"
+                                        f"Max auto-fix attempts ({CI_MAX_AUTO_FIX_ATTEMPTS}) reached.\n"
+                                        f"Manual intervention required."
+                                    )
+                                    await send_notification(application, message)
+
+                            elif conclusion == "success":
+                                # CI Passed
+                                if repo in _ci_fix_attempts and _ci_fix_attempts[repo] > 0:
+                                    # Success after previous failure - reset and notify
+                                    _ci_fix_attempts[repo] = 0
+                                    message = (
+                                        f"✅ *CI Passed After Fix*\n\n"
+                                        f"*Project:* {escape_markdown(project_name)}\n"
+                                        f"*Repo:* {repo}\n"
+                                        f"*Workflow:* {workflow_name}\n\n"
+                                        f"Auto-fix successful! Triggering deployment..."
+                                    )
+                                    await send_notification(application, message)
+
+                                    # Auto-trigger deployment workflow
+                                    await trigger_github_deployment(
+                                        application, client, headers,
+                                        project_name, repo
+                                    )
+
+                    except Exception as e:
+                        logger.error(f"CI monitor error for {repo}: {e}")
+
+            # Keep last 1000 processed runs
+            if len(_ci_processed_runs) > 1000:
+                _ci_processed_runs = set(list(_ci_processed_runs)[-500:])
+
+        except Exception as e:
+            logger.error(f"CI monitor error: {e}")
+
+        await asyncio.sleep(CI_MONITOR_INTERVAL)
+
+
+async def trigger_github_deployment(
+    application,
+    client: httpx.AsyncClient,
+    headers: Dict,
+    project_name: str,
+    repo: str
+):
+    """Trigger GitHub deployment workflow after CI passes."""
+    try:
+        # Trigger deploy-testing workflow
+        response = await client.post(
+            f"https://api.github.com/repos/{repo}/actions/workflows/deploy-testing.yml/dispatches",
+            headers=headers,
+            json={
+                "ref": "main",
+                "inputs": {"confirm_deployment": "DEPLOY"}
+            }
+        )
+
+        if response.status_code in (204, 200):
+            message = (
+                f"🚀 *Deployment Triggered*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Repo:* {repo}\n\n"
+                f"Deployment to testing environment started."
+            )
+        else:
+            message = (
+                f"⚠️ *Deployment Trigger Failed*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Status:* {response.status_code}\n\n"
+                f"Please trigger deployment manually."
+            )
+
+        await send_notification(application, message)
+
+    except Exception as e:
+        logger.error(f"Failed to trigger deployment for {repo}: {e}")
+
+
+def stop_ci_monitor():
+    """Stop the CI monitor."""
+    global _ci_monitor_running
+    _ci_monitor_running = False
+    logger.info("CI monitor stopped")
+
+
+# -----------------------------------------------------------------------------
 # Main Entry Point
 # -----------------------------------------------------------------------------
 def main():
@@ -6262,11 +6469,18 @@ def main():
     # Error handler
     application.add_error_handler(error_handler)
 
-    # Phase 20: Start job monitor as background task
+    # Phase 20-21: Start background monitoring tasks
     async def post_init(app):
         """Start background tasks after bot is initialized."""
         logger.info("Starting job monitor background task...")
         asyncio.create_task(job_monitor_task(app))
+
+        # Phase 21: Start CI monitor if GitHub token available
+        if os.getenv("GITHUB_TOKEN"):
+            logger.info("Starting CI monitor background task...")
+            asyncio.create_task(ci_monitor_task(app))
+        else:
+            logger.warning("GITHUB_TOKEN not set, CI auto-fix monitoring disabled")
 
     application.post_init = post_init
 
