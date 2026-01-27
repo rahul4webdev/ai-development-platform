@@ -2775,6 +2775,187 @@ async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # -----------------------------------------------------------------------------
+# Phase 22: Rescue System Commands
+# -----------------------------------------------------------------------------
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEV)
+async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /rescue <project> - View rescue status or reset rescue state.
+
+    Phase 22: Rescue & Recovery System command.
+
+    Usage:
+      /rescue <project>         - View rescue status for project
+      /rescue <project> reset   - Reset rescue state and re-validate
+      /rescue <project> validate - Manually trigger validation
+    """
+    try:
+        from controller.rescue_engine import get_rescue_engine
+
+        if not context.args:
+            await update.message.reply_text(
+                "*🔧 Rescue System*\n\n"
+                "Usage:\n"
+                "• `/rescue <project>` - View rescue status\n"
+                "• `/rescue <project> reset` - Reset rescue state\n"
+                "• `/rescue <project> validate` - Manually validate deployment\n",
+                parse_mode="Markdown"
+            )
+            return
+
+        project_name = context.args[0]
+        action = context.args[1] if len(context.args) > 1 else "status"
+
+        rescue_engine = get_rescue_engine()
+
+        if action == "status":
+            # Show rescue status
+            state = rescue_engine.get_rescue_state(project_name)
+            if state is None:
+                await update.message.reply_text(
+                    f"*🔧 Rescue Status: {escape_markdown(project_name)}*\n\n"
+                    f"No rescue attempts recorded for this project.\n"
+                    f"Use `/rescue {project_name} validate` to check deployment.",
+                    parse_mode="Markdown"
+                )
+            else:
+                attempts = len(state.attempts)
+                status_emoji = "✅" if state.resolved else "🔄"
+                status_text = "Resolved" if state.resolved else "In Progress"
+
+                message = (
+                    f"*🔧 Rescue Status: {escape_markdown(project_name)}*\n\n"
+                    f"*Status:* {status_emoji} {status_text}\n"
+                    f"*Attempts:* {attempts}/3\n"
+                    f"*Deployment Job:* `{state.deployment_job_id[:12]}...`\n\n"
+                    f"*Attempt History:*\n"
+                )
+
+                for attempt in state.attempts:
+                    emoji = "✅" if attempt.success else "❌"
+                    message += (
+                        f"{emoji} Attempt {attempt.attempt_number}: "
+                        f"{attempt.failure_type} - {attempt.outcome or 'Pending'}\n"
+                    )
+
+                if not state.resolved and attempts >= 3:
+                    message += "\n⚠️ *Max attempts reached.* Use `/rescue {project_name} reset` to retry."
+
+                await update.message.reply_text(message, parse_mode="Markdown")
+
+        elif action == "reset":
+            # Reset rescue state
+            rescue_engine.clear_rescue_state(project_name)
+            await update.message.reply_text(
+                f"*🔧 Rescue Reset: {escape_markdown(project_name)}*\n\n"
+                f"Rescue state cleared. You can now:\n"
+                f"• Use `/rescue {project_name} validate` to check deployment\n"
+                f"• Wait for automatic validation on next deployment",
+                parse_mode="Markdown"
+            )
+
+        elif action == "validate":
+            # Manually trigger validation
+            urls = await get_project_deployment_urls(project_name)
+            if not urls:
+                await update.message.reply_text(
+                    f"*❌ No URLs found for {escape_markdown(project_name)}*\n\n"
+                    f"Cannot validate - no deployment URLs configured.",
+                    parse_mode="Markdown"
+                )
+                return
+
+            await update.message.reply_text(
+                f"*🔍 Validating {escape_markdown(project_name)}...*\n\n"
+                f"Checking endpoints:\n"
+                f"• API: {urls.get('api', 'N/A')}\n"
+                f"• Frontend: {urls.get('frontend', 'N/A')}\n"
+                f"• Admin: {urls.get('admin', 'N/A')}",
+                parse_mode="Markdown"
+            )
+
+            # Trigger validation
+            mock_job = {"job_id": f"manual-{project_name}-{datetime.utcnow().timestamp()}"}
+            asyncio.create_task(
+                trigger_deployment_validation(
+                    context.application, project_name, mock_job, urls
+                )
+            )
+
+        else:
+            await update.message.reply_text(
+                f"Unknown action: {action}\n"
+                f"Valid actions: status, reset, validate"
+            )
+
+    except ImportError:
+        await update.message.reply_text(
+            "❌ Rescue system not available.\n"
+            "Please check that controller modules are deployed."
+        )
+    except Exception as e:
+        logger.error(f"Error in rescue_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEV)
+async def rescue_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /rescue_history <project> - View detailed rescue history.
+
+    Phase 22: Rescue & Recovery System history view.
+    """
+    try:
+        from controller.rescue_engine import get_rescue_engine
+
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: `/rescue_history <project>`",
+                parse_mode="Markdown"
+            )
+            return
+
+        project_name = context.args[0]
+        rescue_engine = get_rescue_engine()
+        history = rescue_engine.get_rescue_history(project_name)
+
+        if not history:
+            await update.message.reply_text(
+                f"*📜 Rescue History: {escape_markdown(project_name)}*\n\n"
+                f"No rescue attempts recorded.",
+                parse_mode="Markdown"
+            )
+            return
+
+        message = f"*📜 Rescue History: {escape_markdown(project_name)}*\n\n"
+
+        for attempt in history:
+            emoji = "✅" if attempt.success else "❌"
+            message += (
+                f"{emoji} *Attempt {attempt.attempt_number}*\n"
+                f"   Job: `{attempt.job_id[:12]}...`\n"
+                f"   Failure: {attempt.failure_type}\n"
+                f"   Created: {attempt.created_at[:16]}\n"
+            )
+            if attempt.completed_at:
+                message += f"   Completed: {attempt.completed_at[:16]}\n"
+            if attempt.outcome:
+                message += f"   Outcome: {attempt.outcome}\n"
+            message += "\n"
+
+        await update.message.reply_text(message, parse_mode="Markdown")
+
+    except ImportError:
+        await update.message.reply_text(
+            "❌ Rescue system not available."
+        )
+    except Exception as e:
+        logger.error(f"Error in rescue_history_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
 # Message Handler (Natural Language Input)
 # -----------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5978,26 +6159,87 @@ async def get_project_deployment_urls(project_name: str) -> Dict[str, str]:
 
 
 def _extract_urls_from_text(text: str) -> Dict[str, str]:
-    """Extract deployment URLs from requirements text."""
+    """
+    Extract deployment URLs from requirements text.
+
+    Supports multiple YAML formats and flexible pattern matching.
+    Phase 22: Fixed to extract all 3 deployment targets (api, frontend, admin).
+    """
     import re
     urls = {}
 
-    # Look for domain patterns in YAML-like structure
-    api_match = re.search(r'api:\s*\n\s*domain:\s*([^\s\n]+)', text)
-    frontend_match = re.search(r'frontend_web:\s*\n\s*domain:\s*([^\s\n]+)', text)
-    admin_match = re.search(r'admin_panel:\s*\n\s*domain:\s*([^\s\n]+)', text)
+    # API patterns - multiple formats supported
+    api_patterns = [
+        r'api:\s*\n\s*domain:\s*([^\s\n]+)',  # api:\n  domain: xxx
+        r'api:\s*([a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,})',  # api: domain.com
+        r'API[:\s]+(?:https?://)?([a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,})',  # API: domain.com
+    ]
 
-    if api_match:
-        domain = api_match.group(1).strip()
-        urls['api'] = f"https://{domain}"
-        urls['docs'] = f"https://{domain}/docs"
-    if frontend_match:
-        domain = frontend_match.group(1).strip()
-        urls['frontend'] = f"https://{domain}"
-    if admin_match:
-        domain = admin_match.group(1).strip()
-        urls['admin'] = f"https://{domain}"
+    # Frontend patterns - multiple formats supported
+    frontend_patterns = [
+        r'frontend_web:\s*\n\s*domain:\s*([^\s\n]+)',  # frontend_web:\n  domain: xxx
+        r'frontend:\s*\n\s*domain:\s*([^\s\n]+)',  # frontend:\n  domain: xxx
+        r'frontend:\s*([a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,})',  # frontend: domain.com
+        r'Frontend[:\s]+(?:https?://)?([a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,})',  # Frontend: domain.com
+    ]
 
+    # Admin panel patterns - multiple formats supported (FIXED: was too restrictive)
+    admin_patterns = [
+        r'admin_panel:\s*\n\s*domain:\s*([^\s\n]+)',  # admin_panel:\n  domain: xxx
+        r'admin:\s*\n\s*domain:\s*([^\s\n]+)',  # admin:\n  domain: xxx
+        r'backend[^:]*:\s*\n\s*domain:\s*([^\s\n]+)',  # backend (admin):\n  domain: xxx
+        r'Admin\s*Panel[:\s]+(?:https?://)?([a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,})',  # Admin Panel: domain
+        r'admin[:\s]+(?:https?://)?([a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,})',  # admin: domain.com
+        r'testhealth\.[a-zA-Z0-9\-\.]+',  # Direct match for testhealth.* domains
+    ]
+
+    # Extract API domain
+    for pattern in api_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            domain = match.group(1).strip() if match.lastindex else match.group(0).strip()
+            # Remove any trailing punctuation
+            domain = re.sub(r'[,;:\s]+$', '', domain)
+            if domain and '.' in domain:
+                urls['api'] = f"https://{domain}"
+                urls['docs'] = f"https://{domain}/docs"
+                break
+
+    # Extract Frontend domain
+    for pattern in frontend_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            domain = match.group(1).strip() if match.lastindex else match.group(0).strip()
+            domain = re.sub(r'[,;:\s]+$', '', domain)
+            if domain and '.' in domain:
+                urls['frontend'] = f"https://{domain}"
+                break
+
+    # Extract Admin panel domain
+    for pattern in admin_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            domain = match.group(1).strip() if match.lastindex else match.group(0).strip()
+            domain = re.sub(r'[,;:\s]+$', '', domain)
+            if domain and '.' in domain:
+                urls['admin'] = f"https://{domain}"
+                break
+
+    # Fallback: Try to extract any domains containing specific keywords
+    if 'admin' not in urls:
+        # Look for domains with "admin", "test", "backend" in them
+        admin_domain_match = re.search(
+            r'(?:https?://)?([a-zA-Z0-9\-]*(?:admin|test|backend)[a-zA-Z0-9\-]*\.[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,})',
+            text, re.IGNORECASE
+        )
+        if admin_domain_match:
+            domain = admin_domain_match.group(1).strip()
+            # Don't use if it's already the API or frontend domain
+            if domain not in [urls.get('api', '').replace('https://', ''),
+                              urls.get('frontend', '').replace('https://', '')]:
+                urls['admin'] = f"https://{domain}"
+
+    logger.debug(f"Extracted URLs from text: {urls}")
     return urls
 
 
@@ -6089,41 +6331,35 @@ async def job_monitor_task(application):
                             message += "🚀 *Triggering deployment phase...*"
                             asyncio.create_task(trigger_deployment_phase(application, project, job))
                         elif task_type == "deployment":
-                            # Get deployment URLs for the project
+                            # Phase 22: Trigger validation instead of immediate success
                             urls = await get_project_deployment_urls(project)
-                            message += "\n\n✅ *Deployment complete!*\n"
+                            message += "\n\n🔍 *Validating deployment...*"
 
-                            if urls:
-                                message += "\n📍 *Testing URLs:*\n"
-                                if urls.get('frontend'):
-                                    message += f"• Frontend: {urls['frontend']}\n"
-                                if urls.get('api'):
-                                    message += f"• API: {urls['api']}\n"
-                                if urls.get('docs'):
-                                    message += f"• API Docs: {urls['docs']}\n"
-                                if urls.get('admin'):
-                                    message += f"• Admin: {urls['admin']}\n"
-
-                            message += (
-                                "\nPlease test the application and provide feedback:\n"
-                                "• `/approve <project>` - Approve for production\n"
-                                "• `/feedback <project> <issues>` - Report issues"
+                            # Trigger async validation (will send its own notifications)
+                            asyncio.create_task(
+                                trigger_deployment_validation(application, project, job, urls)
+                            )
+                        elif task_type == "rescue":
+                            # Phase 22: Handle rescue job completion
+                            message += "\n\n🔧 *Rescue job completed, re-validating...*"
+                            asyncio.create_task(
+                                handle_rescue_job_completion(application, project, job)
                             )
                     else:
                         # Phase already triggered, just show completion
                         if task_type == "deployment":
-                            # Get deployment URLs for the project
+                            # Phase 22: Still validate even if phase was triggered before
                             urls = await get_project_deployment_urls(project)
-                            message += "\n\n✅ *Deployment workflow finished.*"
-
-                            if urls:
-                                message += "\n\n📍 *Testing URLs:*\n"
-                                if urls.get('frontend'):
-                                    message += f"• Frontend: {urls['frontend']}\n"
-                                if urls.get('api'):
-                                    message += f"• API: {urls['api']}\n"
-                                if urls.get('docs'):
-                                    message += f"• API Docs: {urls['docs']}\n"
+                            message += "\n\n🔍 *Validating deployment...*"
+                            asyncio.create_task(
+                                trigger_deployment_validation(application, project, job, urls)
+                            )
+                        elif task_type == "rescue":
+                            # Phase 22: Re-validate after rescue
+                            message += "\n\n🔧 *Rescue completed, validating...*"
+                            asyncio.create_task(
+                                handle_rescue_job_completion(application, project, job)
+                            )
 
                     await send_notification(application, message)
 
@@ -6244,6 +6480,30 @@ async def trigger_deployment_phase(application, project_name: str, dev_job: Dict
         # Get development job ID to copy artifacts
         dev_job_id = dev_job.get("job_id")
 
+        # Phase 22: Get ALL deployment URLs to pass to Claude
+        urls = await get_project_deployment_urls(project_name)
+        api_url = urls.get('api', 'Not configured - discover from PLANNING_OUTPUT.yaml')
+        frontend_url = urls.get('frontend', 'Not configured - discover from PLANNING_OUTPUT.yaml')
+        admin_url = urls.get('admin', 'Not configured - discover from PLANNING_OUTPUT.yaml')
+        docs_url = urls.get('docs', '')
+
+        # Build deployment targets section
+        deployment_targets = f"""DEPLOYMENT TARGETS:
+1. API Backend:
+   - URL: {api_url}
+   - Deploy FastAPI/backend code
+   - Verify /health and /docs endpoints work
+
+2. Frontend Web:
+   - URL: {frontend_url}
+   - Deploy React/frontend build
+   - Verify main page loads
+
+3. Admin Panel (if applicable):
+   - URL: {admin_url}
+   - Deploy admin interface
+   - Verify admin login page loads"""
+
         task_description = f"""DEPLOYMENT PHASE - Deploy to Testing Environment
 
 PROJECT: {project_name}
@@ -6252,24 +6512,27 @@ INSTRUCTIONS:
 1. Read PLANNING_OUTPUT.yaml for deployment targets and configuration
 2. Read DEPLOYMENT.md for deployment procedures
 3. The project code has been copied to your workspace in the "{project_name}/" directory
-4. Deploy to the TESTING environment only
-5. Verify deployment is successful
+4. Deploy ALL components to the TESTING environment
+5. Verify ALL deployments are successful
 6. Update CURRENT_STATE.md with deployment status
 
 PROJECT CODE LOCATION:
 - The complete project code from development is in: ./{project_name}/
 - Backend: ./{project_name}/backend/
 - Frontend: ./{project_name}/frontend/
+- Admin Panel: ./{project_name}/admin/ (if exists)
 
-DEPLOYMENT TARGETS (from project config):
-- API: Deploy backend to configured API domain
-- Frontend: Deploy frontend to configured web domain
-- Verify both are accessible
+{deployment_targets}
+
+CRITICAL - DEPLOY ALL TARGETS:
+- You MUST deploy all configured components (API, Frontend, Admin if specified)
+- Do NOT skip any deployment target
+- If a target URL says "Not configured", check PLANNING_OUTPUT.yaml for the actual domain
 
 IMPORTANT:
 - Deploy to TESTING only, NOT production
-- Run smoke tests after deployment
-- Report deployment URLs in logs/DEPLOYMENT_LOG.md
+- Run smoke tests after deployment for EACH deployed component
+- Report ALL deployment URLs in logs/DEPLOYMENT_LOG.md
 - Note any issues in logs/BLOCKERS.md
 
 After deployment, human validation will be required before production.
@@ -6310,6 +6573,351 @@ def stop_job_monitor():
     global _job_monitor_running
     _job_monitor_running = False
     logger.info("Job monitor stopped")
+
+
+# -----------------------------------------------------------------------------
+# Phase 22: Deployment Validation & Rescue System
+# -----------------------------------------------------------------------------
+
+async def trigger_deployment_validation(
+    application,
+    project_name: str,
+    deployment_job: Dict,
+    urls: Dict[str, str]
+) -> bool:
+    """
+    Validate deployment endpoints and trigger rescue if needed.
+
+    Phase 22: Post-deployment validation with automatic rescue.
+
+    Args:
+        application: Telegram application for notifications
+        project_name: Name of the project
+        deployment_job: The completed deployment job dict
+        urls: Dict of deployment URLs (api, frontend, admin)
+
+    Returns:
+        True if validation passed, False if rescue triggered or failed
+    """
+    try:
+        # Import validation components
+        from controller.deployment_validator import (
+            DeploymentValidator,
+            DeploymentFailureClassifier,
+        )
+        from controller.rescue_engine import get_rescue_engine
+        from controller.server_detector import ServerDetector
+
+        logger.info(f"Starting deployment validation for {project_name}")
+
+        # Build list of endpoints to validate
+        endpoints_to_check = []
+
+        if urls.get('api'):
+            api_base = urls['api'].rstrip('/')
+            if not api_base.startswith('http'):
+                api_base = f"https://{api_base}"
+            endpoints_to_check.extend([
+                api_base,
+                f"{api_base}/health",
+                f"{api_base}/docs",
+            ])
+
+        if urls.get('frontend'):
+            frontend_base = urls['frontend'].rstrip('/')
+            if not frontend_base.startswith('http'):
+                frontend_base = f"https://{frontend_base}"
+            endpoints_to_check.append(frontend_base)
+
+        if urls.get('admin'):
+            admin_base = urls['admin'].rstrip('/')
+            if not admin_base.startswith('http'):
+                admin_base = f"https://{admin_base}"
+            endpoints_to_check.append(admin_base)
+
+        if not endpoints_to_check:
+            logger.warning(f"No endpoints to validate for {project_name}")
+            return True  # Nothing to validate
+
+        # Run validation
+        validator = DeploymentValidator()
+        validation_result = await validator.validate_deployment(
+            project_name=project_name,
+            deployment_job_id=deployment_job.get("job_id", "unknown"),
+            endpoints=endpoints_to_check
+        )
+
+        if validation_result.all_healthy:
+            # All endpoints are healthy - send success notification
+            logger.info(f"Deployment validation passed for {project_name}")
+
+            # Emit success signal to runtime intelligence
+            try:
+                from controller.runtime_intelligence import SignalCollector, SignalPersister
+                signal_collector = SignalCollector()
+                signal = signal_collector.emit_deployment_success_signal(
+                    project_name=project_name,
+                    validated_endpoints=endpoints_to_check,
+                    was_rescue=False
+                )
+                persister = SignalPersister()
+                persister.persist([signal])
+            except Exception as sig_err:
+                logger.debug(f"Signal emission failed (non-blocking): {sig_err}")
+
+            message = (
+                f"✅ *Deployment Validated Successfully!*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n\n"
+                f"📍 *Working URLs:*\n"
+            )
+            if urls.get('frontend'):
+                message += f"• Frontend: {urls['frontend']}\n"
+            if urls.get('api'):
+                message += f"• API: {urls['api']}\n"
+            if urls.get('admin'):
+                message += f"• Admin: {urls['admin']}\n"
+
+            message += (
+                f"\nPlease test the application and provide feedback:\n"
+                f"• `/approve {project_name}` - Approve for production\n"
+                f"• `/feedback {project_name} <issues>` - Report issues"
+            )
+            await send_notification(application, message)
+            return True
+
+        # Validation failed - classify and potentially rescue
+        classifier = DeploymentFailureClassifier()
+        failure = classifier.classify_failure(validation_result)
+
+        if failure is None:
+            # Couldn't classify - partial success perhaps
+            logger.warning(f"Could not classify failure for {project_name}")
+            return True
+
+        # Check if we can attempt rescue
+        rescue_engine = get_rescue_engine()
+        can_rescue, reason = rescue_engine.can_attempt_rescue(
+            project_name,
+            deployment_job.get("job_id")
+        )
+
+        if not can_rescue:
+            # Emit critical failure signal (max attempts reached)
+            try:
+                from controller.runtime_intelligence import SignalCollector, SignalPersister
+                signal_collector = SignalCollector()
+                signal = signal_collector.emit_deployment_failure_signal(
+                    project_name=project_name,
+                    failure_type=failure.failure_type.value,
+                    failed_endpoints=failure.failed_urls,
+                    rescue_attempt=3,  # Max attempts
+                    max_attempts=3
+                )
+                persister = SignalPersister()
+                persister.persist([signal])
+            except Exception as sig_err:
+                logger.debug(f"Signal emission failed (non-blocking): {sig_err}")
+
+            # Max attempts reached - notify for manual intervention
+            message = (
+                f"🚨 *MANUAL INTERVENTION REQUIRED*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Reason:* {escape_markdown(reason)}\n\n"
+                f"*Failure Type:* {failure.failure_type.value}\n\n"
+                f"*Failed Endpoints:*\n"
+            )
+            for f_url in failure.failed_urls[:5]:
+                message += f"• {f_url.get('url', 'unknown')}: {f_url.get('error', 'unknown')}\n"
+
+            message += (
+                f"\n⚠️ Automatic rescue attempts exhausted.\n"
+                f"Please investigate manually and use:\n"
+                f"• `/feedback {project_name} <issues>` to report\n"
+                f"• `/rescue {project_name}` to reset and retry"
+            )
+            await send_notification(application, message)
+            return False
+
+        # Detect server environment for rescue instructions
+        server_config = None
+        try:
+            detector = ServerDetector()
+            # Try to detect from any available source
+            server_config = detector.detect_from_paths()
+        except Exception as e:
+            logger.debug(f"Server detection failed: {e}")
+
+        # Create rescue job
+        success, msg, rescue_job_id = await rescue_engine.create_rescue_job(
+            project_name=project_name,
+            failure=failure,
+            source_deployment_job_id=deployment_job.get("job_id", "unknown"),
+            controller_client=controller,
+            server_config=server_config
+        )
+
+        if success and rescue_job_id:
+            # Extract attempt number from reason string (e.g., "Attempt 2 of 3")
+            attempt_num = 1
+            try:
+                import re
+                match = re.search(r'Attempt (\d+)', reason)
+                if match:
+                    attempt_num = int(match.group(1))
+            except Exception:
+                pass
+
+            # Emit failure signal to runtime intelligence
+            try:
+                from controller.runtime_intelligence import SignalCollector, SignalPersister
+                signal_collector = SignalCollector()
+                signal = signal_collector.emit_deployment_failure_signal(
+                    project_name=project_name,
+                    failure_type=failure.failure_type.value,
+                    failed_endpoints=failure.failed_urls,
+                    rescue_attempt=attempt_num,
+                    max_attempts=3
+                )
+                persister = SignalPersister()
+                persister.persist([signal])
+            except Exception as sig_err:
+                logger.debug(f"Signal emission failed (non-blocking): {sig_err}")
+
+            # Notify about rescue job
+            attempt_info = reason  # Contains attempt X of Y
+            message = (
+                f"❌ *Deployment Validation Failed*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Failure Type:* {failure.failure_type.value}\n\n"
+                f"*Failed Endpoints:*\n"
+            )
+            for f_url in failure.failed_urls[:5]:
+                message += f"• {f_url.get('url', 'unknown')}: {f_url.get('error', 'unknown')}\n"
+
+            message += (
+                f"\n🔧 *Rescue Job Created*\n"
+                f"*Job ID:* `{rescue_job_id[:12]}...`\n"
+                f"*Status:* {escape_markdown(attempt_info)}\n\n"
+                f"Claude is attempting to fix the deployment issues."
+            )
+            await send_notification(application, message)
+            return False  # Rescue in progress
+        else:
+            # Failed to create rescue job
+            message = (
+                f"⚠️ *Rescue Job Creation Failed*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Error:* {escape_markdown(msg)}\n\n"
+                f"Please investigate manually."
+            )
+            await send_notification(application, message)
+            return False
+
+    except ImportError as e:
+        logger.error(f"Rescue system not available: {e}")
+        return True  # Continue without validation
+    except Exception as e:
+        logger.error(f"Deployment validation failed: {e}")
+        return True  # Don't block on validation errors
+
+
+async def handle_rescue_job_completion(
+    application,
+    project_name: str,
+    rescue_job: Dict
+) -> None:
+    """
+    Handle completion of a rescue job - re-validate deployment.
+
+    Phase 22: Re-run validation after rescue completes.
+    """
+    try:
+        from controller.rescue_engine import get_rescue_engine
+
+        rescue_engine = get_rescue_engine()
+        job_id = rescue_job.get("job_id", "")
+
+        # Get deployment URLs
+        urls = await get_project_deployment_urls(project_name)
+
+        if not urls:
+            rescue_engine.mark_rescue_failure(
+                project_name, job_id, "No URLs found to validate"
+            )
+            return
+
+        # Create a mock deployment job for validation
+        mock_deployment_job = {
+            "job_id": job_id,
+            "project_name": project_name,
+        }
+
+        # Re-run validation
+        validation_passed = await trigger_deployment_validation(
+            application, project_name, mock_deployment_job, urls
+        )
+
+        if validation_passed:
+            # Mark rescue as successful
+            rescue_engine.mark_rescue_success(project_name, job_id)
+
+            # Get attempt number from rescue state
+            rescue_state = rescue_engine.get_rescue_state(project_name)
+            attempt_num = len(rescue_state.attempts) if rescue_state else 1
+
+            # Emit success signal to runtime intelligence
+            try:
+                from controller.runtime_intelligence import SignalCollector, SignalPersister
+                signal_collector = SignalCollector()
+                validated_endpoints = []
+                if urls.get('api'):
+                    validated_endpoints.append(urls['api'])
+                if urls.get('frontend'):
+                    validated_endpoints.append(urls['frontend'])
+                if urls.get('admin'):
+                    validated_endpoints.append(urls['admin'])
+
+                signal = signal_collector.emit_deployment_success_signal(
+                    project_name=project_name,
+                    validated_endpoints=validated_endpoints,
+                    was_rescue=True,
+                    rescue_attempt=attempt_num
+                )
+                persister = SignalPersister()
+                persister.persist([signal])
+            except Exception as sig_err:
+                logger.debug(f"Signal emission failed (non-blocking): {sig_err}")
+
+            # Send success notification
+            message = (
+                f"✅ *Rescue Successful!*\n\n"
+                f"*Project:* {escape_markdown(project_name)}\n"
+                f"*Fixed after:* {attempt_num} attempt(s)\n\n"
+                f"Deployment is now working:\n"
+            )
+            if urls.get('frontend'):
+                message += f"• Frontend: {urls['frontend']}\n"
+            if urls.get('api'):
+                message += f"• API: {urls['api']}\n"
+            if urls.get('admin'):
+                message += f"• Admin: {urls['admin']}\n"
+
+            message += (
+                f"\nPlease test and provide feedback:\n"
+                f"• `/approve {project_name}` - Approve for production\n"
+                f"• `/feedback {project_name} <issues>` - Report issues"
+            )
+            await send_notification(application, message)
+        else:
+            # Validation still failing - rescue_engine handles next attempt or max-attempts notification
+            rescue_engine.mark_rescue_failure(
+                project_name, job_id, "Validation still failing after rescue"
+            )
+
+    except ImportError:
+        logger.warning("Rescue system not available")
+    except Exception as e:
+        logger.error(f"Failed to handle rescue completion: {e}")
 
 
 # -----------------------------------------------------------------------------
@@ -6608,6 +7216,10 @@ def main():
     application.add_handler(CommandHandler("learning_patterns", learning_patterns_command))
     application.add_handler(CommandHandler("learning_trends", learning_trends_command))
     application.add_handler(CommandHandler("learning_stats", learning_statistics_command))
+
+    # Phase 22: Rescue & Recovery System commands
+    application.add_handler(CommandHandler("rescue", rescue_command))
+    application.add_handler(CommandHandler("rescue_history", rescue_history_command))
 
     # Callback query handler for inline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))

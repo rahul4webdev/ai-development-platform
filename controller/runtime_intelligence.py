@@ -716,6 +716,149 @@ class SignalCollector:
         return signals
 
     # -------------------------------------------------------------------------
+    # Phase 22: Deployment Failure Signals
+    # -------------------------------------------------------------------------
+
+    def emit_deployment_failure_signal(
+        self,
+        project_name: str,
+        failure_type: str,
+        failed_endpoints: List[Dict[str, Any]],
+        rescue_attempt: int,
+        max_attempts: int = 3,
+        environment: str = "testing"
+    ) -> RuntimeSignal:
+        """
+        Emit a signal for deployment validation failure.
+
+        Phase 22: Rescue & Recovery System signal emission.
+
+        This is called when post-deployment validation fails, allowing
+        the runtime intelligence system to track deployment health.
+
+        Args:
+            project_name: Name of the project
+            failure_type: Type of failure (HTTP_404, HTTP_500, etc.)
+            failed_endpoints: List of endpoints that failed validation
+            rescue_attempt: Current rescue attempt number
+            max_attempts: Maximum allowed rescue attempts
+            environment: Deployment environment (testing, production)
+
+        Returns:
+            The emitted RuntimeSignal
+        """
+        now = datetime.utcnow().isoformat()
+
+        # Determine severity based on rescue attempts
+        if rescue_attempt >= max_attempts:
+            severity = Severity.CRITICAL
+        elif rescue_attempt >= 2:
+            severity = Severity.DEGRADED
+        else:
+            severity = Severity.WARNING
+
+        # Create the signal
+        signal = RuntimeSignal(
+            signal_id=self._generate_signal_id(),
+            timestamp=now,
+            signal_type=SignalType.DEPLOYMENT_FAILURE.value,
+            severity=severity.value,
+            source=SignalSource.CONTROLLER.value,
+            project_id=project_name,
+            aspect=None,
+            environment=environment,
+            raw_value={
+                "failure_type": failure_type,
+                "failed_endpoint_count": len(failed_endpoints),
+                "rescue_attempt": rescue_attempt,
+                "max_attempts": max_attempts,
+            },
+            normalized_value=min(1.0, rescue_attempt / max_attempts),
+            confidence=1.0,
+            description=(
+                f"Deployment validation failed for {project_name}: "
+                f"{failure_type} ({len(failed_endpoints)} endpoints, "
+                f"attempt {rescue_attempt}/{max_attempts})"
+            ),
+            metadata={
+                "failure_type": failure_type,
+                "failed_endpoints": [
+                    {"url": e.get("url"), "error": e.get("error")}
+                    for e in failed_endpoints[:10]  # Limit for storage
+                ],
+                "rescue_attempt": rescue_attempt,
+                "max_attempts": max_attempts,
+                "environment": environment,
+            },
+        )
+
+        logger.info(
+            f"Emitted deployment failure signal for {project_name}: "
+            f"{failure_type} (attempt {rescue_attempt}/{max_attempts})"
+        )
+
+        return signal
+
+    def emit_deployment_success_signal(
+        self,
+        project_name: str,
+        validated_endpoints: List[str],
+        was_rescue: bool = False,
+        rescue_attempt: Optional[int] = None,
+        environment: str = "testing"
+    ) -> RuntimeSignal:
+        """
+        Emit a signal for successful deployment validation.
+
+        Phase 22: Rescue & Recovery System success signal.
+
+        Args:
+            project_name: Name of the project
+            validated_endpoints: List of successfully validated endpoints
+            was_rescue: Whether this was after a rescue attempt
+            rescue_attempt: Which rescue attempt succeeded (if applicable)
+            environment: Deployment environment
+
+        Returns:
+            The emitted RuntimeSignal
+        """
+        now = datetime.utcnow().isoformat()
+
+        description = f"Deployment validation passed for {project_name}"
+        if was_rescue and rescue_attempt:
+            description += f" (rescued on attempt {rescue_attempt})"
+
+        signal = RuntimeSignal(
+            signal_id=self._generate_signal_id(),
+            timestamp=now,
+            signal_type=SignalType.DEPLOYMENT_FAILURE.value,  # Same type, info severity
+            severity=Severity.INFO.value,
+            source=SignalSource.CONTROLLER.value,
+            project_id=project_name,
+            aspect=None,
+            environment=environment,
+            raw_value={
+                "success": True,
+                "endpoint_count": len(validated_endpoints),
+                "was_rescue": was_rescue,
+                "rescue_attempt": rescue_attempt,
+            },
+            normalized_value=0.0,  # No failure = 0
+            confidence=1.0,
+            description=description,
+            metadata={
+                "validated_endpoints": validated_endpoints[:10],
+                "was_rescue": was_rescue,
+                "rescue_attempt": rescue_attempt,
+                "environment": environment,
+            },
+        )
+
+        logger.info(f"Emitted deployment success signal for {project_name}")
+
+        return signal
+
+    # -------------------------------------------------------------------------
     # Collect All Signals
     # -------------------------------------------------------------------------
 

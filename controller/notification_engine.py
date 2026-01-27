@@ -59,6 +59,13 @@ class NotificationType(str, Enum):
     DEPLOY_PROD_REQUESTED = "deploy_prod_requested"
     DEPLOY_PROD_COMPLETE = "deploy_prod_complete"
 
+    # Phase 22: Deployment Validation & Rescue
+    DEPLOY_VALIDATION_PASSED = "deploy_validation_passed"
+    DEPLOY_VALIDATION_FAILED = "deploy_validation_failed"
+    RESCUE_JOB_CREATED = "rescue_job_created"
+    RESCUE_SUCCESS = "rescue_success"
+    RESCUE_MAX_ATTEMPTS = "rescue_max_attempts"
+
     # Approval
     APPROVAL_REQUIRED = "approval_required"
     APPROVAL_GRANTED = "approval_granted"
@@ -267,6 +274,196 @@ class NotificationTemplates:
             priority=NotificationPriority.URGENT,
             project_name=project_name,
             metadata={"action": action, "requester": requester}
+        )
+
+    # -------------------------------------------------------------------------
+    # Phase 22: Deployment Validation & Rescue Templates
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def deploy_validation_passed(
+        project_name: str,
+        urls: Dict[str, str]
+    ) -> Notification:
+        """Notification when deployment validation passes."""
+        url_lines = []
+        if urls.get('frontend'):
+            url_lines.append(f"• Frontend: {urls['frontend']}")
+        if urls.get('api'):
+            url_lines.append(f"• API: {urls['api']}")
+        if urls.get('admin'):
+            url_lines.append(f"• Admin: {urls['admin']}")
+
+        urls_str = "\n".join(url_lines) if url_lines else "• No URLs configured"
+
+        return Notification(
+            notification_type=NotificationType.DEPLOY_VALIDATION_PASSED,
+            title="Deployment Validated",
+            message=(
+                f"✅ *Deployment Validated Successfully!*\n\n"
+                f"*Project:* {project_name}\n\n"
+                f"📍 *Working URLs:*\n"
+                f"{urls_str}\n\n"
+                f"Please test the application and provide feedback:\n"
+                f"• `/approve {project_name}` - Approve for production\n"
+                f"• `/feedback {project_name} <issues>` - Report issues"
+            ),
+            priority=NotificationPriority.HIGH,
+            project_name=project_name,
+            metadata={"urls": urls}
+        )
+
+    @staticmethod
+    def deploy_validation_failed(
+        project_name: str,
+        failure_type: str,
+        failed_endpoints: List[Dict[str, str]],
+        rescue_job_id: str,
+        attempt_number: int,
+        max_attempts: int = 3
+    ) -> Notification:
+        """Notification when deployment validation fails and rescue is triggered."""
+        failed_list = []
+        for endpoint in failed_endpoints[:5]:  # Limit to 5 for readability
+            url = endpoint.get('url', 'unknown')
+            error = endpoint.get('error', 'unknown')
+            failed_list.append(f"• {url}: {error}")
+
+        failed_str = "\n".join(failed_list) if failed_list else "• Unknown endpoints"
+
+        return Notification(
+            notification_type=NotificationType.DEPLOY_VALIDATION_FAILED,
+            title="Deployment Validation Failed",
+            message=(
+                f"❌ *Deployment Validation Failed*\n\n"
+                f"*Project:* {project_name}\n"
+                f"*Failure Type:* {failure_type}\n\n"
+                f"*Failed Endpoints:*\n"
+                f"{failed_str}\n\n"
+                f"🔧 *Rescue Job Created*\n"
+                f"*Job ID:* `{rescue_job_id[:12]}...`\n"
+                f"*Attempt:* {attempt_number}/{max_attempts}\n\n"
+                f"Claude is attempting to fix the deployment issues."
+            ),
+            priority=NotificationPriority.HIGH,
+            project_name=project_name,
+            job_id=rescue_job_id,
+            metadata={
+                "failure_type": failure_type,
+                "failed_endpoints": failed_endpoints,
+                "attempt_number": attempt_number,
+                "max_attempts": max_attempts
+            }
+        )
+
+    @staticmethod
+    def rescue_success(
+        project_name: str,
+        urls: Dict[str, str],
+        attempt_number: int
+    ) -> Notification:
+        """Notification when rescue succeeds and deployment is now working."""
+        url_lines = []
+        if urls.get('frontend'):
+            url_lines.append(f"• Frontend: {urls['frontend']}")
+        if urls.get('api'):
+            url_lines.append(f"• API: {urls['api']}")
+        if urls.get('admin'):
+            url_lines.append(f"• Admin: {urls['admin']}")
+
+        urls_str = "\n".join(url_lines) if url_lines else "• No URLs configured"
+
+        return Notification(
+            notification_type=NotificationType.RESCUE_SUCCESS,
+            title="Rescue Successful",
+            message=(
+                f"✅ *Rescue Successful!*\n\n"
+                f"*Project:* {project_name}\n"
+                f"*Fixed after:* {attempt_number} attempt(s)\n\n"
+                f"📍 *Working URLs:*\n"
+                f"{urls_str}\n\n"
+                f"Please test the application and provide feedback:\n"
+                f"• `/approve {project_name}` - Approve for production\n"
+                f"• `/feedback {project_name} <issues>` - Report issues"
+            ),
+            priority=NotificationPriority.HIGH,
+            project_name=project_name,
+            metadata={"urls": urls, "attempt_number": attempt_number}
+        )
+
+    @staticmethod
+    def rescue_max_attempts(
+        project_name: str,
+        failure_type: str,
+        failed_endpoints: List[Dict[str, str]],
+        max_attempts: int = 3
+    ) -> Notification:
+        """Notification when max rescue attempts reached - manual intervention needed."""
+        failed_list = []
+        for endpoint in failed_endpoints[:5]:
+            url = endpoint.get('url', 'unknown')
+            error = endpoint.get('error', 'unknown')
+            failed_list.append(f"• {url}: {error}")
+
+        failed_str = "\n".join(failed_list) if failed_list else "• Unknown endpoints"
+
+        return Notification(
+            notification_type=NotificationType.RESCUE_MAX_ATTEMPTS,
+            title="Manual Intervention Required",
+            message=(
+                f"🚨 *MANUAL INTERVENTION REQUIRED*\n\n"
+                f"*Project:* {project_name}\n"
+                f"*Failure Type:* {failure_type}\n"
+                f"*Rescue Attempts:* {max_attempts}/{max_attempts} (exhausted)\n\n"
+                f"*Failing Endpoints:*\n"
+                f"{failed_str}\n\n"
+                f"⚠️ Automatic rescue attempts have been exhausted.\n\n"
+                f"*Next Steps:*\n"
+                f"1. Investigate the issue manually\n"
+                f"2. Use `/rescue {project_name} reset` to reset and try again\n"
+                f"3. Use `/feedback {project_name} <details>` to report the issue\n\n"
+                f"*Diagnostic Commands:*\n"
+                f"• `/rescue {project_name}` - View rescue history\n"
+                f"• `/project_status {project_name}` - View project status"
+            ),
+            priority=NotificationPriority.URGENT,
+            project_name=project_name,
+            metadata={
+                "failure_type": failure_type,
+                "failed_endpoints": failed_endpoints,
+                "max_attempts": max_attempts
+            }
+        )
+
+    @staticmethod
+    def rescue_job_created(
+        project_name: str,
+        job_id: str,
+        failure_type: str,
+        attempt_number: int,
+        max_attempts: int = 3
+    ) -> Notification:
+        """Notification when a rescue job is created."""
+        return Notification(
+            notification_type=NotificationType.RESCUE_JOB_CREATED,
+            title="Rescue Job Created",
+            message=(
+                f"🔧 *Rescue Job Created*\n\n"
+                f"*Project:* {project_name}\n"
+                f"*Failure:* {failure_type}\n"
+                f"*Attempt:* {attempt_number}/{max_attempts}\n"
+                f"*Job ID:* `{job_id[:12]}...`\n\n"
+                f"Claude is working to fix the deployment issues.\n"
+                f"You will be notified when the rescue completes."
+            ),
+            priority=NotificationPriority.NORMAL,
+            project_name=project_name,
+            job_id=job_id,
+            metadata={
+                "failure_type": failure_type,
+                "attempt_number": attempt_number,
+                "max_attempts": max_attempts
+            }
         )
 
 
