@@ -317,6 +317,12 @@ class CallbackAction(str, Enum):
     CONFLICT_ADD_MODULE = "conf_addmod"    # Add new module to existing
     CONFLICT_NEW_VERSION = "conf_newver"   # Create new version
     CONFLICT_CANCEL = "conf_cancel"        # Cancel project creation
+    # Phase 22: Project Selection for Commands
+    RESCUE_PROJECT = "resc_proj"           # Select project for /rescue
+    STATUS_PROJECT = "stat_proj"           # Select project for /project_status
+    APPROVE_PROJECT = "aprv_proj"          # Select project for /approve
+    FEEDBACK_PROJECT = "fdbk_proj"         # Select project for /feedback
+    VALIDATE_PROJECT = "vald_proj"         # Select project for /rescue validate
 
 
 # -----------------------------------------------------------------------------
@@ -1866,6 +1872,153 @@ def get_conflict_resolution_keyboard(
 
 
 # -----------------------------------------------------------------------------
+# Phase 22: Project Selection Keyboards
+# -----------------------------------------------------------------------------
+
+async def get_projects_for_selection(
+    filter_type: str = "all"
+) -> List[Dict[str, Any]]:
+    """
+    Get list of projects for selection keyboard.
+
+    Args:
+        filter_type: Filter projects by type:
+            - "all": All projects
+            - "rescue": Projects needing rescue or in deployment
+            - "approval": Projects ready for approval (in testing)
+            - "feedback": Projects in testing phase
+            - "active": Projects with active jobs
+
+    Returns:
+        List of project dicts with name, status, and relevant info
+    """
+    projects = []
+
+    try:
+        # Get jobs to determine project states
+        result = await controller.list_claude_jobs(limit=100)
+        jobs = result.get("jobs", [])
+
+        # Group jobs by project
+        project_jobs: Dict[str, List[Dict]] = {}
+        for job in jobs:
+            proj = job.get("project_name", "unknown")
+            if proj not in project_jobs:
+                project_jobs[proj] = []
+            project_jobs[proj].append(job)
+
+        # Filter based on type
+        for proj_name, proj_jobs in project_jobs.items():
+            # Get latest job for this project
+            latest_job = max(proj_jobs, key=lambda j: j.get("created_at", ""))
+            task_type = latest_job.get("task_type", "unknown")
+            state = latest_job.get("state", "unknown")
+
+            project_info = {
+                "name": proj_name,
+                "task_type": task_type,
+                "state": state,
+                "job_id": latest_job.get("job_id", "")[:8]
+            }
+
+            if filter_type == "all":
+                projects.append(project_info)
+
+            elif filter_type == "rescue":
+                # Projects in deployment or failed deployment
+                if task_type == "deployment" or task_type == "rescue":
+                    projects.append(project_info)
+                elif state == "failed":
+                    projects.append(project_info)
+
+            elif filter_type == "approval":
+                # Projects with completed deployment
+                if task_type == "deployment" and state == "completed":
+                    projects.append(project_info)
+
+            elif filter_type == "feedback":
+                # Projects in testing (deployment completed)
+                if task_type in ["deployment", "rescue"] and state == "completed":
+                    projects.append(project_info)
+
+            elif filter_type == "active":
+                # Projects with running or queued jobs
+                if state in ["running", "queued"]:
+                    projects.append(project_info)
+
+        # Sort by most recent activity
+        projects.sort(key=lambda p: p.get("state", ""), reverse=True)
+
+    except Exception as e:
+        logger.warning(f"Failed to get projects for selection: {e}")
+
+    return projects[:10]  # Limit to 10 projects for keyboard
+
+
+def get_project_selection_keyboard(
+    projects: List[Dict[str, Any]],
+    callback_action: CallbackAction,
+    include_action: str = ""
+) -> InlineKeyboardMarkup:
+    """
+    Create inline keyboard for project selection.
+
+    Args:
+        projects: List of project dicts from get_projects_for_selection()
+        callback_action: The callback action to use
+        include_action: Optional action to append (e.g., "reset", "validate")
+
+    Returns:
+        InlineKeyboardMarkup with project buttons
+    """
+    keyboard = []
+
+    for proj in projects:
+        name = proj["name"]
+        task_type = proj.get("task_type", "")
+        state = proj.get("state", "")
+
+        # Create display label with status indicator
+        if state == "running":
+            emoji = "🔄"
+        elif state == "completed":
+            emoji = "✅"
+        elif state == "failed":
+            emoji = "❌"
+        elif state == "queued":
+            emoji = "⏳"
+        else:
+            emoji = "📁"
+
+        # Short task type for display
+        type_short = {
+            "planning": "Plan",
+            "development": "Dev",
+            "deployment": "Deploy",
+            "rescue": "Rescue",
+        }.get(task_type, task_type[:6])
+
+        label = f"{emoji} {name[:20]} ({type_short})"
+
+        # Build callback data
+        if include_action:
+            callback_data = f"{callback_action.value}:{name}:{include_action}"
+        else:
+            callback_data = f"{callback_action.value}:{name}:status"
+
+        keyboard.append([
+            InlineKeyboardButton(label, callback_data=callback_data)
+        ])
+
+    if not keyboard:
+        keyboard.append([
+            InlineKeyboardButton("No projects found", callback_data="noop:none:none")
+        ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# -----------------------------------------------------------------------------
 # Notification Formatters (Phase 13.6)
 # -----------------------------------------------------------------------------
 def format_ci_notification(notif: Dict[str, Any]) -> str:
@@ -2504,15 +2657,30 @@ async def project_status_command(update: Update, context: ContextTypes.DEFAULT_T
     """Handle /project_status command - detailed project view. ALWAYS responds."""
     try:
         if not context.args:
-            result = await controller.get_dashboard()
-            if "error" in result:
-                await update.message.reply_text(f"Error: {result.get('error')}")
-                return
+            # Show interactive project selection
+            projects = await get_projects_for_selection("all")
+            if projects:
+                keyboard = get_project_selection_keyboard(
+                    projects, CallbackAction.STATUS_PROJECT, "status"
+                )
+                await update.message.reply_text(
+                    "*📊 Project Status*\n\n"
+                    "Select a project to view details:\n\n"
+                    "_Or use `/project_status <project>` for specific project_",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+            else:
+                # Fallback to dashboard if no projects
+                result = await controller.get_dashboard()
+                if "error" in result:
+                    await update.message.reply_text(f"Error: {result.get('error')}")
+                    return
 
-            await update.message.reply_text(
-                format_dashboard(result),
-                parse_mode="Markdown"
-            )
+                await update.message.reply_text(
+                    format_dashboard(result),
+                    parse_mode="Markdown"
+                )
         else:
             project_name = context.args[0]
             result = await controller.get_project(project_name)
@@ -2577,11 +2745,60 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """
     /approve <project> <aspect> - Approve testing (Phase 13.5)
     """
+    if not context.args:
+        # Show interactive project selection for approval
+        projects = await get_projects_for_selection("approval")
+        if projects:
+            keyboard = get_project_selection_keyboard(
+                projects, CallbackAction.APPROVE_PROJECT, "approve"
+            )
+            await update.message.reply_text(
+                "*✅ Approve Project*\n\n"
+                "Select a project to approve:\n\n"
+                "_Or use `/approve <project> <aspect>`_",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        else:
+            await update.message.reply_text(
+                "*✅ Approve Project*\n\n"
+                "No projects found ready for approval.\n\n"
+                "Usage: `/approve <project_name> <aspect>`\n"
+                "Example: `/approve my-crm core`",
+                parse_mode="Markdown"
+            )
+        return
+
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: /approve <project_name> <aspect>\n"
-            "Example: /approve my-crm core"
-        )
+        # User provided project but not aspect - show aspects
+        project_name = context.args[0]
+        try:
+            result = await controller.get_project_status(project_name)
+            if "error" in result:
+                await update.message.reply_text(f"Error: {extract_api_error(result)}")
+                return
+
+            aspects = result.get("status", {}).get("aspects", {})
+            if aspects:
+                keyboard = []
+                for aspect_name in aspects.keys():
+                    callback_data = f"{CallbackAction.FEEDBACK_APPROVE.value}:{project_name}:{aspect_name}"
+                    keyboard.append([
+                        InlineKeyboardButton(f"✅ Approve {aspect_name}", callback_data=callback_data)
+                    ])
+                await update.message.reply_text(
+                    f"*Select aspect to approve for {escape_markdown(project_name)}:*",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await update.message.reply_text(
+                    f"No aspects found for `{project_name}`.\n\n"
+                    f"Usage: `/approve <project_name> <aspect>`",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            await update.message.reply_text(f"Error: {str(e)}")
         return
 
     project_name = context.args[0]
@@ -2655,11 +2872,60 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """
     /feedback <project> <aspect> - Submit feedback (Phase 13.5)
     """
+    if not context.args:
+        # Show interactive project selection for feedback
+        projects = await get_projects_for_selection("feedback")
+        if projects:
+            keyboard = get_project_selection_keyboard(
+                projects, CallbackAction.FEEDBACK_PROJECT, "feedback"
+            )
+            await update.message.reply_text(
+                "*💬 Submit Feedback*\n\n"
+                "Select a project to provide feedback:\n\n"
+                "_Or use `/feedback <project> <aspect>`_",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        else:
+            await update.message.reply_text(
+                "*💬 Submit Feedback*\n\n"
+                "No projects found in testing phase.\n\n"
+                "Usage: `/feedback <project_name> <aspect>`\n"
+                "Example: `/feedback my-crm core`",
+                parse_mode="Markdown"
+            )
+        return
+
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: /feedback <project_name> <aspect>\n"
-            "Example: /feedback my-crm core"
-        )
+        # User provided project but not aspect - show aspects
+        project_name = context.args[0]
+        try:
+            result = await controller.get_project_status(project_name)
+            if "error" in result:
+                await update.message.reply_text(f"Error: {extract_api_error(result)}")
+                return
+
+            aspects = result.get("status", {}).get("aspects", {})
+            if aspects:
+                keyboard = []
+                for aspect_name in aspects.keys():
+                    callback_data = f"{CallbackAction.SELECT_ASPECT.value}:{project_name}:{aspect_name}"
+                    keyboard.append([
+                        InlineKeyboardButton(f"📦 {aspect_name}", callback_data=callback_data)
+                    ])
+                await update.message.reply_text(
+                    f"*Select aspect for feedback on {escape_markdown(project_name)}:*",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await update.message.reply_text(
+                    f"No aspects found for `{project_name}`.\n\n"
+                    f"Usage: `/feedback <project_name> <aspect>`",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            await update.message.reply_text(f"Error: {str(e)}")
         return
 
     project_name = context.args[0]
@@ -2794,14 +3060,31 @@ async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         from controller.rescue_engine import get_rescue_engine
 
         if not context.args:
-            await update.message.reply_text(
-                "*🔧 Rescue System*\n\n"
-                "Usage:\n"
-                "• `/rescue <project>` - View rescue status\n"
-                "• `/rescue <project> reset` - Reset rescue state\n"
-                "• `/rescue <project> validate` - Manually validate deployment\n",
-                parse_mode="Markdown"
-            )
+            # Show interactive project selection
+            projects = await get_projects_for_selection("rescue")
+            if projects:
+                keyboard = get_project_selection_keyboard(
+                    projects, CallbackAction.RESCUE_PROJECT, "status"
+                )
+                await update.message.reply_text(
+                    "*🔧 Rescue System*\n\n"
+                    "Select a project to view rescue status:\n\n"
+                    "_Or use:_\n"
+                    "• `/rescue <project> reset` - Reset rescue state\n"
+                    "• `/rescue <project> validate` - Validate deployment\n",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+            else:
+                await update.message.reply_text(
+                    "*🔧 Rescue System*\n\n"
+                    "No projects found in deployment or rescue state.\n\n"
+                    "Usage:\n"
+                    "• `/rescue <project>` - View rescue status\n"
+                    "• `/rescue <project> reset` - Reset rescue state\n"
+                    "• `/rescue <project> validate` - Manually validate deployment\n",
+                    parse_mode="Markdown"
+                )
             return
 
         project_name = context.args[0]
@@ -3672,6 +3955,210 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"Please explain the rejection reason in detail:",
                 parse_mode="Markdown"
             )
+
+        # Phase 22: Project Selection Callbacks
+        elif action == CallbackAction.RESCUE_PROJECT.value:
+            # User selected a project from /rescue command
+            # aspect contains the sub-action (status, reset, validate)
+            sub_action = aspect
+
+            try:
+                from controller.rescue_engine import get_rescue_engine
+                rescue_engine = get_rescue_engine()
+
+                if sub_action == "status":
+                    state = rescue_engine.get_rescue_state(project_name)
+                    if state is None:
+                        await query.edit_message_text(
+                            f"*🔧 Rescue Status: {escape_markdown(project_name)}*\n\n"
+                            f"No rescue attempts recorded.\n"
+                            f"Use `/rescue {project_name} validate` to check deployment.",
+                            parse_mode="Markdown"
+                        )
+                    else:
+                        attempts = len(state.attempts)
+                        status_emoji = "✅" if state.resolved else "🔄"
+                        status_text = "Resolved" if state.resolved else "In Progress"
+
+                        message = (
+                            f"*🔧 Rescue Status: {escape_markdown(project_name)}*\n\n"
+                            f"*Status:* {status_emoji} {status_text}\n"
+                            f"*Attempts:* {attempts}/3\n"
+                            f"*Deployment Job:* `{state.deployment_job_id[:12]}...`\n\n"
+                            f"*Attempt History:*\n"
+                        )
+
+                        for attempt in state.attempts:
+                            emoji = "✅" if attempt.success else "❌"
+                            message += (
+                                f"{emoji} Attempt {attempt.attempt_number}: "
+                                f"{attempt.failure_type} - {attempt.outcome or 'Pending'}\n"
+                            )
+
+                        if not state.resolved and attempts >= 3:
+                            message += f"\n⚠️ *Max attempts reached.* Use `/rescue {project_name} reset` to retry."
+
+                        await query.edit_message_text(message, parse_mode="Markdown")
+
+                elif sub_action == "validate":
+                    urls = await get_project_deployment_urls(project_name)
+                    if not urls:
+                        await query.edit_message_text(
+                            f"*❌ No deployment URLs found*\n\n"
+                            f"Project `{project_name}` has no recorded deployment URLs.",
+                            parse_mode="Markdown"
+                        )
+                    else:
+                        await query.edit_message_text(
+                            f"*🔍 Validating {escape_markdown(project_name)}...*\n\n"
+                            f"Checking {len(urls)} endpoints...",
+                            parse_mode="Markdown"
+                        )
+                        # Trigger validation
+                        context.application.create_task(
+                            trigger_deployment_validation(
+                                context.application, project_name, "manual", urls
+                            )
+                        )
+
+            except Exception as e:
+                logger.error(f"Error in rescue project callback: {e}")
+                await query.edit_message_text(f"❌ Error: {str(e)}")
+
+        elif action == CallbackAction.STATUS_PROJECT.value:
+            # User selected a project from /project_status command
+            try:
+                result = await controller.get_project_status(project_name)
+
+                if "error" in result:
+                    await query.edit_message_text(
+                        f"❌ Error getting status for `{project_name}`:\n{extract_api_error(result)}",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                status = result.get("status", {})
+                phase = status.get("phase", "unknown")
+                aspects = status.get("aspects", {})
+                last_updated = status.get("last_updated", "Unknown")
+
+                phase_emojis = {
+                    "planning": "📋", "development": "💻",
+                    "testing": "🧪", "production": "🚀"
+                }
+                emoji = phase_emojis.get(phase, "📁")
+
+                message = (
+                    f"*{emoji} {escape_markdown(project_name)}*\n\n"
+                    f"*Phase:* {phase.title()}\n"
+                    f"*Last Updated:* {last_updated}\n\n"
+                    f"*Aspects:*\n"
+                )
+
+                for aspect_name, aspect_info in aspects.items():
+                    aspect_status = aspect_info.get("status", "unknown")
+                    aspect_emoji = "✅" if aspect_status == "ready" else "🔄" if aspect_status == "in_progress" else "⏳"
+                    message += f"• {aspect_emoji} {aspect_name}: {aspect_status}\n"
+
+                await query.edit_message_text(message, parse_mode="Markdown")
+
+            except Exception as e:
+                logger.error(f"Error in status project callback: {e}")
+                await query.edit_message_text(f"❌ Error: {str(e)}")
+
+        elif action == CallbackAction.APPROVE_PROJECT.value:
+            # User selected a project from /approve command - show aspects
+            try:
+                result = await controller.get_project_status(project_name)
+                if "error" in result:
+                    await query.edit_message_text(f"Error: {extract_api_error(result)}")
+                    return
+
+                aspects = result.get("status", {}).get("aspects", {})
+                if not aspects:
+                    await query.edit_message_text(
+                        f"No aspects found for `{project_name}`.",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                # Show aspect selection for approval
+                keyboard = []
+                for aspect_name in aspects.keys():
+                    callback_data = f"{CallbackAction.SELECT_ASPECT.value}:{project_name}:{aspect_name}"
+                    keyboard.append([
+                        InlineKeyboardButton(f"📦 {aspect_name}", callback_data=callback_data)
+                    ])
+
+                await query.edit_message_text(
+                    f"*Select aspect to approve for {escape_markdown(project_name)}:*",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            except Exception as e:
+                logger.error(f"Error in approve project callback: {e}")
+                await query.edit_message_text(f"❌ Error: {str(e)}")
+
+        elif action == CallbackAction.FEEDBACK_PROJECT.value:
+            # User selected a project from /feedback command - show aspects
+            try:
+                result = await controller.get_project_status(project_name)
+                if "error" in result:
+                    await query.edit_message_text(f"Error: {extract_api_error(result)}")
+                    return
+
+                aspects = result.get("status", {}).get("aspects", {})
+                if not aspects:
+                    await query.edit_message_text(
+                        f"No aspects found for `{project_name}`.",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                # Show aspect selection with feedback buttons
+                keyboard = []
+                for aspect_name in aspects.keys():
+                    callback_data = f"{CallbackAction.SELECT_ASPECT.value}:{project_name}:{aspect_name}"
+                    keyboard.append([
+                        InlineKeyboardButton(f"📦 {aspect_name}", callback_data=callback_data)
+                    ])
+
+                await query.edit_message_text(
+                    f"*Select aspect for feedback on {escape_markdown(project_name)}:*",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            except Exception as e:
+                logger.error(f"Error in feedback project callback: {e}")
+                await query.edit_message_text(f"❌ Error: {str(e)}")
+
+        elif action == CallbackAction.VALIDATE_PROJECT.value:
+            # User selected validate from project list
+            try:
+                urls = await get_project_deployment_urls(project_name)
+                if not urls:
+                    await query.edit_message_text(
+                        f"*❌ No deployment URLs found*\n\n"
+                        f"Project `{project_name}` has no recorded deployment URLs.",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await query.edit_message_text(
+                        f"*🔍 Validating {escape_markdown(project_name)}...*\n\n"
+                        f"Checking {len(urls)} endpoints...",
+                        parse_mode="Markdown"
+                    )
+                    context.application.create_task(
+                        trigger_deployment_validation(
+                            context.application, project_name, "manual", urls
+                        )
+                    )
+
+            except Exception as e:
+                logger.error(f"Error in validate project callback: {e}")
+                await query.edit_message_text(f"❌ Error: {str(e)}")
 
         # Phase 16E: Conflict Resolution Callbacks
         elif action in [
