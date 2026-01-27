@@ -1883,19 +1883,44 @@ async def get_projects_for_selection(
 
     Args:
         filter_type: Filter projects by type:
-            - "all": All projects
-            - "rescue": Projects needing rescue or in deployment
+            - "all": All projects (from registry + jobs)
+            - "rescue": All projects (rescue can apply to any)
             - "approval": Projects ready for approval (in testing)
-            - "feedback": Projects in testing phase
+            - "feedback": All projects (feedback can apply to any)
             - "active": Projects with active jobs
 
     Returns:
         List of project dicts with name, status, and relevant info
     """
     projects = []
+    seen_projects = set()
 
     try:
-        # Get jobs to determine project states
+        # First, try to get projects from the registry
+        try:
+            registry_result = await controller.api_call("GET", "/projects")
+            if "error" not in registry_result:
+                registry_projects = registry_result.get("projects", [])
+                for proj in registry_projects:
+                    proj_name = proj.get("name", "")
+                    if proj_name and proj_name not in seen_projects:
+                        seen_projects.add(proj_name)
+                        phase = proj.get("phase", "unknown")
+                        project_info = {
+                            "name": proj_name,
+                            "task_type": phase,  # Use phase as task_type
+                            "state": "registered",
+                            "job_id": ""
+                        }
+                        # For "all", "rescue", "feedback" - include all registered projects
+                        if filter_type in ["all", "rescue", "feedback"]:
+                            projects.append(project_info)
+                        elif filter_type == "approval" and phase == "testing":
+                            projects.append(project_info)
+        except Exception as e:
+            logger.debug(f"Could not fetch from registry: {e}")
+
+        # Then, get jobs to determine active project states
         result = await controller.list_claude_jobs(limit=100)
         jobs = result.get("jobs", [])
 
@@ -1907,7 +1932,7 @@ async def get_projects_for_selection(
                 project_jobs[proj] = []
             project_jobs[proj].append(job)
 
-        # Filter based on type
+        # Process jobs and update/add project info
         for proj_name, proj_jobs in project_jobs.items():
             # Get latest job for this project
             latest_job = max(proj_jobs, key=lambda j: j.get("created_at", ""))
@@ -1921,33 +1946,40 @@ async def get_projects_for_selection(
                 "job_id": latest_job.get("job_id", "")[:8]
             }
 
+            # Check if we should add/update this project
+            should_add = False
+
             if filter_type == "all":
-                projects.append(project_info)
-
+                should_add = True
             elif filter_type == "rescue":
-                # Projects in deployment or failed deployment
-                if task_type == "deployment" or task_type == "rescue":
-                    projects.append(project_info)
-                elif state == "failed":
-                    projects.append(project_info)
-
+                # For rescue, show all projects with jobs (any could need rescue)
+                should_add = True
             elif filter_type == "approval":
                 # Projects with completed deployment
                 if task_type == "deployment" and state == "completed":
-                    projects.append(project_info)
-
+                    should_add = True
             elif filter_type == "feedback":
-                # Projects in testing (deployment completed)
-                if task_type in ["deployment", "rescue"] and state == "completed":
-                    projects.append(project_info)
-
+                # For feedback, show all projects with jobs
+                should_add = True
             elif filter_type == "active":
                 # Projects with running or queued jobs
                 if state in ["running", "queued"]:
+                    should_add = True
+
+            if should_add:
+                if proj_name in seen_projects:
+                    # Update existing entry with job info
+                    for i, p in enumerate(projects):
+                        if p["name"] == proj_name:
+                            projects[i] = project_info
+                            break
+                else:
+                    seen_projects.add(proj_name)
                     projects.append(project_info)
 
-        # Sort by most recent activity
-        projects.sort(key=lambda p: p.get("state", ""), reverse=True)
+        # Sort: running first, then completed, then others
+        state_order = {"running": 0, "queued": 1, "completed": 2, "failed": 3, "registered": 4}
+        projects.sort(key=lambda p: state_order.get(p.get("state", ""), 5))
 
     except Exception as e:
         logger.warning(f"Failed to get projects for selection: {e}")
