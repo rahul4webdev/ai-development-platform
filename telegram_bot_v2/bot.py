@@ -215,7 +215,7 @@ def load_role_config() -> Dict[UserRole, List[int]]:
     config = {
         UserRole.OWNER: [],
         UserRole.ADMIN: [],
-        UserRole.DEVELOPERELOPER: [],
+        UserRole.DEVELOPER: [],
         UserRole.TESTER: [],
         UserRole.VIEWER: [],
     }
@@ -237,7 +237,7 @@ ROLE_CONFIG = load_role_config()
 
 def get_user_role(user_id: int) -> UserRole:
     """Get the highest role for a user."""
-    for role in [UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER, UserRole.TESTER]:
+    for role in [UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER]:
         if user_id in ROLE_CONFIG.get(role, []):
             return role
     return UserRole.VIEWER
@@ -4137,7 +4137,7 @@ async def _request_change(update: Update, context: ContextTypes.DEFAULT_TYPE, ch
         await update.message.reply_text(f"Error: {str(e)}")
 
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
 async def new_feature_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /new_feature <lifecycle_id> <description> - Request a new feature (Phase 15.2)
@@ -4145,7 +4145,7 @@ async def new_feature_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _request_change(update, context, "feature", "new_feature")
 
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER, UserRole.TESTER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER)
 async def report_bug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /report_bug <lifecycle_id> <description> - Report a bug (Phase 15.2)
@@ -4153,7 +4153,7 @@ async def report_bug_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _request_change(update, context, "bug", "report_bug")
 
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
 async def improve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /improve <lifecycle_id> <description> - Request an improvement (Phase 15.2)
@@ -4161,7 +4161,7 @@ async def improve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _request_change(update, context, "improvement", "improve")
 
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
 async def refactor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /refactor <lifecycle_id> <description> - Request a refactoring (Phase 15.2)
@@ -4169,7 +4169,7 @@ async def refactor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _request_change(update, context, "refactor", "refactor")
 
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
 async def security_fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /security_fix <lifecycle_id> <description> - Request a security fix (Phase 15.2)
@@ -4177,7 +4177,7 @@ async def security_fix_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await _request_change(update, context, "security", "security_fix")
 
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER, UserRole.TESTER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER)
 async def cycle_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /cycle_history <lifecycle_id> - Show cycle history for a lifecycle (Phase 15.2)
@@ -4220,7 +4220,7 @@ async def cycle_history_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f"Error: {str(e)}")
 
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER, UserRole.TESTER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER)
 async def change_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /change_summary <lifecycle_id> - Show deployment summary (Phase 15.2)
@@ -4269,7 +4269,7 @@ async def change_summary_command(update: Update, context: ContextTypes.DEFAULT_T
 # Phase 15.3: Project Ingestion Commands
 # -----------------------------------------------------------------------------
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
 async def ingest_git_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /ingest_git <project_name> <git_url> - Ingest a project from Git (Phase 15.3)
@@ -4372,7 +4372,7 @@ async def ingest_git_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"Error: {str(e)}")
 
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
 async def ingest_local_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /ingest_local <project_name> <path> - Ingest a project from local path (Phase 15.3)
@@ -4608,7 +4608,7 @@ async def register_ingestion_command(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(f"Error: {str(e)}")
 
 
-@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPERELOPER, UserRole.TESTER)
+@role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER, UserRole.TESTER)
 async def ingestion_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /ingestion_status [ingestion_id] - Check ingestion status (Phase 15.3)
