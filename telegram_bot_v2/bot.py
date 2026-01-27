@@ -3110,11 +3110,14 @@ async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 await update.message.reply_text(
                     "*🔧 Rescue System*\n\n"
-                    "No projects found in deployment or rescue state.\n\n"
-                    "Usage:\n"
+                    "No projects found in the system.\n\n"
+                    "To get started:\n"
+                    "• Use `/new_project` to create a project\n"
+                    "• Or specify a project: `/rescue <project>`\n\n"
+                    "_Rescue commands:_\n"
                     "• `/rescue <project>` - View rescue status\n"
                     "• `/rescue <project> reset` - Reset rescue state\n"
-                    "• `/rescue <project> validate` - Manually validate deployment\n",
+                    "• `/rescue <project> validate` - Validate deployment\n",
                     parse_mode="Markdown"
                 )
             return
