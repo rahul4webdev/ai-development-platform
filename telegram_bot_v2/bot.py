@@ -1896,7 +1896,7 @@ async def get_projects_for_selection(
     seen_projects = set()
 
     try:
-        # First, try to get projects from the registry
+        # First, try to get projects from the registry API
         try:
             registry_result = await controller.api_call("GET", "/projects")
             if "error" not in registry_result:
@@ -1918,7 +1918,28 @@ async def get_projects_for_selection(
                         elif filter_type == "approval" and phase == "testing":
                             projects.append(project_info)
         except Exception as e:
-            logger.debug(f"Could not fetch from registry: {e}")
+            logger.debug(f"Could not fetch from registry API: {e}")
+
+        # Also try dashboard/projects which may have more data
+        try:
+            dashboard_result = await controller.api_call("GET", "/dashboard/projects")
+            if "error" not in dashboard_result:
+                dashboard_projects = dashboard_result.get("projects", [])
+                for proj in dashboard_projects:
+                    proj_name = proj.get("project_name", "")
+                    if proj_name and proj_name not in seen_projects:
+                        seen_projects.add(proj_name)
+                        lifecycle_state = proj.get("current_lifecycle_state", "unknown")
+                        project_info = {
+                            "name": proj_name,
+                            "task_type": lifecycle_state,
+                            "state": "registered",
+                            "job_id": ""
+                        }
+                        if filter_type in ["all", "rescue", "feedback"]:
+                            projects.append(project_info)
+        except Exception as e:
+            logger.debug(f"Could not fetch from dashboard: {e}")
 
         # Then, get jobs to determine active project states
         result = await controller.list_claude_jobs(limit=100)
