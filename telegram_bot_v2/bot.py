@@ -6643,8 +6643,10 @@ _project_urls_cache: Dict[str, Dict[str, str]] = {}
 
 async def get_project_deployment_urls(project_name: str) -> Dict[str, str]:
     """
-    Get deployment URLs for a project from its contract/config.
+    Get deployment URLs for a project from CHD in registry.
     Returns dict with keys like 'api', 'frontend', 'admin', 'docs'.
+
+    Phase 22: Uses CHD parser from deployment_validator for accurate URL extraction.
     """
     global _project_urls_cache
 
@@ -6653,10 +6655,20 @@ async def get_project_deployment_urls(project_name: str) -> Dict[str, str]:
         return _project_urls_cache[project_name]
 
     urls = {}
-    import re
 
+    # Primary method: Parse CHD from registry (most reliable)
     try:
-        # Try to get project details from controller
+        from controller.deployment_validator import parse_chd_deployment_urls
+        urls = parse_chd_deployment_urls(project_name)
+        if urls:
+            logger.info(f"Got deployment URLs from CHD for {project_name}: {urls}")
+            _project_urls_cache[project_name] = urls
+            return urls
+    except Exception as e:
+        logger.debug(f"CHD parser failed for {project_name}: {e}")
+
+    # Fallback 1: Try controller API
+    try:
         result = await controller.get_project(project_name)
         if result and "project" in result:
             project_data = result["project"]
@@ -6677,7 +6689,7 @@ async def get_project_deployment_urls(project_name: str) -> Dict[str, str]:
     except Exception as e:
         logger.debug(f"Controller project lookup failed for {project_name}: {e}")
 
-    # Fallback: Try reading project contract directly from filesystem
+    # Fallback 2: Try reading project contract directly from filesystem
     if not urls:
         try:
             import yaml

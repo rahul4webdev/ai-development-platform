@@ -10,6 +10,7 @@ Features:
 - Failure classification (404, 500, CORS, etc.)
 - Server-aware fix suggestions
 - Integration with rescue engine
+- CHD parsing for deployment URLs
 
 CONSTRAINTS:
 - Timeout: 10 seconds per request
@@ -18,13 +19,21 @@ CONSTRAINTS:
 """
 
 import asyncio
+import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger("deployment_validator")
+
+# Registry file path
+REGISTRY_FILE = Path("/home/aitesting.mybd.in/jobs/registry/projects.json")
+if not REGISTRY_FILE.exists():
+    REGISTRY_FILE = Path("/tmp/registry/projects.json")
 
 # Try to import httpx, fall back to aiohttp
 try:
@@ -534,3 +543,156 @@ def get_deployment_validator() -> DeploymentValidator:
     if _validator is None:
         _validator = DeploymentValidator()
     return _validator
+
+
+def parse_chd_deployment_urls(project_name: str) -> Dict[str, str]:
+    """
+    Parse CHD (Claude Handoff Document) from registry and extract deployment URLs.
+
+    Args:
+        project_name: Name of the project
+
+    Returns:
+        Dictionary mapping endpoint type to URL, e.g.:
+        {"api": "https://healthapi.gahfaudio.in", "frontend": "https://health.gahfaudio.in"}
+    """
+    urls: Dict[str, str] = {}
+
+    try:
+        if not REGISTRY_FILE.exists():
+            logger.warning(f"Registry file not found: {REGISTRY_FILE}")
+            return urls
+
+        with open(REGISTRY_FILE) as f:
+            registry = json.load(f)
+
+        project = registry.get("projects", {}).get(project_name, {})
+        if not project:
+            logger.warning(f"Project not found in registry: {project_name}")
+            return urls
+
+        # Get CHD from requirements_raw
+        chd = project.get("requirements_raw", "")
+        if not chd:
+            logger.warning(f"No CHD found for project: {project_name}")
+            return urls
+
+        # Parse deployment_targets section from CHD
+        # Look for YAML-like structure in the CHD
+        lines = chd.split('\n')
+        in_testing_env = False
+        current_aspect = None
+        indent_level = 0
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Track testing_env section
+            if 'testing_env:' in line:
+                in_testing_env = True
+                continue
+
+            if 'production_env:' in line:
+                in_testing_env = False
+                continue
+
+            if not in_testing_env:
+                continue
+
+            # Look for aspect definitions (api:, frontend_web:, admin_panel:)
+            if stripped.endswith(':') and not stripped.startswith('-'):
+                # Check indent - aspect definitions are at a certain level
+                line_indent = len(line) - len(line.lstrip())
+
+                if 'api:' in stripped:
+                    current_aspect = 'api'
+                elif 'frontend_web:' in stripped or 'frontend:' in stripped:
+                    current_aspect = 'frontend'
+                elif 'admin_panel:' in stripped or 'admin:' in stripped:
+                    current_aspect = 'admin'
+                else:
+                    # Check if this is a domain line
+                    pass
+                continue
+
+            # Look for domain: value
+            if current_aspect and 'domain:' in line:
+                match = re.search(r'domain:\s*(\S+)', line)
+                if match:
+                    domain = match.group(1).strip()
+                    # Add https:// if not present
+                    if not domain.startswith('http'):
+                        domain = f"https://{domain}"
+                    urls[current_aspect] = domain
+                    logger.debug(f"Found {current_aspect} URL: {domain}")
+
+        logger.info(f"Parsed CHD deployment URLs for {project_name}: {urls}")
+
+    except Exception as e:
+        logger.error(f"Error parsing CHD for {project_name}: {e}")
+
+    return urls
+
+
+def get_project_directory(project_name: str) -> Optional[Path]:
+    """
+    Get the project directory path from the platform.
+
+    Args:
+        project_name: Name of the project
+
+    Returns:
+        Path to project directory or None if not found
+    """
+    # Check common locations
+    base_paths = [
+        Path("/home/aitesting.mybd.in/public_html/projects"),
+        Path("/home/aitesting.mybd.in/jobs/archives"),
+    ]
+
+    for base in base_paths:
+        project_path = base / project_name
+        if project_path.exists():
+            return project_path
+
+    # Check for project in job archives (may have repo cloned)
+    archives_path = Path("/home/aitesting.mybd.in/jobs/archives")
+    if archives_path.exists():
+        for job_dir in archives_path.iterdir():
+            if job_dir.is_dir():
+                project_in_job = job_dir / project_name
+                if project_in_job.exists():
+                    return project_in_job
+
+    return None
+
+
+def get_github_repo_url(project_name: str) -> Optional[str]:
+    """
+    Get GitHub repository URL from CHD.
+
+    Args:
+        project_name: Name of the project
+
+    Returns:
+        GitHub repo URL or None
+    """
+    try:
+        if not REGISTRY_FILE.exists():
+            return None
+
+        with open(REGISTRY_FILE) as f:
+            registry = json.load(f)
+
+        project = registry.get("projects", {}).get(project_name, {})
+        chd = project.get("requirements_raw", "")
+
+        # Look for git_repo section
+        match = re.search(r'repo_name:\s*(\S+)', chd)
+        if match:
+            return match.group(1).strip()
+
+    except Exception as e:
+        logger.error(f"Error getting GitHub URL for {project_name}: {e}")
+
+    return None

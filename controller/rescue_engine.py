@@ -101,37 +101,66 @@ PROJECT: {project_name}
 FAILURE TYPE: {failure_type}
 DEPLOYMENT JOB: {deployment_job_id}
 ATTEMPT: {attempt_number}/{max_attempts}
+GITHUB REPO: {github_repo}
 
-FAILED ENDPOINTS:
-{failed_endpoints_list}
+==============================================================================
+FAILED ENDPOINTS WITH ACTUAL ERRORS
+==============================================================================
+{failed_endpoints_details}
 
-SUCCESSFUL ENDPOINTS:
+==============================================================================
+SUCCESSFUL ENDPOINTS
+==============================================================================
 {successful_endpoints_list}
 
-DIAGNOSTIC INFORMATION:
+==============================================================================
+DIAGNOSTIC INFORMATION
+==============================================================================
 {diagnostic_info}
 
-SUGGESTED FIXES:
+==============================================================================
+SUGGESTED FIXES
+==============================================================================
 {suggested_fixes_list}
 
 {server_instructions}
 
-INSTRUCTIONS:
-1. Read PLANNING_OUTPUT.yaml and DEPLOYMENT.md for deployment configuration
-2. Check the project code in ./{project_name}/ directory
-3. Diagnose the root cause based on the failure type above
-4. Apply the appropriate fix from the suggested fixes
-5. Test the fix locally if possible
-6. Deploy the fix to the testing environment
-7. Verify the endpoints are now accessible
+==============================================================================
+PROJECT DIRECTORY
+==============================================================================
+The project code is available at: {project_directory}
 
-IMPORTANT:
+You do NOT need to clone the repository. The code is already on the platform.
+
+==============================================================================
+INSTRUCTIONS
+==============================================================================
+1. Analyze the ACTUAL ERROR RESPONSES above for each failing endpoint
+2. Read the project code in {project_directory}
+3. Read the CHD (requirements_raw in registry) for deployment configuration
+4. Identify the root cause based on:
+   - The failure type: {failure_type}
+   - The actual error responses from each domain
+   - The deployment configuration in CHD
+5. Implement the required fix:
+   - Fix code issues, configuration, or deployment scripts
+   - Update GitHub Actions workflow if needed
+6. After implementing fixes:
+   a. Commit changes with clear message
+   b. Push to GitHub: git push origin main
+   c. If workflow needs manual trigger, note it in RESCUE_LOG.md
+7. Document the fix in logs/RESCUE_LOG.md
+
+==============================================================================
+CRITICAL RULES
+==============================================================================
 - Focus ONLY on fixing the deployment issue
-- Do not make unrelated code changes
-- Document what was fixed in logs/RESCUE_LOG.md
-- If the issue cannot be fixed automatically, note the blocker in logs/BLOCKERS.md
+- Read actual error responses carefully - they contain the root cause
+- Push changes to GitHub - deployment happens via GitHub Actions workflow
+- Do NOT deploy directly via SSH
+- If the issue cannot be fixed automatically, document in logs/BLOCKERS.md
 
-VALIDATION WILL RE-RUN AUTOMATICALLY AFTER THIS JOB COMPLETES.
+VALIDATION WILL RE-RUN AUTOMATICALLY AFTER DEPLOYMENT COMPLETES.
 """
 
 # Server-specific instructions
@@ -331,11 +360,31 @@ class RescueJobEngine:
         server_config: Optional[Any] = None
     ) -> str:
         """Generate task description for Claude."""
-        # Format failed endpoints
-        failed_endpoints_list = "\n".join([
-            f"- {f['url']}: {f['error']} (status: {f.get('status_code', 'N/A')})"
-            for f in failure.failed_urls
-        ]) or "- None"
+        from controller.deployment_validator import (
+            get_project_directory,
+            get_github_repo_url
+        )
+
+        # Format failed endpoints with detailed error info
+        failed_details_parts = []
+        for f in failure.failed_urls:
+            url = f.get('url', 'Unknown')
+            status = f.get('status_code', 'N/A')
+            error = f.get('error', 'Unknown error')
+            response_time = f.get('response_time_ms', 'N/A')
+            response_preview = f.get('response_body_preview', '')
+
+            detail = f"""
+URL: {url}
+Status Code: {status}
+Error: {error}
+Response Time: {response_time}ms
+Response Body Preview:
+{response_preview[:1000] if response_preview else 'No response body'}
+---"""
+            failed_details_parts.append(detail)
+
+        failed_endpoints_details = "\n".join(failed_details_parts) or "No failed endpoints"
 
         # Format successful endpoints
         successful_endpoints_list = "\n".join([
@@ -349,6 +398,13 @@ class RescueJobEngine:
         suggested_fixes_list = "\n".join([
             f"- {fix}" for fix in failure.suggested_fixes
         ]) or "- See server-specific instructions below"
+
+        # Get project directory
+        project_dir = get_project_directory(project_name)
+        project_directory = str(project_dir) if project_dir else f"/home/aitesting.mybd.in/public_html/projects/{project_name}"
+
+        # Get GitHub repo URL
+        github_repo = get_github_repo_url(project_name) or "Not found in CHD"
 
         # Server instructions
         if server_config and hasattr(server_config, 'environment'):
@@ -371,11 +427,13 @@ class RescueJobEngine:
             deployment_job_id=failure.deployment_job_id,
             attempt_number=attempt_number,
             max_attempts=RESCUE_MAX_ATTEMPTS,
-            failed_endpoints_list=failed_endpoints_list,
+            failed_endpoints_details=failed_endpoints_details,
             successful_endpoints_list=successful_endpoints_list,
             diagnostic_info=diagnostic_info,
             suggested_fixes_list=suggested_fixes_list,
-            server_instructions=server_instructions
+            server_instructions=server_instructions,
+            project_directory=project_directory,
+            github_repo=github_repo
         )
 
     def mark_rescue_success(self, project_name: str, job_id: str) -> None:
