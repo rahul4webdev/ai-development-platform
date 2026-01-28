@@ -848,6 +848,27 @@ class ControllerClient:
             "details": str(last_error) if last_error else "Unknown error"
         }
 
+    async def api_call(
+        self,
+        method: str,
+        endpoint: str,
+        data: Optional[Dict] = None,
+        params: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Public API call method for generic requests.
+
+        Args:
+            method: HTTP method (GET/POST)
+            endpoint: API endpoint (e.g., "/dashboard/projects")
+            data: Request body for POST
+            params: Query parameters for GET
+
+        Returns:
+            API response as dictionary
+        """
+        return await self._request(method, endpoint, data=data, params=params)
+
     async def health_check(self) -> Dict[str, Any]:
         """Check controller health with caching."""
         now = datetime.utcnow()
