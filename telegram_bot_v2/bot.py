@@ -7632,6 +7632,86 @@ async def trigger_deployment_validation(
         if all_healthy:
             logger.info(f"Deployment validation passed for {project_name}")
 
+            # Phase 23: Run deep E2E verification after shallow validation passes
+            deep_e2e_passed = True
+            deep_e2e_summary = ""
+            try:
+                from controller.deep_e2e_verifier import get_deep_e2e_verifier, E2ELevel
+                from controller.deployment_validator import get_github_repo_url
+
+                verifier = get_deep_e2e_verifier()
+                github_repo = None
+                try:
+                    github_repo = get_github_repo_url(project_name)
+                except Exception:
+                    pass
+
+                deep_result = await verifier.run(
+                    project_name=project_name,
+                    urls=normalized_urls,
+                    github_repo=github_repo,
+                    level=E2ELevel.FUNCTIONAL,
+                )
+                deep_e2e_passed = deep_result.passed
+                deep_e2e_summary = deep_result.summary
+
+                # Update registry metadata with E2E results
+                try:
+                    from controller.project_registry import get_registry
+                    registry = get_registry()
+                    project = registry.get_project(project_name)
+                    if project:
+                        project.metadata["deep_e2e_level"] = deep_result.level
+                        project.metadata["deep_e2e_passed"] = deep_result.passed
+                        project.metadata["deep_e2e_last_run"] = deep_result.run_at
+                        project.metadata["deep_e2e_summary"] = deep_result.summary
+                        project.metadata["deep_e2e_checks_total"] = deep_result.total_checks
+                        project.metadata["deep_e2e_checks_passed"] = deep_result.passed_checks
+                        registry.update_project(project_name, {"metadata": project.metadata})
+                except Exception as reg_err:
+                    logger.warning(f"Failed to update registry with E2E result: {reg_err}")
+
+                if not deep_e2e_passed:
+                    # Deep E2E failed — report but don't trigger rescue
+                    failed_details = "\n".join(
+                        f"  ❌ {c.check_type}: {c.message}"
+                        for c in deep_result.checks if not c.passed
+                    )
+                    passed_details = "\n".join(
+                        f"  ✅ {c.check_type}: {c.message}"
+                        for c in deep_result.checks if c.passed
+                    )
+                    message = (
+                        f"⚠️ *Deep E2E Verification Failed*\n\n"
+                        f"*Project:* {escape_markdown(project_name)}\n"
+                        f"*Result:* {deep_result.passed_checks}/{deep_result.total_checks} checks passed\n\n"
+                        f"*Passed:*\n{passed_details}\n\n"
+                        f"*Failed:*\n{failed_details}\n\n"
+                        f"Shallow validation passed \\(HTTP status OK\\), "
+                        f"but functional tests failed\\."
+                    )
+                    await send_notification(application, message)
+
+                    # If this was a rescue job, don't mark it successful
+                    try:
+                        rescue_engine_check = get_rescue_engine()
+                        rescue_state = rescue_engine_check.get_rescue_state(project_name)
+                        if rescue_state and rescue_state.attempts:
+                            rescue_engine_check.mark_rescue_failure(
+                                project_name,
+                                deployment_job.get("job_id", "unknown"),
+                                "Shallow validation passed but deep E2E failed"
+                            )
+                    except Exception:
+                        pass
+
+                    return False
+
+            except ImportError:
+                logger.debug("Deep E2E verifier not available, skipping")
+            except Exception as e2e_err:
+                logger.warning(f"Deep E2E verification error (non-blocking): {e2e_err}")
+
             try:
                 from controller.runtime_intelligence import SignalCollector, SignalPersister
                 signal_collector = SignalCollector()
@@ -7656,6 +7736,10 @@ async def trigger_deployment_validation(
                 emoji = "✅" if status == "healthy" else "❌"
                 url = normalized_urls.get(mod, "")
                 message += f"  {emoji} {mod}: {url}\n"
+
+            # Add deep E2E result to message
+            if deep_e2e_passed and deep_e2e_summary:
+                message += f"\n🔬 *Deep E2E:* All functional checks passed\n"
 
             message += (
                 f"\nPlease test the application and provide feedback:\n"

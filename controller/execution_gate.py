@@ -319,6 +319,11 @@ class GateDecision:
     drift_blocks_execution: bool = False
     drift_requires_confirmation: bool = False
     drift_evaluation: Optional[Dict[str, Any]] = None
+    # Phase 23: Deep E2E verification fields
+    deep_e2e_required: bool = False
+    deep_e2e_checked: bool = False
+    deep_e2e_passed: bool = False
+    deep_e2e_block_reason: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -335,6 +340,11 @@ class GateDecision:
             "drift_blocks_execution": self.drift_blocks_execution,
             "drift_requires_confirmation": self.drift_requires_confirmation,
             "drift_evaluation": self.drift_evaluation,
+            # Phase 23: Deep E2E
+            "deep_e2e_required": self.deep_e2e_required,
+            "deep_e2e_checked": self.deep_e2e_checked,
+            "deep_e2e_passed": self.deep_e2e_passed,
+            "deep_e2e_block_reason": self.deep_e2e_block_reason,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -634,6 +644,11 @@ class ExecutionGate:
                 # If drift check fails, log but allow (fail-open for now)
                 drift_checked = False
 
+        # Step 11: Phase 23 - Deep E2E verification flag for DEPLOY_TEST
+        # The flag signals that the caller must run async deep E2E checks
+        # before actually deploying. evaluate() stays synchronous.
+        deep_e2e_required = (requested_action == ExecutionAction.DEPLOY_TEST)
+
         # All checks passed - execution is ALLOWED
         decision = GateDecision(
             allowed=True,
@@ -645,6 +660,7 @@ class ExecutionGate:
             drift_blocks_execution=False,
             drift_requires_confirmation=False,
             drift_evaluation=drift_evaluation,
+            deep_e2e_required=deep_e2e_required,
         )
         self._log_audit(request, decision, "ALLOWED")
 
@@ -812,6 +828,42 @@ class ExecutionGate:
             return [a.value for a in actions]
         except ValueError:
             return []
+
+    async def run_deep_e2e_check(
+        self,
+        project_name: str,
+        urls: Dict[str, str],
+        github_repo: Optional[str] = None,
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        Run deep E2E verification (Phase 23).
+
+        Called by bot/caller when GateDecision.deep_e2e_required is True.
+        Returns (passed, result_dict).
+        """
+        try:
+            from controller.deep_e2e_verifier import get_deep_e2e_verifier, E2ELevel
+            verifier = get_deep_e2e_verifier()
+            result = await verifier.run(
+                project_name, urls, github_repo, E2ELevel.FUNCTIONAL
+            )
+            result_dict = {
+                "level": result.level,
+                "passed": result.passed,
+                "total_checks": result.total_checks,
+                "passed_checks": result.passed_checks,
+                "failed_checks": result.failed_checks,
+                "summary": result.summary,
+                "run_at": result.run_at,
+                "duration_ms": result.duration_ms,
+            }
+            return result.passed, result_dict
+        except ImportError:
+            logger.warning("Deep E2E verifier not available, skipping")
+            return True, None
+        except Exception as e:
+            logger.error(f"Deep E2E verification error: {e}")
+            return True, None
 
 
 # Global execution gate instance

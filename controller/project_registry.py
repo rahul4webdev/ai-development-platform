@@ -588,6 +588,10 @@ class ProjectRegistry:
                 "created_at": project.created_at,
                 "updated_at": project.updated_at,
                 "created_by": project.created_by,
+                # Phase 23: Deep E2E verification fields (from metadata)
+                "deep_e2e_level": project.metadata.get("deep_e2e_level"),
+                "deep_e2e_passed": project.metadata.get("deep_e2e_passed"),
+                "deep_e2e_last_run": project.metadata.get("deep_e2e_last_run"),
             })
 
         # Sort by updated_at descending

@@ -87,6 +87,10 @@ class ProjectOverview:
     fingerprint: Optional[str] = None
     version: str = "v1"
     parent_project_id: Optional[str] = None
+    # Phase 23: Deep E2E verification
+    deep_e2e_level: Optional[str] = None
+    deep_e2e_passed: Optional[bool] = None
+    deep_e2e_last_run: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -106,6 +110,10 @@ class ProjectOverview:
             "fingerprint": self.fingerprint,
             "version": self.version,
             "parent_project_id": self.parent_project_id,
+            # Phase 23: Deep E2E verification
+            "deep_e2e_level": self.deep_e2e_level,
+            "deep_e2e_passed": self.deep_e2e_passed,
+            "deep_e2e_last_run": self.deep_e2e_last_run,
         }
         # Include identity_info if attached
         if hasattr(self, "_identity_info"):
@@ -523,6 +531,10 @@ class DashboardBackend:
                 fingerprint=proj.get("fingerprint"),
                 version=proj.get("version", "v1"),
                 parent_project_id=proj.get("parent_project_id"),
+                # Phase 23: Deep E2E verification
+                deep_e2e_level=proj.get("deep_e2e_level"),
+                deep_e2e_passed=proj.get("deep_e2e_passed"),
+                deep_e2e_last_run=proj.get("deep_e2e_last_run"),
             )
 
             result.append(overview)
