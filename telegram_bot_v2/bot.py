@@ -323,6 +323,11 @@ class CallbackAction(str, Enum):
     APPROVE_PROJECT = "aprv_proj"          # Select project for /approve
     FEEDBACK_PROJECT = "fdbk_proj"         # Select project for /feedback
     VALIDATE_PROJECT = "vald_proj"         # Select project for /rescue validate
+    # Phase 22 Improvement: Module-level rescue
+    RESCUE_MODULE = "resc_mod"             # Toggle module selection
+    RESCUE_CONFIRM = "resc_conf"           # Confirm module selection → validate
+    RESCUE_DEPLOY = "resc_dep"             # Trigger deployment after rescue
+    RESCUE_SKIP_DEPLOY = "resc_skip"       # Skip deployment, let Claude fix only
 
 
 # -----------------------------------------------------------------------------
@@ -337,6 +342,9 @@ class UserState:
         self.approval_history: Dict[str, List[Dict[str, Any]]] = {}  # deployment_id -> approvals
         # Phase 16E: Conflict resolution state
         self.pending_conflicts: Dict[int, Dict[str, Any]] = {}  # user_id -> conflict details
+        # Phase 22 Improvement: Module-level rescue state
+        self.pending_rescue: Dict[int, Dict[str, Any]] = {}
+        # Structure: {user_id: {"project": str, "selected_modules": set, "deployment_job_id": str}}
 
 
 user_state = UserState()
@@ -3118,6 +3126,96 @@ async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TY
 # Phase 22: Rescue System Commands
 # -----------------------------------------------------------------------------
 
+
+def _truncate_project_name(name: str, max_len: int = 20) -> str:
+    """Truncate project name for callback data (64-byte Telegram limit)."""
+    return name[:max_len]
+
+
+def get_rescue_module_keyboard(
+    project_name: str,
+    selected: set,
+    available_modules: Optional[List[str]] = None
+) -> InlineKeyboardMarkup:
+    """Build module toggle keyboard with current selection state."""
+    if available_modules is None:
+        available_modules = ["api", "frontend", "admin"]
+
+    short_name = _truncate_project_name(project_name)
+    rows = []
+
+    # Module toggle buttons (first row)
+    module_buttons = []
+    for mod in available_modules:
+        emoji = "✅" if mod in selected else "⬜"
+        module_buttons.append(
+            InlineKeyboardButton(
+                f"{emoji} {mod.upper()}",
+                callback_data=f"{CallbackAction.RESCUE_MODULE.value}:{short_name}:{mod}"
+            )
+        )
+    rows.append(module_buttons)
+
+    # Select All / Deselect All toggle
+    if selected == set(available_modules):
+        rows.append([InlineKeyboardButton(
+            "⬜ Deselect All",
+            callback_data=f"{CallbackAction.RESCUE_MODULE.value}:{short_name}:none"
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            "🔄 Select All",
+            callback_data=f"{CallbackAction.RESCUE_MODULE.value}:{short_name}:all"
+        )])
+
+    # Start Rescue button (only if at least one module selected)
+    if selected:
+        rows.append([InlineKeyboardButton(
+            "▶️ Start Rescue",
+            callback_data=f"{CallbackAction.RESCUE_CONFIRM.value}:{short_name}:go"
+        )])
+
+    return InlineKeyboardMarkup(rows)
+
+
+def get_rescue_post_completion_keyboard(project_name: str) -> InlineKeyboardMarkup:
+    """Build keyboard for post-rescue-completion actions (deploy/skip)."""
+    short_name = _truncate_project_name(project_name)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🚀 Deploy Now",
+                callback_data=f"{CallbackAction.RESCUE_DEPLOY.value}:{short_name}:go"
+            ),
+            InlineKeyboardButton(
+                "⏭️ Skip Deployment",
+                callback_data=f"{CallbackAction.RESCUE_SKIP_DEPLOY.value}:{short_name}:go"
+            ),
+        ]
+    ])
+
+
+def get_rescue_status_keyboard(project_name: str) -> InlineKeyboardMarkup:
+    """Build action keyboard for rescue status display."""
+    short_name = _truncate_project_name(project_name)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔄 Re-validate",
+                callback_data=f"{CallbackAction.VALIDATE_PROJECT.value}:{short_name}:go"
+            ),
+            InlineKeyboardButton(
+                "🚀 Deploy",
+                callback_data=f"{CallbackAction.RESCUE_DEPLOY.value}:{short_name}:go"
+            ),
+            InlineKeyboardButton(
+                "🗑️ Reset",
+                callback_data=f"{CallbackAction.RESCUE_PROJECT.value}:{short_name}:reset"
+            ),
+        ]
+    ])
+
+
 @role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
 async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -3170,14 +3268,27 @@ async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         rescue_engine = get_rescue_engine()
 
         if action == "status":
-            # Show rescue status
+            # Show enhanced rescue status with per-module info
             state = rescue_engine.get_rescue_state(project_name)
             if state is None:
+                # No rescue state - show module selector for new rescue
+                urls = await get_project_deployment_urls(project_name)
+                available_modules = list(urls.keys()) if urls else ["api", "frontend", "admin"]
+
+                user_id = update.effective_user.id
+                user_state.pending_rescue[user_id] = {
+                    "project": project_name,
+                    "selected_modules": set(available_modules),
+                    "urls": urls or {},
+                }
+
+                keyboard = get_rescue_module_keyboard(project_name, set(available_modules), available_modules)
                 await update.message.reply_text(
-                    f"*🔧 Rescue Status: {escape_markdown(project_name)}*\n\n"
-                    f"No rescue attempts recorded for this project.\n"
-                    f"Use `/rescue {project_name} validate` to check deployment.",
-                    parse_mode="Markdown"
+                    f"*🔧 Rescue: {escape_markdown(project_name)}*\n\n"
+                    f"No rescue attempts recorded.\n"
+                    f"Select modules to validate & rescue:\n",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
                 )
             else:
                 attempts = len(state.attempts)
@@ -3189,20 +3300,41 @@ async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     f"*Status:* {status_emoji} {status_text}\n"
                     f"*Attempts:* {attempts}/3\n"
                     f"*Deployment Job:* `{state.deployment_job_id[:12]}...`\n\n"
-                    f"*Attempt History:*\n"
                 )
 
+                # Per-module status
+                if state.module_results:
+                    message += "*Module Status:*\n"
+                    for mr in state.module_results:
+                        mod = mr.get("module", "unknown")
+                        healthy = mr.get("healthy", False)
+                        url = mr.get("url", "")
+                        ftype = mr.get("failure_type", "")
+                        emoji = "✅" if healthy else "❌"
+                        status_str = "Healthy" if healthy else ftype
+                        message += f"  {emoji} {mod} ({url}) — {status_str}\n"
+                    message += "\n"
+
+                # Attempt history
+                message += "*Attempt History:*\n"
                 for attempt in state.attempts:
                     emoji = "✅" if attempt.success else "❌"
+                    # Show module scope if available
+                    scope = ""
+                    if attempt.modules:
+                        failing = [m for m, s in attempt.modules.items() if s != "healthy"]
+                        if failing:
+                            scope = f" [{', '.join(failing)}]"
                     message += (
-                        f"{emoji} Attempt {attempt.attempt_number}: "
-                        f"{attempt.failure_type} - {attempt.outcome or 'Pending'}\n"
+                        f"  {emoji} #{attempt.attempt_number}: "
+                        f"{attempt.failure_type}{scope} — {attempt.outcome or 'Pending'}\n"
                     )
 
                 if not state.resolved and attempts >= 3:
-                    message += "\n⚠️ *Max attempts reached.* Use `/rescue {project_name} reset` to retry."
+                    message += f"\n⚠️ *Max attempts reached.* Use `/rescue {project_name} reset` to retry."
 
-                await update.message.reply_text(message, parse_mode="Markdown")
+                keyboard = get_rescue_status_keyboard(project_name)
+                await update.message.reply_text(message, parse_mode="Markdown", reply_markup=keyboard)
 
         elif action == "reset":
             # Reset rescue state
@@ -3216,31 +3348,33 @@ async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
         elif action == "validate":
-            # Manually trigger validation
+            # Show module selector for targeted validation
             urls = await get_project_deployment_urls(project_name)
             if not urls:
                 await update.message.reply_text(
                     f"*❌ No URLs found for {escape_markdown(project_name)}*\n\n"
-                    f"Cannot validate - no deployment URLs configured.",
+                    f"Cannot validate - no deployment URLs configured.\n"
+                    f"Ensure the project has a CHD with deployment targets.",
                     parse_mode="Markdown"
                 )
                 return
 
-            await update.message.reply_text(
-                f"*🔍 Validating {escape_markdown(project_name)}...*\n\n"
-                f"Checking endpoints:\n"
-                f"• API: {urls.get('api', 'N/A')}\n"
-                f"• Frontend: {urls.get('frontend', 'N/A')}\n"
-                f"• Admin: {urls.get('admin', 'N/A')}",
-                parse_mode="Markdown"
-            )
+            available_modules = list(urls.keys())
+            user_id = update.effective_user.id
+            user_state.pending_rescue[user_id] = {
+                "project": project_name,
+                "selected_modules": set(available_modules),
+                "urls": urls,
+            }
 
-            # Trigger validation
-            mock_job = {"job_id": f"manual-{project_name}-{datetime.utcnow().timestamp()}"}
-            asyncio.create_task(
-                trigger_deployment_validation(
-                    context.application, project_name, mock_job, urls
-                )
+            keyboard = get_rescue_module_keyboard(project_name, set(available_modules), available_modules)
+            await update.message.reply_text(
+                f"*🔧 Rescue: {escape_markdown(project_name)}*\n\n"
+                f"Select modules to validate & rescue:\n\n"
+                f"Available modules:\n"
+                + "".join(f"• {mod}: {urls[mod]}\n" for mod in available_modules),
+                parse_mode="Markdown",
+                reply_markup=keyboard
             )
 
         else:
@@ -4036,7 +4170,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Phase 22: Project Selection Callbacks
         elif action == CallbackAction.RESCUE_PROJECT.value:
             # User selected a project from /rescue command
-            # aspect contains the sub-action (status, reset, validate)
             sub_action = aspect
 
             try:
@@ -4044,15 +4177,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 rescue_engine = get_rescue_engine()
 
                 if sub_action == "status":
+                    # Show module selector for new rescue (or status if state exists)
                     state = rescue_engine.get_rescue_state(project_name)
                     if state is None:
+                        urls = await get_project_deployment_urls(project_name)
+                        available_modules = list(urls.keys()) if urls else ["api", "frontend", "admin"]
+                        user_state.pending_rescue[user_id] = {
+                            "project": project_name,
+                            "selected_modules": set(available_modules),
+                            "urls": urls or {},
+                        }
+                        keyboard = get_rescue_module_keyboard(project_name, set(available_modules), available_modules)
                         await query.edit_message_text(
-                            f"*🔧 Rescue Status: {escape_markdown(project_name)}*\n\n"
+                            f"*🔧 Rescue: {escape_markdown(project_name)}*\n\n"
                             f"No rescue attempts recorded.\n"
-                            f"Use `/rescue {project_name} validate` to check deployment.",
-                            parse_mode="Markdown"
+                            f"Select modules to validate & rescue:\n",
+                            parse_mode="Markdown",
+                            reply_markup=keyboard
                         )
                     else:
+                        # Show enhanced status with per-module info
                         attempts = len(state.attempts)
                         status_emoji = "✅" if state.resolved else "🔄"
                         status_text = "Resolved" if state.resolved else "In Progress"
@@ -4062,44 +4206,299 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                             f"*Status:* {status_emoji} {status_text}\n"
                             f"*Attempts:* {attempts}/3\n"
                             f"*Deployment Job:* `{state.deployment_job_id[:12]}...`\n\n"
-                            f"*Attempt History:*\n"
                         )
 
+                        if state.module_results:
+                            message += "*Module Status:*\n"
+                            for mr in state.module_results:
+                                mod = mr.get("module", "unknown")
+                                healthy = mr.get("healthy", False)
+                                url = mr.get("url", "")
+                                ftype = mr.get("failure_type", "")
+                                em = "✅" if healthy else "❌"
+                                s = "Healthy" if healthy else ftype
+                                message += f"  {em} {mod} ({url}) — {s}\n"
+                            message += "\n"
+
+                        message += "*Attempt History:*\n"
                         for attempt in state.attempts:
-                            emoji = "✅" if attempt.success else "❌"
+                            em = "✅" if attempt.success else "❌"
+                            scope = ""
+                            if attempt.modules:
+                                failing = [m for m, s in attempt.modules.items() if s != "healthy"]
+                                if failing:
+                                    scope = f" [{', '.join(failing)}]"
                             message += (
-                                f"{emoji} Attempt {attempt.attempt_number}: "
-                                f"{attempt.failure_type} - {attempt.outcome or 'Pending'}\n"
+                                f"  {em} #{attempt.attempt_number}: "
+                                f"{attempt.failure_type}{scope} — {attempt.outcome or 'Pending'}\n"
                             )
 
                         if not state.resolved and attempts >= 3:
                             message += f"\n⚠️ *Max attempts reached.* Use `/rescue {project_name} reset` to retry."
 
-                        await query.edit_message_text(message, parse_mode="Markdown")
+                        keyboard = get_rescue_status_keyboard(project_name)
+                        await query.edit_message_text(message, parse_mode="Markdown", reply_markup=keyboard)
+
+                elif sub_action == "reset":
+                    rescue_engine.clear_rescue_state(project_name)
+                    await query.edit_message_text(
+                        f"*🔧 Rescue Reset: {escape_markdown(project_name)}*\n\n"
+                        f"Rescue state cleared. Use `/rescue {project_name}` to start fresh.",
+                        parse_mode="Markdown"
+                    )
 
                 elif sub_action == "validate":
                     urls = await get_project_deployment_urls(project_name)
                     if not urls:
                         await query.edit_message_text(
                             f"*❌ No deployment URLs found*\n\n"
-                            f"Project `{project_name}` has no recorded deployment URLs.",
+                            f"Project `{project_name}` has no recorded deployment URLs.\n"
+                            f"Ensure the project has a CHD with deployment targets.",
                             parse_mode="Markdown"
                         )
                     else:
+                        available_modules = list(urls.keys())
+                        user_state.pending_rescue[user_id] = {
+                            "project": project_name,
+                            "selected_modules": set(available_modules),
+                            "urls": urls,
+                        }
+                        keyboard = get_rescue_module_keyboard(project_name, set(available_modules), available_modules)
                         await query.edit_message_text(
-                            f"*🔍 Validating {escape_markdown(project_name)}...*\n\n"
-                            f"Checking {len(urls)} endpoints...",
-                            parse_mode="Markdown"
-                        )
-                        # Trigger validation
-                        context.application.create_task(
-                            trigger_deployment_validation(
-                                context.application, project_name, "manual", urls
-                            )
+                            f"*🔧 Rescue: {escape_markdown(project_name)}*\n\n"
+                            f"Select modules to validate & rescue:\n\n"
+                            + "".join(f"• {mod}: {urls[mod]}\n" for mod in available_modules),
+                            parse_mode="Markdown",
+                            reply_markup=keyboard
                         )
 
             except Exception as e:
                 logger.error(f"Error in rescue project callback: {e}")
+                await query.edit_message_text(f"❌ Error: {str(e)}")
+
+        # Phase 22 Improvement: Module toggle callback
+        elif action == CallbackAction.RESCUE_MODULE.value:
+            module = aspect  # "api", "frontend", "admin", "all", "none"
+            try:
+                rescue_data = user_state.pending_rescue.get(user_id)
+                if not rescue_data:
+                    await query.edit_message_text("❌ Session expired. Use `/rescue` to start again.")
+                    return
+
+                full_project = rescue_data["project"]
+                selected = rescue_data["selected_modules"]
+                urls = rescue_data.get("urls", {})
+                available_modules = list(urls.keys()) if urls else ["api", "frontend", "admin"]
+
+                # Handle select all / deselect all
+                if module == "all":
+                    selected = set(available_modules)
+                elif module == "none":
+                    selected = set()
+                elif module in selected:
+                    selected.discard(module)
+                else:
+                    selected.add(module)
+
+                rescue_data["selected_modules"] = selected
+
+                keyboard = get_rescue_module_keyboard(full_project, selected, available_modules)
+                count = len(selected)
+                await query.edit_message_text(
+                    f"*🔧 Rescue: {escape_markdown(full_project)}*\n\n"
+                    f"Select modules to validate & rescue ({count} selected):\n",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.error(f"Error in rescue module toggle: {e}")
+                await query.edit_message_text(f"❌ Error: {str(e)}")
+
+        # Phase 22 Improvement: Confirm rescue (start validation)
+        elif action == CallbackAction.RESCUE_CONFIRM.value:
+            try:
+                rescue_data = user_state.pending_rescue.get(user_id)
+                if not rescue_data:
+                    await query.edit_message_text("❌ Session expired. Use `/rescue` to start again.")
+                    return
+
+                full_project = rescue_data["project"]
+                selected = list(rescue_data["selected_modules"])
+                urls = rescue_data.get("urls", {})
+
+                if not selected:
+                    await query.edit_message_text(
+                        "❌ No modules selected. Please select at least one module.",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                # Check deploy status first (PART 3)
+                deploy_status = "unknown"
+                try:
+                    from controller.deployment_validator import check_deploy_status, get_github_repo_url
+                    github_repo = get_github_repo_url(full_project)
+                    if github_repo:
+                        deploy_status, github_sha, deployed_sha = await check_deploy_status(
+                            full_project, urls, github_repo
+                        )
+                except Exception as ds_err:
+                    logger.debug(f"Deploy status check failed: {ds_err}")
+
+                if deploy_status == "not_deployed":
+                    # Show "pushed but not deployed" UI
+                    try:
+                        github_short = github_sha[:7] if github_sha else "unknown"
+                        deployed_short = deployed_sha[:7] if deployed_sha else "none"
+                    except Exception:
+                        github_short = "unknown"
+                        deployed_short = "none"
+
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "🚀 Run Testing Deployment",
+                                callback_data=f"{CallbackAction.RESCUE_DEPLOY.value}:{_truncate_project_name(full_project)}:go"
+                            ),
+                            InlineKeyboardButton(
+                                "⏭️ Skip, Let Claude Fix",
+                                callback_data=f"{CallbackAction.RESCUE_SKIP_DEPLOY.value}:{_truncate_project_name(full_project)}:go"
+                            ),
+                        ]
+                    ])
+                    await query.edit_message_text(
+                        f"⚠️ *Code pushed but NOT deployed*\n\n"
+                        f"*Project:* {escape_markdown(full_project)}\n"
+                        f"*Latest commit:* `{github_short}`\n"
+                        f"*Deployed commit:* `{deployed_short}`\n\n"
+                        f"The latest code hasn't been deployed yet.",
+                        parse_mode="Markdown",
+                        reply_markup=keyboard
+                    )
+                    return
+
+                # Proceed with validation
+                await query.edit_message_text(
+                    f"*🔍 Validating {escape_markdown(full_project)}...*\n\n"
+                    f"Checking modules: {', '.join(selected)}",
+                    parse_mode="Markdown"
+                )
+
+                mock_job = {"job_id": f"manual-{full_project}-{datetime.utcnow().timestamp()}"}
+                asyncio.create_task(
+                    trigger_deployment_validation(
+                        context.application, full_project, mock_job, urls, modules=selected
+                    )
+                )
+
+                # Clean up pending state
+                user_state.pending_rescue.pop(user_id, None)
+
+            except Exception as e:
+                logger.error(f"Error in rescue confirm: {e}")
+                await query.edit_message_text(f"❌ Error: {str(e)}")
+
+        # Phase 22 Improvement: Deploy after rescue
+        elif action == CallbackAction.RESCUE_DEPLOY.value:
+            try:
+                # Find the full project name from pending_rescue or use callback name
+                rescue_data = user_state.pending_rescue.get(user_id, {})
+                full_project = rescue_data.get("project", project_name)
+
+                await query.edit_message_text(
+                    f"*🚀 Triggering deployment for {escape_markdown(full_project)}...*",
+                    parse_mode="Markdown"
+                )
+
+                # Get GitHub repo
+                from controller.deployment_validator import get_github_repo_url
+                repo = get_github_repo_url(full_project)
+                if not repo:
+                    # Try monitored repos
+                    repo = _monitored_repos.get(full_project)
+
+                if not repo:
+                    await send_notification(context.application,
+                        f"❌ *Cannot deploy {escape_markdown(full_project)}*\n\n"
+                        f"No GitHub repository configured.\n"
+                        f"Register with: register the repo in CHD."
+                    )
+                    return
+
+                import httpx as _httpx
+                github_token = os.environ.get("GITHUB_TOKEN", "")
+                headers = {
+                    "Accept": "application/vnd.github.v3+json",
+                    "Authorization": f"token {github_token}" if github_token else "",
+                }
+                async with _httpx.AsyncClient() as client:
+                    await trigger_github_deployment(
+                        context.application, client, headers, full_project, repo
+                    )
+
+                user_state.pending_rescue.pop(user_id, None)
+
+            except Exception as e:
+                logger.error(f"Error in rescue deploy: {e}")
+                await query.edit_message_text(f"❌ Error triggering deployment: {str(e)}")
+
+        # Phase 22 Improvement: Skip deployment, proceed with rescue
+        elif action == CallbackAction.RESCUE_SKIP_DEPLOY.value:
+            try:
+                rescue_data = user_state.pending_rescue.get(user_id, {})
+                full_project = rescue_data.get("project", project_name)
+                selected = list(rescue_data.get("selected_modules", []))
+                urls = rescue_data.get("urls", {})
+
+                await query.edit_message_text(
+                    f"*⏭️ Skipping deployment for {escape_markdown(full_project)}*\n\n"
+                    f"Proceeding with validation of current deployment...",
+                    parse_mode="Markdown"
+                )
+
+                if urls and selected:
+                    mock_job = {"job_id": f"manual-{full_project}-{datetime.utcnow().timestamp()}"}
+                    asyncio.create_task(
+                        trigger_deployment_validation(
+                            context.application, full_project, mock_job, urls, modules=selected
+                        )
+                    )
+                else:
+                    await send_notification(context.application,
+                        f"❌ No URLs or modules configured for {escape_markdown(full_project)}"
+                    )
+
+                user_state.pending_rescue.pop(user_id, None)
+
+            except Exception as e:
+                logger.error(f"Error in rescue skip deploy: {e}")
+                await query.edit_message_text(f"❌ Error: {str(e)}")
+
+        # Phase 22 Improvement: Re-validate from status keyboard
+        elif action == CallbackAction.VALIDATE_PROJECT.value:
+            try:
+                urls = await get_project_deployment_urls(project_name)
+                if not urls:
+                    await query.edit_message_text(
+                        f"*❌ No deployment URLs found for {escape_markdown(project_name)}*",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                await query.edit_message_text(
+                    f"*🔍 Re-validating {escape_markdown(project_name)}...*\n\n"
+                    f"Checking all {len(urls)} modules...",
+                    parse_mode="Markdown"
+                )
+
+                mock_job = {"job_id": f"revalidate-{project_name}-{datetime.utcnow().timestamp()}"}
+                asyncio.create_task(
+                    trigger_deployment_validation(
+                        context.application, project_name, mock_job, urls
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error in validate project callback: {e}")
                 await query.edit_message_text(f"❌ Error: {str(e)}")
 
         elif action == CallbackAction.STATUS_PROJECT.value:
@@ -6819,15 +7218,14 @@ def _extract_urls_from_text(text: str) -> Dict[str, str]:
     return urls
 
 
-async def send_notification(application, message: str, parse_mode: str = "Markdown"):
+async def send_notification(application, message: str, parse_mode: str = "Markdown", reply_markup=None):
     """Send notification to all owners with fallback for markdown errors."""
     for chat_id in NOTIFICATION_CHAT_IDS:
         try:
-            await application.bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                parse_mode=parse_mode
-            )
+            kwargs = {"chat_id": chat_id, "text": message, "parse_mode": parse_mode}
+            if reply_markup is not None:
+                kwargs["reply_markup"] = reply_markup
+            await application.bot.send_message(**kwargs)
             logger.info(f"Notification sent to {chat_id}")
         except Exception as e:
             error_str = str(e)
@@ -6836,10 +7234,10 @@ async def send_notification(application, message: str, parse_mode: str = "Markdo
                 try:
                     # Strip markdown and send as plain text
                     plain_message = message.replace("*", "").replace("`", "").replace("_", "")
-                    await application.bot.send_message(
-                        chat_id=chat_id,
-                        text=plain_message
-                    )
+                    kwargs = {"chat_id": chat_id, "text": plain_message}
+                    if reply_markup is not None:
+                        kwargs["reply_markup"] = reply_markup
+                    await application.bot.send_message(**kwargs)
                     logger.info(f"Notification sent to {chat_id} (plain text fallback)")
                 except Exception as e2:
                     logger.error(f"Failed to send notification to {chat_id} even in plain text: {e2}")
@@ -7159,24 +7557,26 @@ async def trigger_deployment_validation(
     application,
     project_name: str,
     deployment_job: Dict,
-    urls: Dict[str, str]
+    urls: Dict[str, str],
+    modules: Optional[List[str]] = None
 ) -> bool:
     """
     Validate deployment endpoints and trigger rescue if needed.
 
     Phase 22: Post-deployment validation with automatic rescue.
+    Phase 22 Improvement: Module-scoped validation support.
 
     Args:
         application: Telegram application for notifications
         project_name: Name of the project
         deployment_job: The completed deployment job dict
         urls: Dict of deployment URLs (api, frontend, admin)
+        modules: Optional list of modules to validate. None = all modules.
 
     Returns:
         True if validation passed, False if rescue triggered or failed
     """
     try:
-        # Import validation components
         from controller.deployment_validator import (
             DeploymentValidator,
             DeploymentFailureClassifier,
@@ -7184,56 +7584,61 @@ async def trigger_deployment_validation(
         from controller.rescue_engine import get_rescue_engine
         from controller.server_detector import ServerDetector
 
-        logger.info(f"Starting deployment validation for {project_name}")
+        logger.info(f"Starting deployment validation for {project_name} (modules={modules or 'all'})")
 
-        # Build list of endpoints to validate
-        endpoints_to_check = []
+        # Normalize URLs - ensure https:// prefix
+        normalized_urls = {}
+        for endpoint_type, base_url in urls.items():
+            if not base_url:
+                continue
+            url = base_url.rstrip('/')
+            if not url.startswith('http'):
+                url = f"https://{url}"
+            normalized_urls[endpoint_type] = url
 
-        if urls.get('api'):
-            api_base = urls['api'].rstrip('/')
-            if not api_base.startswith('http'):
-                api_base = f"https://{api_base}"
-            endpoints_to_check.extend([
-                api_base,
-                f"{api_base}/health",
-                f"{api_base}/docs",
-            ])
-
-        if urls.get('frontend'):
-            frontend_base = urls['frontend'].rstrip('/')
-            if not frontend_base.startswith('http'):
-                frontend_base = f"https://{frontend_base}"
-            endpoints_to_check.append(frontend_base)
-
-        if urls.get('admin'):
-            admin_base = urls['admin'].rstrip('/')
-            if not admin_base.startswith('http'):
-                admin_base = f"https://{admin_base}"
-            endpoints_to_check.append(admin_base)
-
-        if not endpoints_to_check:
+        if not normalized_urls:
             logger.warning(f"No endpoints to validate for {project_name}")
-            return True  # Nothing to validate
+            return True
 
-        # Run validation
+        # Run validation with module filter
         validator = DeploymentValidator()
-        validation_result = await validator.validate_deployment(
+        all_healthy, failure, validations = await validator.validate_deployment(
             project_name=project_name,
+            urls=normalized_urls,
             deployment_job_id=deployment_job.get("job_id", "unknown"),
-            endpoints=endpoints_to_check
+            modules=modules
         )
 
-        if validation_result.all_healthy:
-            # All endpoints are healthy - send success notification
+        # Build per-module classification for status tracking
+        per_module_status = {}
+        if validations:
+            per_module = DeploymentFailureClassifier.classify_per_module(validations)
+            for mod, (healthy, ftype, _fixes) in per_module.items():
+                per_module_status[mod] = "healthy" if healthy else (ftype.value if ftype else "UNKNOWN")
+
+        # Update rescue engine with module results
+        try:
+            rescue_engine = get_rescue_engine()
+            module_results = [
+                {"module": mod, "url": normalized_urls.get(mod, ""), "healthy": status == "healthy",
+                 "failure_type": None if status == "healthy" else status,
+                 "last_checked": datetime.utcnow().isoformat()}
+                for mod, status in per_module_status.items()
+            ]
+            rescue_engine.update_module_results(project_name, module_results)
+        except Exception:
+            pass
+
+        if all_healthy:
             logger.info(f"Deployment validation passed for {project_name}")
 
-            # Emit success signal to runtime intelligence
             try:
                 from controller.runtime_intelligence import SignalCollector, SignalPersister
                 signal_collector = SignalCollector()
+                validated_endpoints = list(normalized_urls.values())
                 signal = signal_collector.emit_deployment_success_signal(
                     project_name=project_name,
-                    validated_endpoints=endpoints_to_check,
+                    validated_endpoints=validated_endpoints,
                     was_rescue=False
                 )
                 persister = SignalPersister()
@@ -7241,17 +7646,16 @@ async def trigger_deployment_validation(
             except Exception as sig_err:
                 logger.debug(f"Signal emission failed (non-blocking): {sig_err}")
 
+            # Build per-module success message
             message = (
                 f"✅ *Deployment Validated Successfully!*\n\n"
                 f"*Project:* {escape_markdown(project_name)}\n\n"
-                f"📍 *Working URLs:*\n"
+                f"📍 *Module Status:*\n"
             )
-            if urls.get('frontend'):
-                message += f"• Frontend: {urls['frontend']}\n"
-            if urls.get('api'):
-                message += f"• API: {urls['api']}\n"
-            if urls.get('admin'):
-                message += f"• Admin: {urls['admin']}\n"
+            for mod, status in per_module_status.items():
+                emoji = "✅" if status == "healthy" else "❌"
+                url = normalized_urls.get(mod, "")
+                message += f"  {emoji} {mod}: {url}\n"
 
             message += (
                 f"\nPlease test the application and provide feedback:\n"
@@ -7261,24 +7665,29 @@ async def trigger_deployment_validation(
             await send_notification(application, message)
             return True
 
-        # Validation failed - classify and potentially rescue
-        classifier = DeploymentFailureClassifier()
-        failure = classifier.classify_failure(validation_result)
-
+        # Validation failed
         if failure is None:
-            # Couldn't classify - partial success perhaps
-            logger.warning(f"Could not classify failure for {project_name}")
+            logger.warning(f"Validation failed but no failure object for {project_name}")
             return True
 
         # Check if we can attempt rescue
         rescue_engine = get_rescue_engine()
+
+        # Edge case: block if rescue already in progress
+        if rescue_engine.has_pending_attempt(project_name):
+            logger.info(f"Rescue already in progress for {project_name}, skipping")
+            await send_notification(application,
+                f"⏳ *Rescue already in progress for {escape_markdown(project_name)}*\n"
+                f"Waiting for current rescue attempt to complete."
+            )
+            return False
+
         can_rescue, reason = rescue_engine.can_attempt_rescue(
             project_name,
             deployment_job.get("job_id")
         )
 
         if not can_rescue:
-            # Emit critical failure signal (max attempts reached)
             try:
                 from controller.runtime_intelligence import SignalCollector, SignalPersister
                 signal_collector = SignalCollector()
@@ -7286,7 +7695,7 @@ async def trigger_deployment_validation(
                     project_name=project_name,
                     failure_type=failure.failure_type.value,
                     failed_endpoints=failure.failed_urls,
-                    rescue_attempt=3,  # Max attempts
+                    rescue_attempt=3,
                     max_attempts=3
                 )
                 persister = SignalPersister()
@@ -7294,21 +7703,19 @@ async def trigger_deployment_validation(
             except Exception as sig_err:
                 logger.debug(f"Signal emission failed (non-blocking): {sig_err}")
 
-            # Max attempts reached - notify for manual intervention
             message = (
                 f"🚨 *MANUAL INTERVENTION REQUIRED*\n\n"
                 f"*Project:* {escape_markdown(project_name)}\n"
                 f"*Reason:* {escape_markdown(reason)}\n\n"
-                f"*Failure Type:* {failure.failure_type.value}\n\n"
-                f"*Failed Endpoints:*\n"
+                f"*Module Status:*\n"
             )
-            for f_url in failure.failed_urls[:5]:
-                message += f"• {f_url.get('url', 'unknown')}: {f_url.get('error', 'unknown')}\n"
+            for mod, status in per_module_status.items():
+                emoji = "✅" if status == "healthy" else "❌"
+                message += f"  {emoji} {mod}: {status}\n"
 
             message += (
                 f"\n⚠️ Automatic rescue attempts exhausted.\n"
                 f"Please investigate manually and use:\n"
-                f"• `/feedback {project_name} <issues>` to report\n"
                 f"• `/rescue {project_name}` to reset and retry"
             )
             await send_notification(application, message)
@@ -7318,32 +7725,34 @@ async def trigger_deployment_validation(
         server_config = None
         try:
             detector = ServerDetector()
-            # Try to detect from any available source
             server_config = detector.detect_from_paths()
         except Exception as e:
             logger.debug(f"Server detection failed: {e}")
 
-        # Create rescue job
+        # Determine which modules failed for scoped rescue
+        failing_modules = [mod for mod, status in per_module_status.items() if status != "healthy"]
+
+        # Create module-scoped rescue job
         success, msg, rescue_job_id = await rescue_engine.create_rescue_job(
             project_name=project_name,
             failure=failure,
             source_deployment_job_id=deployment_job.get("job_id", "unknown"),
             controller_client=controller,
-            server_config=server_config
+            server_config=server_config,
+            modules=failing_modules or modules,
+            per_module_failures=per_module_status
         )
 
         if success and rescue_job_id:
-            # Extract attempt number from reason string (e.g., "Attempt 2 of 3")
             attempt_num = 1
             try:
-                import re
-                match = re.search(r'Attempt (\d+)', reason)
+                import re as _re
+                match = _re.search(r'Attempt (\d+)', reason)
                 if match:
                     attempt_num = int(match.group(1))
             except Exception:
                 pass
 
-            # Emit failure signal to runtime intelligence
             try:
                 from controller.runtime_intelligence import SignalCollector, SignalPersister
                 signal_collector = SignalCollector()
@@ -7359,27 +7768,26 @@ async def trigger_deployment_validation(
             except Exception as sig_err:
                 logger.debug(f"Signal emission failed (non-blocking): {sig_err}")
 
-            # Notify about rescue job
-            attempt_info = reason  # Contains attempt X of Y
+            attempt_info = reason
             message = (
                 f"❌ *Deployment Validation Failed*\n\n"
-                f"*Project:* {escape_markdown(project_name)}\n"
-                f"*Failure Type:* {failure.failure_type.value}\n\n"
-                f"*Failed Endpoints:*\n"
+                f"*Project:* {escape_markdown(project_name)}\n\n"
+                f"*Module Status:*\n"
             )
-            for f_url in failure.failed_urls[:5]:
-                message += f"• {f_url.get('url', 'unknown')}: {f_url.get('error', 'unknown')}\n"
+            for mod, status in per_module_status.items():
+                emoji = "✅" if status == "healthy" else "❌"
+                message += f"  {emoji} {mod}: {status}\n"
 
             message += (
                 f"\n🔧 *Rescue Job Created*\n"
                 f"*Job ID:* `{rescue_job_id[:12]}...`\n"
+                f"*Scope:* {', '.join(failing_modules) if failing_modules else 'all'}\n"
                 f"*Status:* {escape_markdown(attempt_info)}\n\n"
                 f"Claude is attempting to fix the deployment issues."
             )
             await send_notification(application, message)
-            return False  # Rescue in progress
+            return False
         else:
-            # Failed to create rescue job
             message = (
                 f"⚠️ *Rescue Job Creation Failed*\n\n"
                 f"*Project:* {escape_markdown(project_name)}\n"
@@ -7391,10 +7799,10 @@ async def trigger_deployment_validation(
 
     except ImportError as e:
         logger.error(f"Rescue system not available: {e}")
-        return True  # Continue without validation
+        return True
     except Exception as e:
         logger.error(f"Deployment validation failed: {e}")
-        return True  # Don't block on validation errors
+        return True
 
 
 async def handle_rescue_job_completion(
@@ -7403,15 +7811,19 @@ async def handle_rescue_job_completion(
     rescue_job: Dict
 ) -> None:
     """
-    Handle completion of a rescue job - re-validate deployment.
+    Handle completion of a rescue job.
 
-    Phase 22: Re-run validation after rescue completes.
+    Phase 22 Improvement: Show deploy buttons instead of auto-validating.
+    Claude has pushed fixes to GitHub - user decides whether to deploy.
+    After deployment (via ci_monitor_task), validation runs automatically.
     """
     try:
         from controller.rescue_engine import get_rescue_engine
 
         rescue_engine = get_rescue_engine()
         job_id = rescue_job.get("job_id", "")
+        rescue_state = rescue_engine.get_rescue_state(project_name)
+        attempt_num = len(rescue_state.attempts) if rescue_state else 1
 
         # Get deployment URLs
         urls = await get_project_deployment_urls(project_name)
@@ -7422,73 +7834,16 @@ async def handle_rescue_job_completion(
             )
             return
 
-        # Create a mock deployment job for validation
-        mock_deployment_job = {
-            "job_id": job_id,
-            "project_name": project_name,
-        }
-
-        # Re-run validation
-        validation_passed = await trigger_deployment_validation(
-            application, project_name, mock_deployment_job, urls
+        # Show deploy prompt with action buttons
+        keyboard = get_rescue_post_completion_keyboard(project_name)
+        message = (
+            f"✅ *Rescue Job Completed*\n\n"
+            f"*Project:* {escape_markdown(project_name)}\n"
+            f"*Attempt:* {attempt_num}/3\n\n"
+            f"Claude has pushed fixes to GitHub.\n"
+            f"Deploy the fixes to see if the issue is resolved:"
         )
-
-        if validation_passed:
-            # Mark rescue as successful
-            rescue_engine.mark_rescue_success(project_name, job_id)
-
-            # Get attempt number from rescue state
-            rescue_state = rescue_engine.get_rescue_state(project_name)
-            attempt_num = len(rescue_state.attempts) if rescue_state else 1
-
-            # Emit success signal to runtime intelligence
-            try:
-                from controller.runtime_intelligence import SignalCollector, SignalPersister
-                signal_collector = SignalCollector()
-                validated_endpoints = []
-                if urls.get('api'):
-                    validated_endpoints.append(urls['api'])
-                if urls.get('frontend'):
-                    validated_endpoints.append(urls['frontend'])
-                if urls.get('admin'):
-                    validated_endpoints.append(urls['admin'])
-
-                signal = signal_collector.emit_deployment_success_signal(
-                    project_name=project_name,
-                    validated_endpoints=validated_endpoints,
-                    was_rescue=True,
-                    rescue_attempt=attempt_num
-                )
-                persister = SignalPersister()
-                persister.persist([signal])
-            except Exception as sig_err:
-                logger.debug(f"Signal emission failed (non-blocking): {sig_err}")
-
-            # Send success notification
-            message = (
-                f"✅ *Rescue Successful!*\n\n"
-                f"*Project:* {escape_markdown(project_name)}\n"
-                f"*Fixed after:* {attempt_num} attempt(s)\n\n"
-                f"Deployment is now working:\n"
-            )
-            if urls.get('frontend'):
-                message += f"• Frontend: {urls['frontend']}\n"
-            if urls.get('api'):
-                message += f"• API: {urls['api']}\n"
-            if urls.get('admin'):
-                message += f"• Admin: {urls['admin']}\n"
-
-            message += (
-                f"\nPlease test and provide feedback:\n"
-                f"• `/approve {project_name}` - Approve for production\n"
-                f"• `/feedback {project_name} <issues>` - Report issues"
-            )
-            await send_notification(application, message)
-        else:
-            # Validation still failing - rescue_engine handles next attempt or max-attempts notification
-            rescue_engine.mark_rescue_failure(
-                project_name, job_id, "Validation still failing after rescue"
-            )
+        await send_notification(application, message, reply_markup=keyboard)
 
     except ImportError:
         logger.warning("Rescue system not available")

@@ -266,6 +266,43 @@ class DeploymentFailureClassifier:
 
         return failure_type, suggested_fixes
 
+    @classmethod
+    def classify_per_module(
+        cls,
+        validations: List[EndpointValidation],
+        server_config: Optional[Any] = None
+    ) -> Dict[str, Tuple[bool, Optional["DeploymentFailureType"], List[str]]]:
+        """
+        Classify failures per module (endpoint_type).
+
+        Groups validations by endpoint_type and classifies each independently.
+
+        Args:
+            validations: List of endpoint validation results
+            server_config: Optional server configuration
+
+        Returns:
+            Dict mapping module name to (healthy, failure_type, suggested_fixes).
+            Example: {"api": (False, HTTP_404, ["Check routing..."]), "frontend": (True, None, [])}
+        """
+        # Group by endpoint_type
+        by_module: Dict[str, List[EndpointValidation]] = {}
+        for v in validations:
+            by_module.setdefault(v.endpoint_type, []).append(v)
+
+        results: Dict[str, Tuple[bool, Optional[DeploymentFailureType], List[str]]] = {}
+        for module, module_validations in by_module.items():
+            all_healthy = all(v.is_healthy for v in module_validations)
+            if all_healthy:
+                results[module] = (True, None, [])
+            else:
+                failure_type, fixes = cls.classify_from_validations(
+                    module_validations, server_config
+                )
+                results[module] = (False, failure_type, fixes)
+
+        return results
+
 
 class DeploymentValidator:
     """
@@ -285,7 +322,8 @@ class DeploymentValidator:
         project_name: str,
         urls: Dict[str, str],  # {"api": "https://...", "frontend": "https://..."}
         deployment_job_id: str,
-        server_config: Optional[Any] = None
+        server_config: Optional[Any] = None,
+        modules: Optional[List[str]] = None
     ) -> Tuple[bool, Optional[DeploymentFailure], List[EndpointValidation]]:
         """
         Validate all configured URLs for a deployment.
@@ -295,6 +333,8 @@ class DeploymentValidator:
             urls: Dictionary of endpoint type to URL
             deployment_job_id: ID of the deployment job
             server_config: Optional server configuration
+            modules: Optional list of modules to validate (e.g. ["api", "frontend"]).
+                     If None, validates all modules.
 
         Returns:
             (all_healthy, failure_info, validations)
@@ -303,6 +343,10 @@ class DeploymentValidator:
 
         for endpoint_type, base_url in urls.items():
             if not base_url or base_url.startswith("Not configured"):
+                continue
+
+            # Skip modules not in the filter list
+            if modules and endpoint_type not in modules:
                 continue
 
             # Get validation config for this endpoint type
@@ -531,6 +575,106 @@ class DeploymentValidator:
             if "ssl" in error_str or "certificate" in error_str:
                 return None, None, None, f"SSL error: {e}"
             return None, None, None, str(e)
+
+
+async def check_deploy_status(
+    project_name: str,
+    urls: Dict[str, str],
+    github_repo: str
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """
+    Compare GitHub latest commit SHA vs deployed DEPLOY_INFO.txt.
+
+    Checks if the latest code has been deployed by comparing the GIT_COMMIT
+    in DEPLOY_INFO.txt (written by deploy-testing.yml) against the latest
+    commit SHA on GitHub's main branch.
+
+    Args:
+        project_name: Name of the project
+        urls: Deployment URLs dict (api, frontend, admin)
+        github_repo: GitHub repo in "owner/repo" format
+
+    Returns:
+        (status, github_sha, deployed_sha)
+        status: "deployed" | "not_deployed" | "unknown"
+    """
+    import os
+
+    deployed_sha = None
+    github_sha = None
+
+    # Step 1: Fetch DEPLOY_INFO.txt from any deployed endpoint
+    for endpoint_type in ["api", "frontend", "admin"]:
+        base_url = urls.get(endpoint_type)
+        if not base_url:
+            continue
+
+        if not base_url.startswith("http"):
+            base_url = f"https://{base_url}"
+
+        deploy_info_url = f"{base_url.rstrip('/')}/DEPLOY_INFO.txt"
+
+        try:
+            if HTTP_CLIENT == "httpx":
+                async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                    resp = await client.get(deploy_info_url)
+                    if resp.status_code == 200:
+                        text = resp.text
+                        match = re.search(r'GIT_COMMIT=(\w+)', text)
+                        if match:
+                            deployed_sha = match.group(1)
+                            break
+            elif HTTP_CLIENT == "aiohttp":
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(deploy_info_url, timeout=aiohttp.ClientTimeout(total=10), ssl=False) as resp:
+                        if resp.status == 200:
+                            text = await resp.text()
+                            match = re.search(r'GIT_COMMIT=(\w+)', text)
+                            if match:
+                                deployed_sha = match.group(1)
+                                break
+        except Exception as e:
+            logger.debug(f"Failed to fetch DEPLOY_INFO.txt from {deploy_info_url}: {e}")
+            continue
+
+    # Step 2: Get latest commit SHA from GitHub API
+    try:
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        if github_token:
+            headers["Authorization"] = f"token {github_token}"
+
+        api_url = f"https://api.github.com/repos/{github_repo}/commits/main"
+
+        if HTTP_CLIENT == "httpx":
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(api_url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    github_sha = data.get("sha", "")[:40]
+        elif HTTP_CLIENT == "aiohttp":
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(api_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        github_sha = data.get("sha", "")[:40]
+    except Exception as e:
+        logger.debug(f"Failed to fetch latest commit from GitHub for {github_repo}: {e}")
+
+    # Step 3: Compare
+    if deployed_sha is None or github_sha is None:
+        return "unknown", github_sha, deployed_sha
+
+    # Compare first 7 chars (short SHA) since DEPLOY_INFO.txt may have short or full SHA
+    deployed_short = deployed_sha[:7]
+    github_short = github_sha[:7]
+
+    if deployed_short == github_short:
+        return "deployed", github_sha, deployed_sha
+    else:
+        return "not_deployed", github_sha, deployed_sha
 
 
 # Singleton instance

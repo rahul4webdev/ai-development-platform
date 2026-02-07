@@ -45,15 +45,42 @@ class RescueAttempt:
     completed_at: Optional[str] = None
     success: bool = False
     outcome: Optional[str] = None
+    modules: Dict[str, str] = field(default_factory=dict)
+    # Per-module status: {"api": "HTTP_404", "frontend": "healthy", "admin": "HTTP_502"}
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
-        return asdict(self)
+        result = asdict(self)
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict) -> "RescueAttempt":
         """Create from dictionary."""
-        return cls(**data)
+        # Handle backward compat: old state files may not have 'modules'
+        known_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        if "modules" not in filtered:
+            filtered["modules"] = {}
+        return cls(**filtered)
+
+
+@dataclass
+class ModuleRescueResult:
+    """Per-module rescue validation result."""
+    module: str       # "api", "frontend", "admin"
+    url: str          # The base URL for this module
+    healthy: bool
+    failure_type: Optional[str] = None
+    last_checked: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "ModuleRescueResult":
+        known_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        return cls(**filtered)
 
 
 @dataclass
@@ -66,6 +93,8 @@ class ProjectRescueState:
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     resolved: bool = False
     resolved_at: Optional[str] = None
+    selected_modules: List[str] = field(default_factory=list)
+    module_results: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -76,7 +105,9 @@ class ProjectRescueState:
             "last_failure_type": self.last_failure_type,
             "created_at": self.created_at,
             "resolved": self.resolved,
-            "resolved_at": self.resolved_at
+            "resolved_at": self.resolved_at,
+            "selected_modules": self.selected_modules,
+            "module_results": self.module_results,
         }
 
     @classmethod
@@ -90,7 +121,9 @@ class ProjectRescueState:
             last_failure_type=data.get("last_failure_type"),
             created_at=data.get("created_at", datetime.utcnow().isoformat()),
             resolved=data.get("resolved", False),
-            resolved_at=data.get("resolved_at")
+            resolved_at=data.get("resolved_at"),
+            selected_modules=data.get("selected_modules", []),
+            module_results=data.get("module_results", []),
         )
 
 
@@ -102,6 +135,16 @@ FAILURE TYPE: {failure_type}
 DEPLOYMENT JOB: {deployment_job_id}
 ATTEMPT: {attempt_number}/{max_attempts}
 GITHUB REPO: {github_repo}
+
+==============================================================================
+MODULE SCOPE
+==============================================================================
+{module_scope}
+
+{module_failure_details}
+
+HEALTHY MODULES (DO NOT TOUCH):
+{healthy_modules}
 
 ==============================================================================
 FAILED ENDPOINTS WITH ACTUAL ERRORS
@@ -280,7 +323,9 @@ class RescueJobEngine:
         failure: Any,  # DeploymentFailure from deployment_validator
         source_deployment_job_id: str,
         controller_client: Any,  # ControllerClient
-        server_config: Optional[Any] = None  # ServerConfig from server_detector
+        server_config: Optional[Any] = None,  # ServerConfig from server_detector
+        modules: Optional[List[str]] = None,
+        per_module_failures: Optional[Dict[str, str]] = None
     ) -> Tuple[bool, str, Optional[str]]:
         """
         Create a rescue job for a deployment failure.
@@ -291,6 +336,8 @@ class RescueJobEngine:
             source_deployment_job_id: ID of the failed deployment job
             controller_client: Client to create jobs
             server_config: Optional server configuration
+            modules: List of modules being rescued (e.g. ["api", "admin"])
+            per_module_failures: Per-module failure status (e.g. {"api": "HTTP_404", "frontend": "healthy"})
 
         Returns:
             (success, message, job_id)
@@ -310,6 +357,10 @@ class RescueJobEngine:
             )
             self._state[project_name] = state
 
+        # Track selected modules in state
+        if modules:
+            state.selected_modules = modules
+
         attempt_number = len(state.attempts) + 1
 
         # Generate task description
@@ -317,7 +368,9 @@ class RescueJobEngine:
             project_name=project_name,
             failure=failure,
             attempt_number=attempt_number,
-            server_config=server_config
+            server_config=server_config,
+            modules=modules,
+            per_module_failures=per_module_failures
         )
 
         try:
@@ -331,12 +384,13 @@ class RescueJobEngine:
             )
 
             if result.get("job_id"):
-                # Record the attempt
+                # Record the attempt with per-module info
                 attempt = RescueAttempt(
                     attempt_number=attempt_number,
                     job_id=result["job_id"],
                     failure_type=failure.failure_type.value if hasattr(failure.failure_type, 'value') else str(failure.failure_type),
-                    created_at=datetime.utcnow().isoformat()
+                    created_at=datetime.utcnow().isoformat(),
+                    modules=per_module_failures or {}
                 )
                 state.attempts.append(attempt)
                 state.last_failure_type = attempt.failure_type
@@ -357,7 +411,9 @@ class RescueJobEngine:
         project_name: str,
         failure: Any,
         attempt_number: int,
-        server_config: Optional[Any] = None
+        server_config: Optional[Any] = None,
+        modules: Optional[List[str]] = None,
+        per_module_failures: Optional[Dict[str, str]] = None
     ) -> str:
         """Generate task description for Claude."""
         from controller.deployment_validator import (
@@ -406,6 +462,24 @@ Response Body Preview:
         # Get GitHub repo URL
         github_repo = get_github_repo_url(project_name) or "Not found in CHD"
 
+        # Build module scope section
+        if modules:
+            module_scope = f"SCOPED TO MODULES: {', '.join(modules)}"
+        else:
+            module_scope = "ALL MODULES"
+
+        # Build per-module failure details
+        module_failure_lines = []
+        healthy_module_lines = []
+        if per_module_failures:
+            for mod, status in per_module_failures.items():
+                if status == "healthy":
+                    healthy_module_lines.append(f"- {mod}: HEALTHY (working correctly)")
+                else:
+                    module_failure_lines.append(f"- {mod}: FAILING ({status})")
+        module_failure_details = "\n".join(module_failure_lines) or "See failed endpoints below"
+        healthy_modules = "\n".join(healthy_module_lines) or "- None identified"
+
         # Server instructions
         if server_config and hasattr(server_config, 'environment'):
             from controller.server_detector import ServerEnvironment
@@ -427,6 +501,9 @@ Response Body Preview:
             deployment_job_id=failure.deployment_job_id,
             attempt_number=attempt_number,
             max_attempts=RESCUE_MAX_ATTEMPTS,
+            module_scope=module_scope,
+            module_failure_details=module_failure_details,
+            healthy_modules=healthy_modules,
             failed_endpoints_details=failed_endpoints_details,
             successful_endpoints_list=successful_endpoints_list,
             diagnostic_info=diagnostic_info,
@@ -478,6 +555,25 @@ Response Body Preview:
             del self._state[project_name]
             self._save_state()
             logger.info(f"Cleared rescue state for {project_name}")
+
+    def update_module_results(
+        self, project_name: str, module_results: List[Dict[str, Any]]
+    ) -> None:
+        """Update per-module validation results for a project."""
+        state = self._state.get(project_name)
+        if state:
+            state.module_results = module_results
+            self._save_state()
+
+    def has_pending_attempt(self, project_name: str) -> bool:
+        """Check if there's an in-progress rescue attempt (not yet completed)."""
+        state = self._state.get(project_name)
+        if not state:
+            return False
+        for attempt in state.attempts:
+            if attempt.completed_at is None:
+                return True
+        return False
 
 
 # Singleton instance
