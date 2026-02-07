@@ -44,6 +44,16 @@ from .phase12 import (
 
 from .lifecycle_engine import get_lifecycle_engine, LifecycleEngine
 
+# Lifecycle v2 for project lifecycle creation
+try:
+    from .lifecycle_v2 import (
+        create_project_lifecycle,
+        ProjectAspect as LifecycleAspect,
+    )
+    LIFECYCLE_V2_AVAILABLE = True
+except ImportError:
+    LIFECYCLE_V2_AVAILABLE = False
+
 # Phase 19 fix: Import Claude backend for autonomous planning job scheduling
 try:
     from .claude_backend import (
@@ -397,6 +407,47 @@ async def create_project_from_natural_language(
 
         _save_ipc(ipc)
         logger.info("[STEP 6/7] IPC Creation - PASSED")
+
+        # STEP 6.5: Create lifecycle_v2 instances for each aspect
+        if LIFECYCLE_V2_AVAILABLE:
+            logger.info("  Creating lifecycle_v2 instances...")
+            aspect_mapping = {
+                "api": LifecycleAspect.BACKEND,
+                "backend": LifecycleAspect.BACKEND,
+                "frontend": LifecycleAspect.FRONTEND_WEB,
+                "frontend_web": LifecycleAspect.FRONTEND_WEB,
+                "admin": LifecycleAspect.ADMIN,
+                "core": LifecycleAspect.CORE,
+            }
+            # Get aspects from registry project or default
+            project_aspects = []
+            try:
+                if project and hasattr(project, 'aspects'):
+                    project_aspects = list(project.aspects.keys())
+            except Exception:
+                pass
+            if not project_aspects:
+                project_aspects = ["core", "api", "frontend", "admin"]
+
+            for aspect_name in project_aspects:
+                lc_aspect = aspect_mapping.get(aspect_name.lower())
+                if not lc_aspect:
+                    continue
+                try:
+                    lc_ok, lc_msg, lc_inst = await create_project_lifecycle(
+                        project_name=project_name,
+                        aspect=lc_aspect,
+                        created_by=request.user_id,
+                        description=request.description[:200] if request.description else project_name,
+                    )
+                    if lc_ok and lc_inst:
+                        logger.info(f"    Lifecycle created: {aspect_name} -> {lc_inst.lifecycle_id}")
+                    else:
+                        logger.warning(f"    Lifecycle creation failed for {aspect_name}: {lc_msg}")
+                except Exception as e:
+                    logger.warning(f"    Lifecycle creation error for {aspect_name}: {e}")
+        else:
+            logger.warning("  lifecycle_v2 not available, skipping lifecycle creation")
 
         # STEP 7: Schedule Claude planning job
         logger.info("[STEP 7/7] Job Scheduling - Starting...")

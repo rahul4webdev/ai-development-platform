@@ -933,20 +933,38 @@ class DashboardBackend:
             return {}
 
     async def _read_all_lifecycles(self) -> List[Dict[str, Any]]:
-        """Read all lifecycle state files."""
+        """Read all lifecycle state files (supports both v1 and v2 formats)."""
         lifecycles = []
         lifecycle_dir = self._lifecycle_dir
 
         if not lifecycle_dir.exists():
             return lifecycles
 
+        seen_ids = set()
+
+        # Read lifecycle_v2 aggregate file (lifecycles.json)
+        v2_file = lifecycle_dir / "lifecycles.json"
+        if v2_file.exists():
+            try:
+                with open(v2_file) as f:
+                    data = json.load(f)
+                    for lc_id, lc_data in data.get("lifecycles", {}).items():
+                        lifecycles.append(lc_data)
+                        seen_ids.add(lc_id)
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Failed to read lifecycle_v2 file: {e}")
+
+        # Also read individual state files (v1 format)
         for state_file in lifecycle_dir.glob("*.json"):
-            if state_file.name.startswith("lifecycle_"):
+            if state_file.name.startswith("lifecycle"):
                 continue  # Skip aggregate files
             try:
                 with open(state_file) as f:
                     data = json.load(f)
-                    lifecycles.append(data)
+                    lc_id = data.get("lifecycle_id", state_file.stem)
+                    if lc_id not in seen_ids:
+                        lifecycles.append(data)
+                        seen_ids.add(lc_id)
             except (json.JSONDecodeError, IOError) as e:
                 logger.warning(f"Failed to read lifecycle file {state_file}: {e}")
 

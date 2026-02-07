@@ -48,7 +48,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import yaml
 from fastapi import FastAPI, HTTPException
@@ -6568,6 +6568,60 @@ async def shutdown_event():
             logger.info("Runtime intelligence polling stopped")
         except Exception as e:
             logger.error(f"Error stopping runtime intelligence: {e}")
+
+
+# -----------------------------------------------------------------------------
+# Admin: Backfill lifecycles for existing projects
+# -----------------------------------------------------------------------------
+@app.post("/admin/backfill-lifecycles/{project_name}")
+async def backfill_lifecycles(project_name: str):
+    """Create missing lifecycle instances for an existing project."""
+    try:
+        from controller.project_registry import get_registry
+        from controller.lifecycle_v2 import (
+            create_project_lifecycle,
+            ProjectAspect,
+        )
+
+        registry = get_registry()
+        project = registry.get_project(project_name)
+        if not project:
+            raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+
+        aspect_mapping = {
+            "api": ProjectAspect.BACKEND,
+            "backend": ProjectAspect.BACKEND,
+            "frontend": ProjectAspect.FRONTEND_WEB,
+            "frontend_web": ProjectAspect.FRONTEND_WEB,
+            "admin": ProjectAspect.ADMIN,
+            "core": ProjectAspect.CORE,
+        }
+
+        project_aspects = list(project.aspects.keys()) if project.aspects else ["core", "api", "frontend", "admin"]
+        created = []
+
+        for aspect_name in project_aspects:
+            lc_aspect = aspect_mapping.get(aspect_name.lower())
+            if not lc_aspect:
+                continue
+            try:
+                success, message, lifecycle = await create_project_lifecycle(
+                    project_name=project_name,
+                    aspect=lc_aspect,
+                    created_by=project.created_by or "system",
+                    description=project.description[:200] if project.description else project_name,
+                )
+                if success and lifecycle:
+                    created.append({"aspect": aspect_name, "lifecycle_id": lifecycle.lifecycle_id})
+                else:
+                    created.append({"aspect": aspect_name, "error": message})
+            except Exception as e:
+                created.append({"aspect": aspect_name, "error": str(e)})
+
+        return {"project_name": project_name, "lifecycles_created": created}
+
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Lifecycle module not available: {e}")
 
 
 # -----------------------------------------------------------------------------
