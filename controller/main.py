@@ -3427,25 +3427,44 @@ async def get_project_status(project_name: str):
 
 @app.get("/projects")
 async def list_projects():
-    """List all registered projects."""
+    """List all registered projects. Reads from project registry as primary truth."""
     logger.info("Listing all projects")
 
     projects = []
+
+    # Primary source: Project Registry
+    try:
+        from controller.project_registry import get_registry
+        registry = get_registry()
+        registry_projects = registry.get_dashboard_projects()
+        for proj in registry_projects:
+            projects.append({
+                "name": proj.get("project_name", ""),
+                "phase": proj.get("current_status", "unknown"),
+                "aspects": proj.get("aspects", {}),
+                "created_at": proj.get("created_at", ""),
+            })
+    except Exception as e:
+        logger.error(f"Error reading from registry: {e}")
+
+    # Fallback: Also check PROJECTS_DIR for any projects not in registry
+    seen_names = {p["name"] for p in projects}
     if PROJECTS_DIR.exists():
         for item in PROJECTS_DIR.iterdir():
             if item.is_dir() and not item.name.startswith(".") and item.name != "README.md":
-                manifest_path = item / "PROJECT_MANIFEST.yaml"
-                if manifest_path.exists():
-                    try:
-                        manifest = read_yaml_file(manifest_path)
-                        projects.append({
-                            "name": item.name,
-                            "phase": manifest.get('current_phase', 'unknown'),
-                            "repo_url": manifest.get('repo_url', ''),
-                            "task_count": len(manifest.get('task_history', []))
-                        })
-                    except Exception as e:
-                        logger.error(f"Error reading manifest for {item.name}: {e}")
+                if item.name not in seen_names:
+                    manifest_path = item / "PROJECT_MANIFEST.yaml"
+                    if manifest_path.exists():
+                        try:
+                            manifest = read_yaml_file(manifest_path)
+                            projects.append({
+                                "name": item.name,
+                                "phase": manifest.get('current_phase', 'unknown'),
+                                "aspects": {},
+                                "created_at": "",
+                            })
+                        except Exception as e:
+                            logger.error(f"Error reading manifest for {item.name}: {e}")
 
     return {
         "projects": projects,
