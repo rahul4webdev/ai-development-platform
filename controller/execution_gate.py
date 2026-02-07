@@ -324,6 +324,9 @@ class GateDecision:
     deep_e2e_checked: bool = False
     deep_e2e_passed: bool = False
     deep_e2e_block_reason: Optional[str] = None
+    # Phase 24.5: Micro-remediation fields
+    micro_remediation_blocks: bool = False
+    micro_remediation_status: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -345,6 +348,9 @@ class GateDecision:
             "deep_e2e_checked": self.deep_e2e_checked,
             "deep_e2e_passed": self.deep_e2e_passed,
             "deep_e2e_block_reason": self.deep_e2e_block_reason,
+            # Phase 24.5: Micro-remediation
+            "micro_remediation_blocks": self.micro_remediation_blocks,
+            "micro_remediation_status": self.micro_remediation_status,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -649,6 +655,64 @@ class ExecutionGate:
         # before actually deploying. evaluate() stays synchronous.
         deep_e2e_required = (requested_action == ExecutionAction.DEPLOY_TEST)
 
+        # Step 14: Phase 24.5 - Micro-remediation unresolved check
+        # If there is an active unresolved micro-remediation for this project
+        # and the action is DEPLOY_TEST, block execution.
+        micro_remediation_blocks = False
+        micro_remediation_status = None
+        if requested_action == ExecutionAction.DEPLOY_TEST:
+            try:
+                from controller.micro_remediator import MicroRemediator, RemediationStatus
+                remediation_state = MicroRemediator.get_remediation_state(request.project_name)
+                status = remediation_state.get("status")
+                if status and status not in (RemediationStatus.RESOLVED.value, ):
+                    if status in (
+                        RemediationStatus.PENDING.value,
+                        RemediationStatus.FIXING.value,
+                        RemediationStatus.RETESTING.value,
+                    ):
+                        micro_remediation_blocks = True
+                        micro_remediation_status = status
+                        decision = GateDecision(
+                            allowed=False,
+                            request=request,
+                            allowed_actions=allowed_actions,
+                            denied_reason=f"Unresolved micro-remediation (status={status})",
+                            hard_fail=False,
+                            workspace_validated=True,
+                            governance_docs_present=True,
+                            drift_checked=drift_checked,
+                            drift_evaluation=drift_evaluation,
+                            deep_e2e_required=deep_e2e_required,
+                            micro_remediation_blocks=True,
+                            micro_remediation_status=status,
+                        )
+                        self._log_audit(request, decision, "DENIED")
+                        return decision
+                    elif status == RemediationStatus.FAILED.value:
+                        micro_remediation_blocks = True
+                        micro_remediation_status = status
+                        decision = GateDecision(
+                            allowed=False,
+                            request=request,
+                            allowed_actions=allowed_actions,
+                            denied_reason="Micro-remediation failed: MANUAL_INTERVENTION required",
+                            hard_fail=True,
+                            workspace_validated=True,
+                            governance_docs_present=True,
+                            drift_checked=drift_checked,
+                            drift_evaluation=drift_evaluation,
+                            deep_e2e_required=deep_e2e_required,
+                            micro_remediation_blocks=True,
+                            micro_remediation_status=status,
+                        )
+                        self._log_audit(request, decision, "DENIED")
+                        return decision
+            except ImportError:
+                pass  # micro_remediator not available, fail-open
+            except Exception as e:
+                logger.warning(f"Micro-remediation check failed (proceeding): {e}")
+
         # All checks passed - execution is ALLOWED
         decision = GateDecision(
             allowed=True,
@@ -661,6 +725,8 @@ class ExecutionGate:
             drift_requires_confirmation=False,
             drift_evaluation=drift_evaluation,
             deep_e2e_required=deep_e2e_required,
+            micro_remediation_blocks=micro_remediation_blocks,
+            micro_remediation_status=micro_remediation_status,
         )
         self._log_audit(request, decision, "ALLOWED")
 

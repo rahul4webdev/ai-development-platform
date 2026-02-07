@@ -592,6 +592,9 @@ class ProjectRegistry:
                 "deep_e2e_level": project.metadata.get("deep_e2e_level"),
                 "deep_e2e_passed": project.metadata.get("deep_e2e_passed"),
                 "deep_e2e_last_run": project.metadata.get("deep_e2e_last_run"),
+                # Phase 24.5: Micro-remediation fields (from metadata)
+                "last_micro_failure": project.metadata.get("micro_remediation", {}).get("last_failure"),
+                "remediation_status": project.metadata.get("micro_remediation", {}).get("status"),
             })
 
         # Sort by updated_at descending

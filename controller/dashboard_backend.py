@@ -91,6 +91,9 @@ class ProjectOverview:
     deep_e2e_level: Optional[str] = None
     deep_e2e_passed: Optional[bool] = None
     deep_e2e_last_run: Optional[str] = None
+    # Phase 24.5: Micro-remediation
+    last_micro_failure: Optional[Dict[str, Any]] = None
+    remediation_status: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -114,6 +117,9 @@ class ProjectOverview:
             "deep_e2e_level": self.deep_e2e_level,
             "deep_e2e_passed": self.deep_e2e_passed,
             "deep_e2e_last_run": self.deep_e2e_last_run,
+            # Phase 24.5: Micro-remediation
+            "last_micro_failure": self.last_micro_failure,
+            "remediation_status": self.remediation_status,
         }
         # Include identity_info if attached
         if hasattr(self, "_identity_info"):
@@ -535,6 +541,9 @@ class DashboardBackend:
                 deep_e2e_level=proj.get("deep_e2e_level"),
                 deep_e2e_passed=proj.get("deep_e2e_passed"),
                 deep_e2e_last_run=proj.get("deep_e2e_last_run"),
+                # Phase 24.5: Micro-remediation
+                last_micro_failure=proj.get("metadata", {}).get("micro_remediation", {}).get("last_failure") if isinstance(proj.get("metadata"), dict) else None,
+                remediation_status=proj.get("metadata", {}).get("micro_remediation", {}).get("status") if isinstance(proj.get("metadata"), dict) else None,
             )
 
             result.append(overview)

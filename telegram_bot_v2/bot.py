@@ -7319,6 +7319,12 @@ async def job_monitor_task(application):
                             asyncio.create_task(
                                 handle_rescue_job_completion(application, project, job)
                             )
+                        elif task_type == "micro_remediation":
+                            # Phase 24.5: Handle micro-remediation completion
+                            message += "\n\n🔧 *Micro-remediation completed, retesting...*"
+                            asyncio.create_task(
+                                handle_micro_remediation_completion(application, project, job)
+                            )
                     else:
                         # Phase already triggered, just show completion
                         if task_type == "deployment":
@@ -7333,6 +7339,12 @@ async def job_monitor_task(application):
                             message += "\n\n🔧 *Rescue completed, validating...*"
                             asyncio.create_task(
                                 handle_rescue_job_completion(application, project, job)
+                            )
+                        elif task_type == "micro_remediation":
+                            # Phase 24.5: Re-run remediation completion
+                            message += "\n\n🔧 *Micro-remediation completed, retesting...*"
+                            asyncio.create_task(
+                                handle_micro_remediation_completion(application, project, job)
                             )
 
                     await send_notification(application, message)
@@ -7705,6 +7717,105 @@ async def trigger_deployment_validation(
                     except Exception:
                         pass
 
+                    # Phase 24.5: Auto-create micro-remediation for failed checks
+                    try:
+                        from controller.micro_remediator import (
+                            get_micro_remediator,
+                            MicroRemediator,
+                            RemediationStatus,
+                        )
+
+                        remediator = get_micro_remediator()
+                        can_remediate, rem_reason = remediator.can_attempt_remediation(project_name)
+
+                        if can_remediate:
+                            failed_checks = [c for c in deep_result.checks if not c.passed]
+                            if failed_checks:
+                                first_failure = failed_checks[0]
+                                failure_dict = {
+                                    "check_type": first_failure.check_type,
+                                    "passed": first_failure.passed,
+                                    "message": first_failure.message,
+                                    "details": first_failure.details,
+                                    "response_time_ms": first_failure.response_time_ms,
+                                    "checked_at": first_failure.checked_at,
+                                    "_project_name": project_name,
+                                }
+
+                                task = remediator.create_remediation_task(failure_dict)
+                                fix_prompt = remediator.generate_claude_fix_prompt(task)
+
+                                # Update remediation state to FIXING
+                                rem_state = MicroRemediator.get_remediation_state(project_name)
+                                attempt_count = rem_state.get("attempts", 0) + 1
+                                MicroRemediator.update_remediation_state(project_name, {
+                                    "status": RemediationStatus.FIXING.value,
+                                    "attempts": attempt_count,
+                                    "last_failure": {
+                                        "pattern": task.failure_pattern,
+                                        "owner": task.owner,
+                                        "evidence": task.evidence[:200],
+                                        "check_type": task.check_type,
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                    },
+                                    "last_job_id": None,
+                                    "started_at": datetime.utcnow().isoformat(),
+                                })
+
+                                # Create Claude job for micro-remediation
+                                rem_result = await controller.create_claude_job(
+                                    project_name=project_name,
+                                    task_description=fix_prompt,
+                                    task_type="micro_remediation",
+                                    copy_from_job=deployment_job.get("job_id", "unknown"),
+                                    copy_artifacts=[
+                                        "PLANNING_OUTPUT.yaml", "CURRENT_STATE.md",
+                                        "DEPLOYMENT.md", project_name
+                                    ],
+                                )
+
+                                rem_job_id = rem_result.get("job_id")
+                                if rem_job_id:
+                                    rem_state_updated = MicroRemediator.get_remediation_state(project_name)
+                                    rem_state_updated["last_job_id"] = rem_job_id
+                                    MicroRemediator.update_remediation_state(project_name, rem_state_updated)
+
+                                    await send_notification(
+                                        application,
+                                        f"🔧 *Micro\\-Remediation Started*\n\n"
+                                        f"*Project:* {escape_markdown(project_name)}\n"
+                                        f"*Pattern:* {task.failure_pattern}\n"
+                                        f"*Owner:* {task.owner}\n"
+                                        f"*Evidence:* {escape_markdown(task.evidence[:100])}\n"
+                                        f"*Fix:* {escape_markdown(task.suggested_fix[:100])}\n"
+                                        f"*Attempt:* {attempt_count}/3\n"
+                                        f"*Job:* `{rem_job_id[:12]}...`"
+                                    )
+                                    logger.info(
+                                        f"Micro-remediation job {rem_job_id} created for "
+                                        f"{project_name} ({task.failure_pattern}/{task.owner})"
+                                    )
+                        else:
+                            # Max attempts or already failed — escalate
+                            MicroRemediator.update_remediation_state(project_name, {
+                                **MicroRemediator.get_remediation_state(project_name),
+                                "status": RemediationStatus.FAILED.value,
+                                "failed_at": datetime.utcnow().isoformat(),
+                            })
+                            await send_notification(
+                                application,
+                                f"🚨 *Micro\\-Remediation Exhausted*\n\n"
+                                f"*Project:* {escape_markdown(project_name)}\n"
+                                f"*Reason:* {escape_markdown(rem_reason)}\n\n"
+                                f"Auto\\-remediation attempts exhausted\\. "
+                                f"MANUAL INTERVENTION required\\.\n"
+                                f"Use `/rescue {project_name}` to attempt full rescue\\."
+                            )
+                    except ImportError:
+                        logger.debug("Micro-remediator not available")
+                    except Exception as rem_err:
+                        logger.warning(f"Micro-remediation error (non-blocking): {rem_err}")
+
                     return False
 
             except ImportError:
@@ -7933,6 +8044,59 @@ async def handle_rescue_job_completion(
         logger.warning("Rescue system not available")
     except Exception as e:
         logger.error(f"Failed to handle rescue completion: {e}")
+
+
+async def handle_micro_remediation_completion(
+    application,
+    project_name: str,
+    remediation_job: Dict,
+) -> None:
+    """
+    Handle completion of a micro-remediation job.
+
+    Phase 24.5: After Claude fixes, update state to RETESTING
+    and re-trigger deployment validation.
+    """
+    try:
+        from controller.micro_remediator import MicroRemediator, RemediationStatus
+
+        rem_state = MicroRemediator.get_remediation_state(project_name)
+        rem_state["status"] = RemediationStatus.RETESTING.value
+        MicroRemediator.update_remediation_state(project_name, rem_state)
+
+        await send_notification(
+            application,
+            f"🔄 *Micro\\-Remediation Complete \\- Retesting*\n\n"
+            f"*Project:* {escape_markdown(project_name)}\n"
+            f"Claude fix applied\\. Re\\-running E2E validation\\.\\.\\."
+        )
+
+        # Re-trigger validation
+        urls = await get_project_deployment_urls(project_name)
+        if urls:
+            passed = await trigger_deployment_validation(
+                application, project_name, remediation_job, urls
+            )
+            if passed:
+                rem_state = MicroRemediator.get_remediation_state(project_name)
+                rem_state["status"] = RemediationStatus.RESOLVED.value
+                rem_state["resolved_at"] = datetime.utcnow().isoformat()
+                MicroRemediator.update_remediation_state(project_name, rem_state)
+
+                await send_notification(
+                    application,
+                    f"✅ *Micro\\-Remediation Resolved\\!*\n\n"
+                    f"*Project:* {escape_markdown(project_name)}\n"
+                    f"Auto\\-fix was successful\\. All E2E checks pass\\."
+                )
+            # If not passed, trigger_deployment_validation will create
+            # another remediation attempt or escalate if max reached
+        else:
+            logger.warning(f"No URLs found for {project_name} during remediation retest")
+    except ImportError:
+        logger.debug("Micro-remediator not available")
+    except Exception as e:
+        logger.error(f"Micro-remediation completion handling failed: {e}")
 
 
 # -----------------------------------------------------------------------------

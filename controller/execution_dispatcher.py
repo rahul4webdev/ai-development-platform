@@ -112,6 +112,9 @@ class BlockReason(str, Enum):
     GATE_HARD_FAIL = "gate_hard_fail"
     DRIFT_BLOCKS_EXECUTION = "drift_blocks_execution"
 
+    # Micro-remediation failures
+    UNRESOLVED_MICRO_FAILURE = "unresolved_micro_failure"
+
     # Chain validation failures
     CHAIN_VALIDATION_FAILED = "chain_validation_failed"
     INPUT_HASH_MISMATCH = "input_hash_mismatch"
