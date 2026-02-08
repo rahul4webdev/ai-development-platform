@@ -38,6 +38,7 @@ class FailurePattern(str, Enum):
     CORS = "cors"
     HTTP_404 = "http_404"
     HTTP_500 = "http_500"
+    HTTP_503 = "http_503"
     AUTH_FAILURE = "auth_failure"
     DATA_MISSING = "data_missing"
     CONSOLE_ERROR = "console_error"
@@ -82,6 +83,8 @@ _SUGGESTED_FIXES: Dict[Tuple[str, str], str] = {
         "Verify API routes are registered and server is running",
     (FailurePattern.HTTP_500.value, FailureOwner.BACKEND.value):
         "Check backend logs for unhandled exceptions; verify database connection and environment variables",
+    (FailurePattern.HTTP_503.value, FailureOwner.INFRA.value):
+        "Service not running: verify uvicorn process on expected port; run start_server.sh; check api.log for startup errors",
     (FailurePattern.AUTH_FAILURE.value, FailureOwner.BACKEND.value):
         "Verify auth endpoints are working: check /register, /login, /me routes and database user table",
     (FailurePattern.DATA_MISSING.value, FailureOwner.BACKEND.value):
@@ -121,6 +124,14 @@ _PATTERN_STRATEGIES: Dict[str, str] = {
         "2. Verify database connection and migrations are current\n"
         "3. Check environment variables are set correctly\n"
         "4. Look for unhandled exceptions in request handlers"
+    ),
+    FailurePattern.HTTP_503.value: (
+        "1. SSH to the server and check if uvicorn is running: ps aux | grep uvicorn\n"
+        "2. If not running, check scripts/start_server.sh exists and is executable\n"
+        "3. Run: cd /home/<domain>/public_html && bash scripts/start_server.sh\n"
+        "4. Check api.log for startup errors (import failures, missing deps, DB connection)\n"
+        "5. Verify the reverse proxy (LiteSpeed/nginx) points to the correct port\n"
+        "6. Ensure the deploy workflow verifies the process is running after start"
     ),
     FailurePattern.AUTH_FAILURE.value: (
         "1. Verify /api/auth/register creates users in the database\n"
@@ -193,11 +204,15 @@ class MicroRemediator:
         if check_type == "auth_login_e2e":
             return FailurePattern.AUTH_FAILURE, FailureOwner.BACKEND
 
+        # 503 — service not running (check before other API patterns)
+        if "503" in message:
+            return FailurePattern.HTTP_503, FailureOwner.INFRA
+
         # API schema
         if check_type == "api_schema_valid":
             if "404" in message:
                 return FailurePattern.HTTP_404, FailureOwner.BACKEND
-            if "500" in message or "503" in message:
+            if "500" in message:
                 return FailurePattern.HTTP_500, FailureOwner.BACKEND
             return FailurePattern.BUILD_FAILURE, FailureOwner.BACKEND
 
