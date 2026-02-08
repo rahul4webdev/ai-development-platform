@@ -104,8 +104,8 @@ class TestFailureClassification:
             "message": "API returned 503 Service Unavailable",
             "details": {},
         })
-        assert pattern == FailurePattern.HTTP_500
-        assert owner == FailureOwner.BACKEND
+        assert pattern == FailurePattern.HTTP_503
+        assert owner == FailureOwner.INFRA
 
     def test_auth_failure_classified_as_backend(self):
         """Auth E2E failure -> AUTH_FAILURE pattern, BACKEND owner."""

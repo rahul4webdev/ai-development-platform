@@ -114,10 +114,56 @@ def escape_markdown(text: str) -> str:
     """
     if not text:
         return text
+    text = str(text)
     # Escape backslash first, then other special chars
     for char in ['\\', '_', '*', '`', '[', ']', '(', ')']:
         text = text.replace(char, f'\\{char}')
     return text
+
+
+def escape_markdown_v2(text: str) -> str:
+    """
+    Escape special characters for Telegram MarkdownV2 parsing.
+
+    All reserved characters: _ * [ ] ( ) ~ ` > # + - = | { } . ! \\
+    """
+    if not text:
+        return text
+    text = str(text)
+    reserved = r"_*[]()~`>#+-=|{}.!\\"
+    return "".join(f"\\{ch}" if ch in reserved else ch for ch in text)
+
+
+async def safe_reply_text(message, text: str, **kwargs):
+    """Send reply_text with Markdown, falling back to plain text on parse error."""
+    try:
+        return await message.reply_text(text, **kwargs)
+    except Exception as e:
+        if "parse entities" in str(e).lower() or "can't parse" in str(e).lower():
+            logger.warning(f"Markdown parse error in reply_text, falling back to plain text: {e}")
+            kwargs.pop("parse_mode", None)
+            plain = text.replace("*", "").replace("`", "").replace("_", "").replace("\\", "")
+            try:
+                return await message.reply_text(plain, **kwargs)
+            except Exception as e2:
+                logger.error(f"Failed even with plain text fallback: {e2}")
+        raise
+
+
+async def safe_edit_text(query, text: str, **kwargs):
+    """Edit message with Markdown, falling back to plain text on parse error."""
+    try:
+        return await query.edit_message_text(text, **kwargs)
+    except Exception as e:
+        if "parse entities" in str(e).lower() or "can't parse" in str(e).lower():
+            logger.warning(f"Markdown parse error in edit_message_text, falling back to plain text: {e}")
+            kwargs.pop("parse_mode", None)
+            plain = text.replace("*", "").replace("`", "").replace("_", "").replace("\\", "")
+            try:
+                return await query.edit_message_text(plain, **kwargs)
+            except Exception as e2:
+                logger.error(f"Failed even with plain text fallback: {e2}")
+        raise
 
 
 def extract_api_error(result: dict) -> str:
@@ -3312,7 +3358,7 @@ async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         ftype = mr.get("failure_type", "")
                         emoji = "✅" if healthy else "❌"
                         status_str = "Healthy" if healthy else ftype
-                        message += f"  {emoji} {mod} ({url}) — {status_str}\n"
+                        message += f"  {emoji} {escape_markdown(mod)} ({escape_markdown(url)}) — {escape_markdown(status_str)}\n"
                     message += "\n"
 
                 # Attempt history
@@ -3327,14 +3373,14 @@ async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             scope = f" [{', '.join(failing)}]"
                     message += (
                         f"  {emoji} #{attempt.attempt_number}: "
-                        f"{attempt.failure_type}{scope} — {attempt.outcome or 'Pending'}\n"
+                        f"{escape_markdown(attempt.failure_type)}{escape_markdown(scope)} — {escape_markdown(attempt.outcome or 'Pending')}\n"
                     )
 
                 if not state.resolved and attempts >= 3:
                     message += f"\n⚠️ *Max attempts reached.* Use `/rescue {project_name} reset` to retry."
 
                 keyboard = get_rescue_status_keyboard(project_name)
-                await update.message.reply_text(message, parse_mode="Markdown", reply_markup=keyboard)
+                await safe_reply_text(update.message, message, parse_mode="Markdown", reply_markup=keyboard)
 
         elif action == "reset":
             # Reset rescue state
@@ -3372,7 +3418,7 @@ async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"*🔧 Rescue: {escape_markdown(project_name)}*\n\n"
                 f"Select modules to validate & rescue:\n\n"
                 f"Available modules:\n"
-                + "".join(f"• {mod}: {urls[mod]}\n" for mod in available_modules),
+                + "".join(f"• {escape_markdown(mod)}: {escape_markdown(urls[mod])}\n" for mod in available_modules),
                 parse_mode="Markdown",
                 reply_markup=keyboard
             )
@@ -3429,16 +3475,16 @@ async def rescue_history_command(update: Update, context: ContextTypes.DEFAULT_T
             message += (
                 f"{emoji} *Attempt {attempt.attempt_number}*\n"
                 f"   Job: `{attempt.job_id[:12]}...`\n"
-                f"   Failure: {attempt.failure_type}\n"
+                f"   Failure: {escape_markdown(attempt.failure_type)}\n"
                 f"   Created: {attempt.created_at[:16]}\n"
             )
             if attempt.completed_at:
                 message += f"   Completed: {attempt.completed_at[:16]}\n"
             if attempt.outcome:
-                message += f"   Outcome: {attempt.outcome}\n"
+                message += f"   Outcome: {escape_markdown(attempt.outcome)}\n"
             message += "\n"
 
-        await update.message.reply_text(message, parse_mode="Markdown")
+        await safe_reply_text(update.message, message, parse_mode="Markdown")
 
     except ImportError:
         await update.message.reply_text(
@@ -4217,7 +4263,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                                 ftype = mr.get("failure_type", "")
                                 em = "✅" if healthy else "❌"
                                 s = "Healthy" if healthy else ftype
-                                message += f"  {em} {mod} ({url}) — {s}\n"
+                                message += f"  {em} {escape_markdown(mod)} ({escape_markdown(url)}) — {escape_markdown(s)}\n"
                             message += "\n"
 
                         message += "*Attempt History:*\n"
@@ -4230,14 +4276,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                                     scope = f" [{', '.join(failing)}]"
                             message += (
                                 f"  {em} #{attempt.attempt_number}: "
-                                f"{attempt.failure_type}{scope} — {attempt.outcome or 'Pending'}\n"
+                                f"{escape_markdown(attempt.failure_type)}{escape_markdown(scope)} — {escape_markdown(attempt.outcome or 'Pending')}\n"
                             )
 
                         if not state.resolved and attempts >= 3:
                             message += f"\n⚠️ *Max attempts reached.* Use `/rescue {project_name} reset` to retry."
 
                         keyboard = get_rescue_status_keyboard(project_name)
-                        await query.edit_message_text(message, parse_mode="Markdown", reply_markup=keyboard)
+                        await safe_edit_text(query, message, parse_mode="Markdown", reply_markup=keyboard)
 
                 elif sub_action == "reset":
                     rescue_engine.clear_rescue_state(project_name)
@@ -4267,14 +4313,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         await query.edit_message_text(
                             f"*🔧 Rescue: {escape_markdown(project_name)}*\n\n"
                             f"Select modules to validate & rescue:\n\n"
-                            + "".join(f"• {mod}: {urls[mod]}\n" for mod in available_modules),
+                            + "".join(f"• {escape_markdown(mod)}: {escape_markdown(urls[mod])}\n" for mod in available_modules),
                             parse_mode="Markdown",
                             reply_markup=keyboard
                         )
 
             except Exception as e:
                 logger.error(f"Error in rescue project callback: {e}")
-                await query.edit_message_text(f"❌ Error: {str(e)}")
+                await query.edit_message_text(f"❌ Error: {escape_markdown(str(e))}")
 
         # Phase 22 Improvement: Module toggle callback
         elif action == CallbackAction.RESCUE_MODULE.value:
@@ -7230,11 +7276,12 @@ async def send_notification(application, message: str, parse_mode: str = "Markdo
         except Exception as e:
             error_str = str(e)
             # If markdown parsing fails, retry without parse mode
-            if "parse entities" in error_str.lower() or "parse_mode" in error_str.lower():
+            if "parse entities" in error_str.lower() or "can't parse" in error_str.lower():
+                logger.warning(f"Markdown parse error for chat {chat_id}, falling back to plain text: {error_str[:200]}")
                 try:
-                    # Strip markdown and send as plain text
-                    plain_message = message.replace("*", "").replace("`", "").replace("_", "")
-                    kwargs = {"chat_id": chat_id, "text": plain_message}
+                    # Strip all markdown formatting and send as plain text
+                    plain_message = message.replace("*", "").replace("`", "").replace("_", "").replace("\\", "")
+                    kwargs = {"chat_id": chat_id, "text": plain_message, "parse_mode": None}
                     if reply_markup is not None:
                         kwargs["reply_markup"] = reply_markup
                     await application.bot.send_message(**kwargs)
@@ -7782,10 +7829,10 @@ async def trigger_deployment_validation(
 
                                     await send_notification(
                                         application,
-                                        f"🔧 *Micro\\-Remediation Started*\n\n"
+                                        f"🔧 *Micro-Remediation Started*\n\n"
                                         f"*Project:* {escape_markdown(project_name)}\n"
-                                        f"*Pattern:* {task.failure_pattern}\n"
-                                        f"*Owner:* {task.owner}\n"
+                                        f"*Pattern:* {escape_markdown(task.failure_pattern)}\n"
+                                        f"*Owner:* {escape_markdown(task.owner)}\n"
                                         f"*Evidence:* {escape_markdown(task.evidence[:100])}\n"
                                         f"*Fix:* {escape_markdown(task.suggested_fix[:100])}\n"
                                         f"*Attempt:* {attempt_count}/3\n"
@@ -7804,12 +7851,12 @@ async def trigger_deployment_validation(
                             })
                             await send_notification(
                                 application,
-                                f"🚨 *Micro\\-Remediation Exhausted*\n\n"
+                                f"🚨 *Micro-Remediation Exhausted*\n\n"
                                 f"*Project:* {escape_markdown(project_name)}\n"
                                 f"*Reason:* {escape_markdown(rem_reason)}\n\n"
-                                f"Auto\\-remediation attempts exhausted\\. "
-                                f"MANUAL INTERVENTION required\\.\n"
-                                f"Use `/rescue {project_name}` to attempt full rescue\\."
+                                f"Auto-remediation attempts exhausted. "
+                                f"MANUAL INTERVENTION required.\n"
+                                f"Use `/rescue {project_name}` to attempt full rescue."
                             )
                     except ImportError:
                         logger.debug("Micro-remediator not available")
@@ -7862,7 +7909,7 @@ async def trigger_deployment_validation(
                                         f"📋 *Test Gap Confirmed*\n\n"
                                         f"*Project:* {escape_markdown(project_name)}\n"
                                         f"*Gap:* {escape_markdown(item)}\n"
-                                        f"A Claude task was created to add the missing test\\.\n"
+                                        f"A Claude task was created to add the missing test.\n"
                                         f"*Job:* `{gov_job_id[:12]}...`"
                                     )
 
@@ -7930,7 +7977,7 @@ async def trigger_deployment_validation(
             for mod, status in per_module_status.items():
                 emoji = "✅" if status == "healthy" else "❌"
                 url = normalized_urls.get(mod, "")
-                message += f"  {emoji} {mod}: {url}\n"
+                message += f"  {emoji} {escape_markdown(mod)}: {escape_markdown(url)}\n"
 
             # Add deep E2E result to message
             if deep_e2e_passed and deep_e2e_summary:
@@ -7990,7 +8037,7 @@ async def trigger_deployment_validation(
             )
             for mod, status in per_module_status.items():
                 emoji = "✅" if status == "healthy" else "❌"
-                message += f"  {emoji} {mod}: {status}\n"
+                message += f"  {emoji} {escape_markdown(mod)}: {escape_markdown(status)}\n"
 
             message += (
                 f"\n⚠️ Automatic rescue attempts exhausted.\n"
@@ -8055,12 +8102,12 @@ async def trigger_deployment_validation(
             )
             for mod, status in per_module_status.items():
                 emoji = "✅" if status == "healthy" else "❌"
-                message += f"  {emoji} {mod}: {status}\n"
+                message += f"  {emoji} {escape_markdown(mod)}: {escape_markdown(status)}\n"
 
             message += (
                 f"\n🔧 *Rescue Job Created*\n"
                 f"*Job ID:* `{rescue_job_id[:12]}...`\n"
-                f"*Scope:* {', '.join(failing_modules) if failing_modules else 'all'}\n"
+                f"*Scope:* {escape_markdown(', '.join(failing_modules)) if failing_modules else 'all'}\n"
                 f"*Status:* {escape_markdown(attempt_info)}\n\n"
                 f"Claude is attempting to fix the deployment issues."
             )
@@ -8150,9 +8197,9 @@ async def handle_micro_remediation_completion(
 
         await send_notification(
             application,
-            f"🔄 *Micro\\-Remediation Complete \\- Retesting*\n\n"
+            f"🔄 *Micro-Remediation Complete - Retesting*\n\n"
             f"*Project:* {escape_markdown(project_name)}\n"
-            f"Claude fix applied\\. Re\\-running E2E validation\\.\\.\\."
+            f"Claude fix applied. Re-running E2E validation..."
         )
 
         # Re-trigger validation
@@ -8169,9 +8216,9 @@ async def handle_micro_remediation_completion(
 
                 await send_notification(
                     application,
-                    f"✅ *Micro\\-Remediation Resolved\\!*\n\n"
+                    f"✅ *Micro-Remediation Resolved!*\n\n"
                     f"*Project:* {escape_markdown(project_name)}\n"
-                    f"Auto\\-fix was successful\\. All E2E checks pass\\."
+                    f"Auto-fix was successful. All E2E checks pass."
                 )
             # If not passed, trigger_deployment_validation will create
             # another remediation attempt or escalate if max reached
@@ -8251,8 +8298,8 @@ async def ci_monitor_task(application):
                                     message = (
                                         f"🔴 *CI Failed*\n\n"
                                         f"*Project:* {escape_markdown(project_name)}\n"
-                                        f"*Repo:* {repo}\n"
-                                        f"*Workflow:* {workflow_name}\n"
+                                        f"*Repo:* {escape_markdown(repo)}\n"
+                                        f"*Workflow:* {escape_markdown(workflow_name)}\n"
                                         f"*Attempt:* {attempts + 1}/{CI_MAX_AUTO_FIX_ATTEMPTS}\n\n"
                                         f"🔧 *Creating auto-fix job...*"
                                     )
@@ -8295,7 +8342,7 @@ Common fixes:
                                     message = (
                                         f"⚠️ *CI Auto-Fix Limit Reached*\n\n"
                                         f"*Project:* {escape_markdown(project_name)}\n"
-                                        f"*Repo:* {repo}\n\n"
+                                        f"*Repo:* {escape_markdown(repo)}\n\n"
                                         f"Max auto-fix attempts ({CI_MAX_AUTO_FIX_ATTEMPTS}) reached.\n"
                                         f"Manual intervention required."
                                     )
@@ -8309,7 +8356,7 @@ Common fixes:
                                     message = (
                                         f"✅ *CI Passed After Fix*\n\n"
                                         f"*Project:* {escape_markdown(project_name)}\n"
-                                        f"*Repo:* {repo}\n"
+                                        f"*Repo:* {escape_markdown(repo)}\n"
                                         f"*Workflow:* {workflow_name}\n\n"
                                         f"Auto-fix successful! Triggering deployment..."
                                     )
@@ -8357,7 +8404,7 @@ async def trigger_github_deployment(
             message = (
                 f"🚀 *Deployment Triggered*\n\n"
                 f"*Project:* {escape_markdown(project_name)}\n"
-                f"*Repo:* {repo}\n\n"
+                f"*Repo:* {escape_markdown(repo)}\n\n"
                 f"Deployment to testing environment started."
             )
         else:
