@@ -94,6 +94,8 @@ class ProjectOverview:
     # Phase 24.5: Micro-remediation
     last_micro_failure: Optional[Dict[str, Any]] = None
     remediation_status: Optional[str] = None
+    # Phase 25: Test governance
+    confidence_score: Optional[float] = None  # 0.0-1.0
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -120,6 +122,8 @@ class ProjectOverview:
             # Phase 24.5: Micro-remediation
             "last_micro_failure": self.last_micro_failure,
             "remediation_status": self.remediation_status,
+            # Phase 25: Test governance
+            "confidence_score": self.confidence_score,
         }
         # Include identity_info if attached
         if hasattr(self, "_identity_info"):
@@ -544,6 +548,8 @@ class DashboardBackend:
                 # Phase 24.5: Micro-remediation
                 last_micro_failure=proj.get("metadata", {}).get("micro_remediation", {}).get("last_failure") if isinstance(proj.get("metadata"), dict) else None,
                 remediation_status=proj.get("metadata", {}).get("micro_remediation", {}).get("status") if isinstance(proj.get("metadata"), dict) else None,
+                # Phase 25: Test governance
+                confidence_score=proj.get("metadata", {}).get("test_governance", {}).get("confidence_score") if isinstance(proj.get("metadata"), dict) else None,
             )
 
             result.append(overview)

@@ -595,6 +595,8 @@ class ProjectRegistry:
                 # Phase 24.5: Micro-remediation fields (from metadata)
                 "last_micro_failure": project.metadata.get("micro_remediation", {}).get("last_failure"),
                 "remediation_status": project.metadata.get("micro_remediation", {}).get("status"),
+                # Phase 25: Test governance
+                "confidence_score": project.metadata.get("test_governance", {}).get("confidence_score"),
             })
 
         # Sort by updated_at descending

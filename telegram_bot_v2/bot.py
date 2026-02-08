@@ -7816,6 +7816,71 @@ async def trigger_deployment_validation(
                     except Exception as rem_err:
                         logger.warning(f"Micro-remediation error (non-blocking): {rem_err}")
 
+                    # Phase 25: Test governance — compute confidence + detect gaps
+                    try:
+                        from controller.test_governor import get_test_governor
+                        governor = get_test_governor()
+
+                        # Get previous score for comparison
+                        prev_score = None
+                        try:
+                            from controller.project_registry import get_registry
+                            reg = get_registry()
+                            proj_obj = reg.get_project(project_name)
+                            if proj_obj:
+                                prev_score = proj_obj.metadata.get("test_governance", {}).get("confidence_score")
+                        except Exception:
+                            pass
+
+                        score = governor.compute_confidence_score(project_name)
+
+                        # Update registry with new score
+                        try:
+                            if proj_obj:
+                                proj_obj.metadata.setdefault("test_governance", {})["confidence_score"] = score
+                                reg.update_project(project_name, {"metadata": proj_obj.metadata})
+                        except Exception:
+                            pass
+
+                        # Check for missing tests and record gaps
+                        missing = governor.verify_test_completeness(project_name)
+                        if missing:
+                            from controller.test_gap_store import get_test_gap_store
+                            gap_store = get_test_gap_store()
+                            for item in missing:
+                                confirmed = gap_store.record_gap(project_name, item)
+                                if confirmed:
+                                    task_prompt = governor.create_test_task(project_name, [item])
+                                    gov_result = await controller.create_claude_job(
+                                        project_name=project_name,
+                                        task_description=task_prompt,
+                                        task_type="test_governance",
+                                    )
+                                    gov_job_id = gov_result.get("job_id", "unknown")
+                                    await send_notification(
+                                        application,
+                                        f"📋 *Test Gap Confirmed*\n\n"
+                                        f"*Project:* {escape_markdown(project_name)}\n"
+                                        f"*Gap:* {escape_markdown(item)}\n"
+                                        f"A Claude task was created to add the missing test\\.\n"
+                                        f"*Job:* `{gov_job_id[:12]}...`"
+                                    )
+
+                        # Notify on confidence drop
+                        if prev_score is not None and score < prev_score:
+                            drop_reasons = ", ".join(missing[:3]) if missing else "unknown"
+                            await send_notification(
+                                application,
+                                f"📉 *Confidence Score Dropped*\n\n"
+                                f"*Project:* {escape_markdown(project_name)}\n"
+                                f"*Score:* {prev_score:.1f} → {score:.1f}\n"
+                                f"*Reason:* {escape_markdown(drop_reasons)}"
+                            )
+                    except ImportError:
+                        pass
+                    except Exception as gov_err:
+                        logger.warning(f"Test governance error (non-blocking): {gov_err}")
+
                     return False
 
             except ImportError:
@@ -7836,6 +7901,25 @@ async def trigger_deployment_validation(
                 persister.persist([signal])
             except Exception as sig_err:
                 logger.debug(f"Signal emission failed (non-blocking): {sig_err}")
+
+            # Phase 25: Test governance — update confidence score on success
+            try:
+                from controller.test_governor import get_test_governor
+                governor = get_test_governor()
+                score = governor.compute_confidence_score(project_name)
+                try:
+                    from controller.project_registry import get_registry
+                    reg = get_registry()
+                    proj_obj = reg.get_project(project_name)
+                    if proj_obj:
+                        proj_obj.metadata.setdefault("test_governance", {})["confidence_score"] = score
+                        reg.update_project(project_name, {"metadata": proj_obj.metadata})
+                except Exception:
+                    pass
+            except ImportError:
+                pass
+            except Exception as gov_err:
+                logger.warning(f"Test governance score update error (non-blocking): {gov_err}")
 
             # Build per-module success message
             message = (

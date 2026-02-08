@@ -327,6 +327,9 @@ class GateDecision:
     # Phase 24.5: Micro-remediation fields
     micro_remediation_blocks: bool = False
     micro_remediation_status: Optional[str] = None
+    # Phase 25: Test governance
+    test_governance_blocks: bool = False
+    test_governance_violations: Optional[List[str]] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -351,6 +354,9 @@ class GateDecision:
             # Phase 24.5: Micro-remediation
             "micro_remediation_blocks": self.micro_remediation_blocks,
             "micro_remediation_status": self.micro_remediation_status,
+            # Phase 25: Test governance
+            "test_governance_blocks": self.test_governance_blocks,
+            "test_governance_violations": self.test_governance_violations,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -713,6 +719,41 @@ class ExecutionGate:
             except Exception as e:
                 logger.warning(f"Micro-remediation check failed (proceeding): {e}")
 
+        # Step 15: Phase 25 - Test governance completeness check
+        # If required tests are missing for this project, block DEPLOY_TEST.
+        test_governance_blocks = False
+        test_governance_violations = None
+        if requested_action == ExecutionAction.DEPLOY_TEST:
+            try:
+                from controller.test_governor import get_test_governor
+                governor = get_test_governor()
+                missing = governor.verify_test_completeness(request.project_name)
+                if missing:
+                    test_governance_blocks = True
+                    test_governance_violations = missing
+                    decision = GateDecision(
+                        allowed=False,
+                        request=request,
+                        allowed_actions=allowed_actions,
+                        denied_reason=f"INSUFFICIENT_TESTING: {', '.join(missing)}",
+                        hard_fail=False,
+                        workspace_validated=True,
+                        governance_docs_present=True,
+                        drift_checked=drift_checked,
+                        drift_evaluation=drift_evaluation,
+                        deep_e2e_required=deep_e2e_required,
+                        micro_remediation_blocks=micro_remediation_blocks,
+                        micro_remediation_status=micro_remediation_status,
+                        test_governance_blocks=True,
+                        test_governance_violations=missing,
+                    )
+                    self._log_audit(request, decision, "DENIED")
+                    return decision
+            except ImportError:
+                pass  # test_governor not available, fail-open
+            except Exception as e:
+                logger.warning(f"Test governance check failed (proceeding): {e}")
+
         # All checks passed - execution is ALLOWED
         decision = GateDecision(
             allowed=True,
@@ -727,6 +768,8 @@ class ExecutionGate:
             deep_e2e_required=deep_e2e_required,
             micro_remediation_blocks=micro_remediation_blocks,
             micro_remediation_status=micro_remediation_status,
+            test_governance_blocks=test_governance_blocks,
+            test_governance_violations=test_governance_violations,
         )
         self._log_audit(request, decision, "ALLOWED")
 
