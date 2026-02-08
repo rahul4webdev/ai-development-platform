@@ -12,6 +12,9 @@ python-telegram-bot>=20.7
 # HTTP Client (for controller communication)
 httpx>=0.26.0
 
+# Async HTTP Client (for deep E2E verifier and deployment validator)
+aiohttp>=3.9.0
+
 # YAML Processing
 pyyaml>=6.0.1
 
