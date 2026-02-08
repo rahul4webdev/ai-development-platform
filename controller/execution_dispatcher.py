@@ -118,6 +118,9 @@ class BlockReason(str, Enum):
     # Test governance failures
     INSUFFICIENT_TESTING = "insufficient_testing"
 
+    # Meta-remediation failures
+    UNRESOLVED_META_FAILURE = "unresolved_meta_failure"
+
     # Chain validation failures
     CHAIN_VALIDATION_FAILED = "chain_validation_failed"
     INPUT_HASH_MISMATCH = "input_hash_mismatch"

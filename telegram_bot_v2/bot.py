@@ -7372,6 +7372,12 @@ async def job_monitor_task(application):
                             asyncio.create_task(
                                 handle_micro_remediation_completion(application, project, job)
                             )
+                        elif task_type == "meta_remediation":
+                            # Phase 26: Handle meta-remediation completion
+                            message += "\n\n🔁 *Meta-remediation completed, re-validating...*"
+                            asyncio.create_task(
+                                handle_meta_remediation_job_completion(application, project, job)
+                            )
                     else:
                         # Phase already triggered, just show completion
                         if task_type == "deployment":
@@ -7393,6 +7399,12 @@ async def job_monitor_task(application):
                             asyncio.create_task(
                                 handle_micro_remediation_completion(application, project, job)
                             )
+                        elif task_type == "meta_remediation":
+                            # Phase 26: Re-run meta-remediation completion
+                            message += "\n\n🔁 *Meta-remediation completed, re-validating...*"
+                            asyncio.create_task(
+                                handle_meta_remediation_job_completion(application, project, job)
+                            )
 
                     await send_notification(application, message)
 
@@ -7410,6 +7422,58 @@ async def job_monitor_task(application):
                         f"Use /dashboard to view details."
                     )
                     await send_notification(application, message)
+
+                    # Phase 26: If a rescue job failed, trigger meta-remediation
+                    if task_type == "rescue":
+                        try:
+                            from controller.meta_remediator import get_meta_remediator, MetaRemediationStatus
+                            meta_rem = get_meta_remediator()
+                            can_attempt, reason = meta_rem.can_attempt_meta_remediation(project)
+                            if can_attempt:
+                                exit_code_int = int(exit_code) if str(exit_code).isdigit() else 1
+                                task = meta_rem.create_meta_remediation_task(
+                                    project=project,
+                                    rescue_job_id=job_id,
+                                    rescue_exit_code=exit_code_int,
+                                    original_failure=job.get("original_failure", "unknown"),
+                                )
+                                # Update status to FIXING
+                                meta_state = meta_rem.get_meta_state(project)
+                                meta_state["meta_remediation_status"] = MetaRemediationStatus.FIXING.value
+                                meta_rem.update_meta_state(project, meta_state)
+
+                                # Generate prompt and create job
+                                context = {
+                                    "failed_endpoints": job.get("failed_endpoints", []),
+                                    "validator_results": job.get("validator_results", {}),
+                                }
+                                prompt = meta_rem.generate_meta_fix_prompt(task, context)
+                                result = await controller.create_claude_job(
+                                    project_name=project,
+                                    task_description=prompt,
+                                    task_type="meta_remediation",
+                                )
+                                meta_job_id = result.get("job_id", "unknown")
+                                await send_notification(
+                                    application,
+                                    f"🔁 *Rescue failed — starting automatic meta-remediation*\n\n"
+                                    f"*Project:* {escape_markdown(project)}\n"
+                                    f"*Attempt:* {task.attempt}/{3}\n"
+                                    f"*Job:* `{meta_job_id[:12]}...`\n\n"
+                                    f"Analyzing why the rescue job failed and attempting a second-order fix."
+                                )
+                            else:
+                                await send_notification(
+                                    application,
+                                    f"🚨 *Meta-remediation unavailable*\n\n"
+                                    f"*Project:* {escape_markdown(project)}\n"
+                                    f"*Reason:* {escape_markdown(reason)}\n\n"
+                                    f"Manual intervention required."
+                                )
+                        except ImportError:
+                            logger.debug("Meta-remediator not available")
+                        except Exception as meta_err:
+                            logger.warning(f"Meta-remediation trigger error (non-blocking): {meta_err}")
 
                 elif state == "running" and last_notified_state is None:
                     # First time seeing this job - notify it started
@@ -8228,6 +8292,71 @@ async def handle_micro_remediation_completion(
         logger.debug("Micro-remediator not available")
     except Exception as e:
         logger.error(f"Micro-remediation completion handling failed: {e}")
+
+
+async def handle_meta_remediation_job_completion(
+    application,
+    project_name: str,
+    meta_job: Dict,
+) -> None:
+    """
+    Handle completion of a meta-remediation job.
+
+    Phase 26: After Claude's second-order fix, update state to RETESTING
+    and re-trigger deployment validation. If validation passes, mark RESOLVED.
+    If it fails and retries remain, create another meta-remediation task.
+    After 3 failures, mark FAILED and require manual intervention.
+    """
+    try:
+        from controller.meta_remediator import get_meta_remediator, MetaRemediationStatus
+
+        meta_rem = get_meta_remediator()
+        meta_state = meta_rem.get_meta_state(project_name)
+        meta_state["meta_remediation_status"] = MetaRemediationStatus.RETESTING.value
+        meta_rem.update_meta_state(project_name, meta_state)
+
+        await send_notification(
+            application,
+            f"🔁 *Meta-Remediation Complete - Retesting*\n\n"
+            f"*Project:* {escape_markdown(project_name)}\n"
+            f"Second-order fix applied. Re-running deployment validation..."
+        )
+
+        # Re-trigger validation
+        urls = await get_project_deployment_urls(project_name)
+        if urls:
+            passed = await trigger_deployment_validation(
+                application, project_name, meta_job, urls
+            )
+
+            new_status = meta_rem.handle_meta_remediation_completion(
+                project_name, meta_job.get("job_id", ""), passed
+            )
+
+            if new_status == MetaRemediationStatus.RESOLVED.value:
+                await send_notification(
+                    application,
+                    f"✅ *Meta-Remediation Resolved!*\n\n"
+                    f"*Project:* {escape_markdown(project_name)}\n"
+                    f"Second-order rescue fix was successful. All checks pass."
+                )
+            elif new_status == MetaRemediationStatus.FAILED.value:
+                await send_notification(
+                    application,
+                    f"🚨 *Meta-Remediation Exhausted*\n\n"
+                    f"*Project:* {escape_markdown(project_name)}\n\n"
+                    f"All meta-remediation attempts exhausted. "
+                    f"MANUAL INTERVENTION required.\n"
+                    f"Use `/rescue {project_name} reset` to start fresh."
+                )
+            # RETESTING status means trigger_deployment_validation will
+            # handle creating the next rescue/meta-remediation attempt
+        else:
+            logger.warning(f"No URLs found for {project_name} during meta-remediation retest")
+    except ImportError:
+        logger.debug("Meta-remediator not available")
+    except Exception as e:
+        logger.error(f"Meta-remediation completion handling failed: {e}")
 
 
 # -----------------------------------------------------------------------------

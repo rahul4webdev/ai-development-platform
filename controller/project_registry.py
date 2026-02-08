@@ -597,6 +597,9 @@ class ProjectRegistry:
                 "remediation_status": project.metadata.get("micro_remediation", {}).get("status"),
                 # Phase 25: Test governance
                 "confidence_score": project.metadata.get("test_governance", {}).get("confidence_score"),
+                # Phase 26: Meta-remediation
+                "last_meta_failure": project.metadata.get("meta_remediation", {}).get("last_meta_failure"),
+                "meta_remediation_status": project.metadata.get("meta_remediation", {}).get("meta_remediation_status"),
             })
 
         # Sort by updated_at descending

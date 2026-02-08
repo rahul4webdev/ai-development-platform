@@ -330,6 +330,9 @@ class GateDecision:
     # Phase 25: Test governance
     test_governance_blocks: bool = False
     test_governance_violations: Optional[List[str]] = None
+    # Phase 26: Meta-remediation
+    meta_remediation_blocks: bool = False
+    meta_remediation_status: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -357,6 +360,9 @@ class GateDecision:
             # Phase 25: Test governance
             "test_governance_blocks": self.test_governance_blocks,
             "test_governance_violations": self.test_governance_violations,
+            # Phase 26: Meta-remediation
+            "meta_remediation_blocks": self.meta_remediation_blocks,
+            "meta_remediation_status": self.meta_remediation_status,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -754,6 +760,47 @@ class ExecutionGate:
             except Exception as e:
                 logger.warning(f"Test governance check failed (proceeding): {e}")
 
+        # Step 16: Phase 26 - Meta-remediation unresolved check
+        # If a meta-remediation is in progress (PENDING/FIXING/RETESTING),
+        # block DEPLOY_TEST to prevent deploying while rescue-the-rescue is running.
+        meta_rem_blocks = False
+        meta_rem_status = None
+        if requested_action == ExecutionAction.DEPLOY_TEST:
+            try:
+                from controller.meta_remediator import MetaRemediator, MetaRemediationStatus
+                meta_state = MetaRemediator.get_meta_state(request.project_name)
+                meta_rem_status = meta_state.get("meta_remediation_status")
+                if meta_rem_status in (
+                    MetaRemediationStatus.PENDING.value,
+                    MetaRemediationStatus.FIXING.value,
+                    MetaRemediationStatus.RETESTING.value,
+                ):
+                    meta_rem_blocks = True
+                    decision = GateDecision(
+                        allowed=False,
+                        request=request,
+                        allowed_actions=allowed_actions,
+                        denied_reason=f"UNRESOLVED_META_FAILURE: meta-remediation status={meta_rem_status}",
+                        hard_fail=False,
+                        workspace_validated=True,
+                        governance_docs_present=True,
+                        drift_checked=drift_checked,
+                        drift_evaluation=drift_evaluation,
+                        deep_e2e_required=deep_e2e_required,
+                        micro_remediation_blocks=micro_remediation_blocks,
+                        micro_remediation_status=micro_remediation_status,
+                        test_governance_blocks=test_governance_blocks,
+                        test_governance_violations=test_governance_violations,
+                        meta_remediation_blocks=True,
+                        meta_remediation_status=meta_rem_status,
+                    )
+                    self._log_audit(request, decision, "DENIED")
+                    return decision
+            except ImportError:
+                pass  # meta_remediator not available, fail-open
+            except Exception as e:
+                logger.warning(f"Meta-remediation check failed (proceeding): {e}")
+
         # All checks passed - execution is ALLOWED
         decision = GateDecision(
             allowed=True,
@@ -770,6 +817,8 @@ class ExecutionGate:
             micro_remediation_status=micro_remediation_status,
             test_governance_blocks=test_governance_blocks,
             test_governance_violations=test_governance_violations,
+            meta_remediation_blocks=meta_rem_blocks,
+            meta_remediation_status=meta_rem_status,
         )
         self._log_audit(request, decision, "ALLOWED")
 

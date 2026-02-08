@@ -31,6 +31,7 @@ class FailureOwner(str, Enum):
     BACKEND = "backend"
     INFRA = "infra"
     DEPLOYMENT = "deployment"
+    PLATFORM = "platform"
     UNKNOWN = "unknown"
 
 
@@ -43,6 +44,7 @@ class FailurePattern(str, Enum):
     DATA_MISSING = "data_missing"
     CONSOLE_ERROR = "console_error"
     BUILD_FAILURE = "build_failure"
+    RESCUE_JOB_FAILED = "rescue_job_failed"
     UNKNOWN = "unknown"
 
 
