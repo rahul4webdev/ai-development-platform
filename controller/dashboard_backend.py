@@ -349,6 +349,8 @@ class DashboardSummary:
     incidents: Optional[IncidentHealth] = None
     # Phase 17C: Recommendations (ADVISORY ONLY)
     recommendations: Optional[RecommendationHealth] = None
+    # Phase 26.5: Runtime Integrity
+    runtime_integrity_status: Optional[str] = None  # "HEALTHY" | "DEGRADED" | "FATAL"
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -387,6 +389,11 @@ class DashboardSummary:
         # Phase 17C: Include recommendations if available (ADVISORY ONLY)
         if self.recommendations:
             result["recommendations"] = self.recommendations.to_dict()
+        # Phase 26.5: Include runtime integrity status
+        if self.runtime_integrity_status:
+            result["runtime_integrity"] = {
+                "status": self.runtime_integrity_status,
+            }
         return result
 
 
@@ -496,7 +503,26 @@ class DashboardBackend:
             observability=observability,
             incidents=incidents,
             recommendations=recommendations,
+            runtime_integrity_status=self._get_runtime_integrity_status(),
         )
+
+    # -------------------------------------------------------------------------
+    # Phase 26.5: Runtime Integrity
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _get_runtime_integrity_status() -> Optional[str]:
+        """Get the last runtime integrity status (non-blocking, fail-open)."""
+        try:
+            from controller.runtime_integrity import get_last_integrity_report
+            report = get_last_integrity_report()
+            if report:
+                return report.status
+            return None
+        except ImportError:
+            return None
+        except Exception:
+            return None
 
     # -------------------------------------------------------------------------
     # Project Overview
@@ -1381,6 +1407,11 @@ class DashboardBackend:
         recommendations: Optional[RecommendationHealth] = None,
     ) -> SystemHealth:
         """Determine overall system health based on metrics."""
+        # Phase 26.5: FATAL runtime integrity → CRITICAL
+        ri_status = self._get_runtime_integrity_status()
+        if ri_status == "FATAL":
+            return SystemHealth.CRITICAL
+
         # Critical: Essential services down
         if not services.get("controller", True):
             return SystemHealth.CRITICAL

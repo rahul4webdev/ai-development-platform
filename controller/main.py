@@ -6242,6 +6242,42 @@ except ImportError as e:
     LEARNING_AVAILABLE = False
 
 
+# Phase 26.5: Runtime Integrity Layer
+try:
+    from .runtime_integrity import (
+        run_integrity_check,
+        get_last_integrity_report,
+        get_runtime_integrity_checker,
+    )
+    RUNTIME_INTEGRITY_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Runtime integrity not available: {e}")
+    RUNTIME_INTEGRITY_AVAILABLE = False
+
+
+@app.get("/runtime/integrity")
+async def runtime_integrity_endpoint():
+    """
+    Phase 26.5: Platform Runtime Integrity check.
+
+    Returns the current runtime integrity status (HEALTHY/DEGRADED/FATAL).
+    This is a READ-ONLY endpoint. Runs a fresh check each time.
+    """
+    if not RUNTIME_INTEGRITY_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Runtime integrity module not available")
+
+    try:
+        report = run_integrity_check()
+        return {
+            "phase": "26.5",
+            "endpoint": "runtime/integrity",
+            "report": report.to_dict(),
+        }
+    except Exception as e:
+        logger.error(f"Runtime integrity check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Integrity check failed: {str(e)}")
+
+
 @app.get("/learning/patterns")
 async def learning_patterns_endpoint(
     limit: int = 100,
@@ -6535,6 +6571,25 @@ async def startup_event():
     # Phase 19: Log learning engine availability
     if LEARNING_AVAILABLE:
         logger.info("Phase 19: Learning engine initialized (INSIGHT ONLY, NO BEHAVIORAL COUPLING)")
+
+    # Phase 26.5: Runtime integrity check on startup (non-blocking)
+    if RUNTIME_INTEGRITY_AVAILABLE:
+        try:
+            report = run_integrity_check()
+            logger.info(f"Phase 26.5: Runtime integrity check: {report.status}")
+            if report.status == "FATAL":
+                logger.error(
+                    f"FATAL runtime integrity: venv_ok={report.venv_ok}, "
+                    f"missing_pkg={list(report.missing_packages)}, "
+                    f"playwright_ok={report.playwright_ok}, "
+                    f"fs_ok={report.fs_permissions_ok}"
+                )
+            elif report.status == "DEGRADED":
+                logger.warning(
+                    f"DEGRADED runtime: missing_binaries={list(report.missing_binaries)}"
+                )
+        except Exception as e:
+            logger.error(f"Phase 26.5: Runtime integrity check failed on startup: {e}")
 
     logger.info("Task Controller ready (Phase 19: Learning, Memory & System Intelligence)")
     logger.info("SAFETY: Production deployment requires DUAL APPROVAL (different users).")

@@ -3496,6 +3496,59 @@ async def rescue_history_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # -----------------------------------------------------------------------------
+# Phase 26.5: Runtime Integrity Check Command
+# -----------------------------------------------------------------------------
+@role_required(UserRole.OWNER, UserRole.ADMIN)
+async def runtime_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /runtime_check - Run platform runtime integrity check.
+
+    Phase 26.5: Shows HEALTHY/DEGRADED/FATAL status with details.
+    """
+    try:
+        from controller.runtime_integrity import run_integrity_check
+
+        await update.message.reply_text("Running runtime integrity check...")
+
+        report = run_integrity_check()
+
+        # Status emoji
+        status_emoji = {
+            "HEALTHY": "✅",
+            "DEGRADED": "⚠️",
+            "FATAL": "🔴",
+        }.get(report.status, "❓")
+
+        message = (
+            f"*{status_emoji} Runtime Integrity: {report.status}*\n\n"
+            f"*Python:* `{escape_markdown(report.python_executable)}`\n"
+            f"*Venv OK:* {'✅' if report.venv_ok else '❌'}\n"
+            f"*Playwright OK:* {'✅' if report.playwright_ok else '❌'}\n"
+            f"*FS Permissions:* {'✅' if report.fs_permissions_ok else '❌'}\n"
+        )
+
+        if report.missing_packages:
+            pkg_list = ", ".join(report.missing_packages)
+            message += f"\n*Missing Packages:* {escape_markdown(pkg_list)}\n"
+
+        if report.missing_binaries:
+            bin_list = ", ".join(report.missing_binaries)
+            message += f"\n*Missing Binaries:* {escape_markdown(bin_list)}\n"
+
+        message += f"\n_Checked at: {report.timestamp[:19]}_"
+
+        await safe_reply_text(update.message, message, parse_mode="Markdown")
+
+    except ImportError:
+        await update.message.reply_text(
+            "❌ Runtime integrity module not available."
+        )
+    except Exception as e:
+        logger.error(f"Error in runtime_check_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
 # Message Handler (Natural Language Input)
 # -----------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8659,6 +8712,9 @@ def main():
     # Phase 22: Rescue & Recovery System commands
     application.add_handler(CommandHandler("rescue", rescue_command))
     application.add_handler(CommandHandler("rescue_history", rescue_history_command))
+
+    # Phase 26.5: Runtime Integrity commands
+    application.add_handler(CommandHandler("runtime_check", runtime_check_command))
 
     # Callback query handler for inline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))
