@@ -145,20 +145,26 @@ class RuntimeIntegrityChecker:
                 logger.warning(f"Venv python not found: {venv_python}")
                 return False
 
-            # Check current executable is inside the venv
-            current = Path(sys.executable).resolve()
-            expected_prefix = EXPECTED_VENV.resolve()
-            if str(current).startswith(str(expected_prefix)):
+            # Check 1a: sys.prefix matches the expected venv
+            # This is the canonical way to detect venvs — works even when
+            # the venv python is a symlink to the system interpreter.
+            expected_prefix = str(EXPECTED_VENV.resolve())
+            if str(Path(sys.prefix).resolve()) == expected_prefix:
                 return True
 
-            # Fallback: accept if VIRTUAL_ENV env var matches
+            # Check 1b: sys.executable path (without resolve, to avoid symlink)
+            exec_path = Path(sys.executable)
+            if str(exec_path).startswith(str(EXPECTED_VENV)):
+                return True
+
+            # Check 1c: VIRTUAL_ENV env var matches
             virtual_env = os.environ.get("VIRTUAL_ENV", "")
-            if virtual_env and Path(virtual_env).resolve() == expected_prefix:
+            if virtual_env and str(Path(virtual_env).resolve()) == expected_prefix:
                 return True
 
             logger.warning(
                 f"Running outside expected venv: "
-                f"current={current}, expected_prefix={expected_prefix}"
+                f"prefix={sys.prefix}, expected={expected_prefix}"
             )
             return False
         except Exception as e:
