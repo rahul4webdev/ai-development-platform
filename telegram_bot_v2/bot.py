@@ -3590,6 +3590,88 @@ async def runtime_check_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # -----------------------------------------------------------------------------
+# Phase 26.7: Runtime Self-Heal Command
+# -----------------------------------------------------------------------------
+@role_required(UserRole.OWNER, UserRole.ADMIN)
+async def runtime_heal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /runtime_heal - Attempt automatic self-healing of platform runtime.
+
+    Phase 26.7: Runs deterministic healing actions for FATAL/DEGRADED issues.
+    Shows step-by-step progress and final status.
+    """
+    try:
+        from controller.runtime_self_healer import get_runtime_self_healer, HealStatus
+        from controller.runtime_integrity import run_integrity_check
+
+        await update.message.reply_text("Running runtime self-healing...")
+
+        # Show current status first
+        report = run_integrity_check()
+        if report.status == "HEALTHY":
+            await safe_reply_text(
+                update.message,
+                "*✅ Platform is HEALTHY*\n\nNo healing needed\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+
+        healer = get_runtime_self_healer()
+
+        # Classify issues
+        actions = healer.classify_issues(report)
+        action_list = ", ".join(a.value for a in actions)
+        await update.message.reply_text(
+            f"Status: {report.status}\n"
+            f"Actions to attempt: {action_list}\n"
+            f"Starting healing..."
+        )
+
+        # Run healing
+        results = healer.attempt_heal()
+
+        if not results:
+            await update.message.reply_text("No healing actions were executed.")
+            return
+
+        # Build progress report
+        lines = ["*Self-Healing Results:*\n"]
+        for r in results:
+            status_icon = "✅" if r.status == HealStatus.SUCCESS.value else "❌"
+            lines.append(
+                f"{status_icon} Task `{r.task_id[:8]}`: "
+                f"{r.before_integrity} → {r.after_integrity}"
+            )
+            if r.error:
+                err_short = r.error[:100].replace("`", "'")
+                lines.append(f"   Error: {err_short}")
+
+        # Final status
+        final_report = run_integrity_check()
+        final_icon = {"HEALTHY": "✅", "DEGRADED": "⚠️", "FATAL": "🔴"}.get(
+            final_report.status, "❓"
+        )
+        lines.append(f"\n*Final Status:* {final_icon} {final_report.status}")
+
+        if final_report.status != "HEALTHY":
+            lines.append("\n_Escalated to meta\\-remediation\\._")
+
+        await safe_reply_text(
+            update.message,
+            "\n".join(lines),
+            parse_mode="Markdown",
+        )
+
+    except ImportError:
+        await update.message.reply_text(
+            "❌ Runtime self-healer module not available."
+        )
+    except Exception as e:
+        logger.error(f"Error in runtime_heal_command: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
+
+
+# -----------------------------------------------------------------------------
 # Message Handler (Natural Language Input)
 # -----------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8756,6 +8838,9 @@ def main():
 
     # Phase 26.5: Runtime Integrity commands
     application.add_handler(CommandHandler("runtime_check", runtime_check_command))
+
+    # Phase 26.7: Runtime Self-Healing commands
+    application.add_handler(CommandHandler("runtime_heal", runtime_heal_command))
 
     # Callback query handler for inline buttons
     application.add_handler(CallbackQueryHandler(handle_callback))

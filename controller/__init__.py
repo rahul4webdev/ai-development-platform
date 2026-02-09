@@ -180,7 +180,7 @@ Phase 19: Learning, Memory & System Intelligence (NON-AUTONOMOUS)
   * This is MEMORY, not INTELLIGENCE - provides insight, not action
 """
 
-__version__ = "0.26.6"
+__version__ = "0.26.7"
 
 # Single source of truth for phase metadata
 CURRENT_PHASE = "19"

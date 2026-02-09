@@ -77,8 +77,12 @@ class RuntimeIntegrityEnforcer:
             RuntimeIntegrityPolicy.BLOCK_CRITICAL,
             RuntimeIntegrityPolicy.STRICT,
         ):
-            blocked = True
-            reason = f"RUNTIME_INTEGRITY_FATAL: status={status}, policy={policy.value}"
+            # Phase 26.7: Auto-trigger self-healing before blocking
+            status = RuntimeIntegrityEnforcer._attempt_self_heal(status)
+
+            if status == "FATAL":
+                blocked = True
+                reason = f"RUNTIME_INTEGRITY_FATAL: status={status}, policy={policy.value}"
         elif status == "DEGRADED":
             logger.warning(
                 f"Runtime integrity DEGRADED for action {action.value} "
@@ -143,6 +147,39 @@ class RuntimeIntegrityEnforcer:
         except Exception as e:
             logger.error(f"Integrity check failed — treating as FATAL: {e}")
             return "FATAL"
+
+    @staticmethod
+    def _attempt_self_heal(current_status: str) -> str:
+        """
+        Phase 26.7: Attempt self-healing when FATAL, return updated status.
+
+        If healing succeeds, returns the new (hopefully HEALTHY) status.
+        If healing fails or is unavailable, returns the original status.
+        """
+        try:
+            from controller.runtime_self_healer import get_runtime_self_healer
+            healer = get_runtime_self_healer()
+            results = healer.attempt_heal()
+
+            if results:
+                last = results[-1]
+                if last.after_integrity in ("HEALTHY", "DEGRADED"):
+                    logger.info(
+                        f"Self-healing restored platform to {last.after_integrity} "
+                        f"(was {current_status})"
+                    )
+                    return last.after_integrity
+                else:
+                    logger.warning(
+                        f"Self-healing attempted but platform still {last.after_integrity}"
+                    )
+            return current_status
+        except ImportError:
+            logger.debug("runtime_self_healer not available — skipping self-heal")
+            return current_status
+        except Exception as e:
+            logger.warning(f"Self-healing failed (proceeding with block): {e}")
+            return current_status
 
     @staticmethod
     def _write_audit(
