@@ -217,6 +217,25 @@ async def create_project_from_natural_language(
     logger.info(f"  Requirements count: {len(request.requirements) if request.requirements else 0}")
     logger.info("=" * 60)
 
+    # Phase 26.6: Runtime integrity enforcement — block project creation when FATAL
+    try:
+        from controller.runtime_enforcement import RuntimeIntegrityEnforcer, ActionType, RuntimeIntegrityBlockedError
+        RuntimeIntegrityEnforcer.check_or_block(ActionType.CREATE_PROJECT)
+    except RuntimeIntegrityBlockedError as e:
+        logger.error(f"Project creation blocked by runtime integrity: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "runtime_integrity_blocked",
+                "status": e.status,
+                "required_action": "/runtime_check",
+            }
+        )
+    except ImportError:
+        pass  # Module not available, fail-open
+    except Exception as e:
+        logger.warning(f"Runtime integrity check failed during project creation (proceeding): {e}")
+
     try:
         # STEP 1: Validate requirements (CHD layer)
         logger.info("[STEP 1/7] CHD Validation - Starting...")

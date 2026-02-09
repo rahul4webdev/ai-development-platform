@@ -389,10 +389,23 @@ class DashboardSummary:
         # Phase 17C: Include recommendations if available (ADVISORY ONLY)
         if self.recommendations:
             result["recommendations"] = self.recommendations.to_dict()
-        # Phase 26.5: Include runtime integrity status
-        if self.runtime_integrity_status:
+        # Phase 26.5/26.6: Include runtime integrity with policy and automation state
+        ri_status = self.runtime_integrity_status
+        if ri_status:
+            try:
+                from controller.runtime_integrity_policy import get_policy, RuntimeIntegrityPolicy
+                policy = get_policy()
+                automation_paused = (
+                    ri_status == "FATAL"
+                    and policy in (RuntimeIntegrityPolicy.BLOCK_CRITICAL, RuntimeIntegrityPolicy.STRICT)
+                )
+            except ImportError:
+                policy = None
+                automation_paused = False
             result["runtime_integrity"] = {
-                "status": self.runtime_integrity_status,
+                "status": ri_status,
+                "policy": policy.value if policy else None,
+                "automation_paused": automation_paused,
             }
         return result
 

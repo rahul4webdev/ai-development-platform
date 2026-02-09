@@ -184,13 +184,17 @@ class TestRemediationTaskCreation:
         from controller.micro_remediator import MicroRemediator, MicroRemediationTask
 
         remediator = MicroRemediator()
-        task = remediator.create_remediation_task({
-            "check_type": "cors_browser_origin",
-            "passed": False,
-            "message": "No Access-Control-Allow-Origin header",
-            "details": {},
-            "_project_name": "test-project",
-        })
+        with patch(
+            "controller.runtime_enforcement.RuntimeIntegrityEnforcer._get_status_fail_closed",
+            return_value="HEALTHY",
+        ):
+            task = remediator.create_remediation_task({
+                "check_type": "cors_browser_origin",
+                "passed": False,
+                "message": "No Access-Control-Allow-Origin header",
+                "details": {},
+                "_project_name": "test-project",
+            })
         assert isinstance(task, MicroRemediationTask)
         assert task.failure_pattern == "cors"
         assert task.owner == "backend"
@@ -203,13 +207,17 @@ class TestRemediationTaskCreation:
         from controller.micro_remediator import MicroRemediator
 
         remediator = MicroRemediator()
-        task = remediator.create_remediation_task({
-            "check_type": "cors_browser_origin",
-            "passed": False,
-            "message": "CORS error",
-            "details": {},
-            "_project_name": "test-project",
-        })
+        with patch(
+            "controller.runtime_enforcement.RuntimeIntegrityEnforcer._get_status_fail_closed",
+            return_value="HEALTHY",
+        ):
+            task = remediator.create_remediation_task({
+                "check_type": "cors_browser_origin",
+                "passed": False,
+                "message": "CORS error",
+                "details": {},
+                "_project_name": "test-project",
+            })
         with pytest.raises(AttributeError):
             task.owner = "frontend"
 
@@ -218,13 +226,17 @@ class TestRemediationTaskCreation:
         from controller.micro_remediator import MicroRemediator
 
         remediator = MicroRemediator()
-        task = remediator.create_remediation_task({
-            "check_type": "auth_login_e2e",
-            "passed": False,
-            "message": "Login failed",
-            "details": {},
-            "_project_name": "my-project",
-        })
+        with patch(
+            "controller.runtime_enforcement.RuntimeIntegrityEnforcer._get_status_fail_closed",
+            return_value="HEALTHY",
+        ):
+            task = remediator.create_remediation_task({
+                "check_type": "auth_login_e2e",
+                "passed": False,
+                "message": "Login failed",
+                "details": {},
+                "_project_name": "my-project",
+            })
         assert task.suggested_fix
         assert len(task.suggested_fix) > 10
         assert task.failure_pattern == "auth_failure"
@@ -242,13 +254,17 @@ class TestClaudeFixPrompt:
         from controller.micro_remediator import MicroRemediator
 
         remediator = MicroRemediator()
-        task = remediator.create_remediation_task({
-            "check_type": "cors_browser_origin",
-            "passed": False,
-            "message": "No CORS header",
-            "details": {},
-            "_project_name": "health-tracker",
-        })
+        with patch(
+            "controller.runtime_enforcement.RuntimeIntegrityEnforcer._get_status_fail_closed",
+            return_value="HEALTHY",
+        ):
+            task = remediator.create_remediation_task({
+                "check_type": "cors_browser_origin",
+                "passed": False,
+                "message": "No CORS header",
+                "details": {},
+                "_project_name": "health-tracker",
+            })
         prompt = remediator.generate_claude_fix_prompt(task)
         assert "health-tracker" in prompt
 
@@ -257,13 +273,17 @@ class TestClaudeFixPrompt:
         from controller.micro_remediator import MicroRemediator
 
         remediator = MicroRemediator()
-        task = remediator.create_remediation_task({
-            "check_type": "api_business_data",
-            "passed": False,
-            "message": "Missing fields",
-            "details": {},
-            "_project_name": "my-app",
-        })
+        with patch(
+            "controller.runtime_enforcement.RuntimeIntegrityEnforcer._get_status_fail_closed",
+            return_value="HEALTHY",
+        ):
+            task = remediator.create_remediation_task({
+                "check_type": "api_business_data",
+                "passed": False,
+                "message": "Missing fields",
+                "details": {},
+                "_project_name": "my-app",
+            })
         prompt = remediator.generate_claude_fix_prompt(task)
         assert "data_missing" in prompt
 
@@ -272,13 +292,17 @@ class TestClaudeFixPrompt:
         from controller.micro_remediator import MicroRemediator
 
         remediator = MicroRemediator()
-        task = remediator.create_remediation_task({
-            "check_type": "frontend_pages",
-            "passed": False,
-            "message": "/login returned 404",
-            "details": {},
-            "_project_name": "my-app",
-        })
+        with patch(
+            "controller.runtime_enforcement.RuntimeIntegrityEnforcer._get_status_fail_closed",
+            return_value="HEALTHY",
+        ):
+            task = remediator.create_remediation_task({
+                "check_type": "frontend_pages",
+                "passed": False,
+                "message": "/login returned 404",
+                "details": {},
+                "_project_name": "my-app",
+            })
         prompt = remediator.generate_claude_fix_prompt(task)
         assert "Only fix the frontend component" in prompt
         assert "MICRO-REMEDIATION JOB" in prompt
@@ -381,6 +405,9 @@ class TestExecutionGateStep14:
         with patch(
             "controller.micro_remediator.MicroRemediator.get_remediation_state",
             return_value={"status": "resolved", "attempts": 1},
+        ), patch(
+            "controller.runtime_enforcement.RuntimeIntegrityEnforcer._get_status_fail_closed",
+            return_value="HEALTHY",
         ):
             gate = ExecutionGate()
             request = ExecutionRequest(
@@ -416,6 +443,9 @@ class TestExecutionGateStep14:
         with patch(
             "controller.micro_remediator.MicroRemediator.get_remediation_state",
             return_value={},
+        ), patch(
+            "controller.runtime_enforcement.RuntimeIntegrityEnforcer._get_status_fail_closed",
+            return_value="HEALTHY",
         ):
             gate = ExecutionGate()
             request = ExecutionRequest(

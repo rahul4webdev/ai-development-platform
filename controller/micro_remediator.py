@@ -242,6 +242,18 @@ class MicroRemediator:
         Returns:
             Frozen MicroRemediationTask
         """
+        # Phase 26.6: Runtime integrity enforcement — block task creation when FATAL
+        try:
+            from controller.runtime_enforcement import RuntimeIntegrityEnforcer, ActionType, RuntimeIntegrityBlockedError
+            RuntimeIntegrityEnforcer.check_or_block(ActionType.MICRO_REMEDIATE)
+        except RuntimeIntegrityBlockedError:
+            logger.error("Micro-remediation task creation blocked: runtime integrity FATAL")
+            return None
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"Runtime integrity check failed in micro-remediator (proceeding): {e}")
+
         pattern, owner = self.classify_failure(test_failure)
         suggested_fix = _SUGGESTED_FIXES.get(
             (pattern.value, owner.value), _DEFAULT_SUGGESTED_FIX

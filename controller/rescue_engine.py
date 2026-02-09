@@ -342,6 +342,17 @@ class RescueJobEngine:
         Returns:
             (success, message, job_id)
         """
+        # Phase 26.6: Runtime integrity enforcement — block rescue when FATAL
+        try:
+            from controller.runtime_enforcement import RuntimeIntegrityEnforcer, ActionType, RuntimeIntegrityBlockedError
+            RuntimeIntegrityEnforcer.check_or_block(ActionType.RESCUE)
+        except RuntimeIntegrityBlockedError:
+            return False, "Rescue paused: Platform runtime integrity is FATAL", None
+        except ImportError:
+            pass  # Module not available, fail-open
+        except Exception as e:
+            logger.warning(f"Runtime integrity check failed during rescue (proceeding): {e}")
+
         # Check if we can attempt rescue
         can_rescue, reason = self.can_attempt_rescue(project_name, source_deployment_job_id)
 

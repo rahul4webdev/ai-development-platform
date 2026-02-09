@@ -6278,6 +6278,66 @@ async def runtime_integrity_endpoint():
         raise HTTPException(status_code=500, detail=f"Integrity check failed: {str(e)}")
 
 
+# Phase 26.6: Runtime Integrity Policy
+try:
+    from .runtime_integrity_policy import (
+        get_policy as get_ri_policy,
+        set_policy as set_ri_policy,
+        RuntimeIntegrityPolicy,
+    )
+    RUNTIME_INTEGRITY_POLICY_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Runtime integrity policy not available: {e}")
+    RUNTIME_INTEGRITY_POLICY_AVAILABLE = False
+
+
+@app.get("/runtime/integrity/policy")
+async def runtime_integrity_policy_get():
+    """
+    Phase 26.6: Get current runtime integrity enforcement policy.
+
+    Returns the current policy (warn_only/block_critical/strict).
+    """
+    if not RUNTIME_INTEGRITY_POLICY_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Runtime integrity policy not available")
+
+    policy = get_ri_policy()
+    return {
+        "phase": "26.6",
+        "endpoint": "runtime/integrity/policy",
+        "policy": policy.value,
+    }
+
+
+@app.post("/runtime/integrity/policy")
+async def runtime_integrity_policy_set(policy_value: str):
+    """
+    Phase 26.6: Set runtime integrity enforcement policy.
+
+    Owner/admin only. Accepts: warn_only, block_critical, strict.
+    """
+    if not RUNTIME_INTEGRITY_POLICY_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Runtime integrity policy not available")
+
+    try:
+        new_policy = RuntimeIntegrityPolicy(policy_value)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid policy: {policy_value}. Must be one of: warn_only, block_critical, strict"
+        )
+
+    set_ri_policy(new_policy)
+    logger.info(f"Runtime integrity policy changed to: {new_policy.value}")
+
+    return {
+        "phase": "26.6",
+        "endpoint": "runtime/integrity/policy",
+        "policy": new_policy.value,
+        "updated": True,
+    }
+
+
 @app.get("/learning/patterns")
 async def learning_patterns_endpoint(
     limit: int = 100,
@@ -6590,6 +6650,14 @@ async def startup_event():
                 )
         except Exception as e:
             logger.error(f"Phase 26.5: Runtime integrity check failed on startup: {e}")
+
+    # Phase 26.6: Log runtime integrity policy
+    if RUNTIME_INTEGRITY_POLICY_AVAILABLE:
+        try:
+            policy = get_ri_policy()
+            logger.info(f"Phase 26.6: Runtime integrity policy: {policy.value}")
+        except Exception as e:
+            logger.error(f"Phase 26.6: Failed to read policy: {e}")
 
     logger.info("Task Controller ready (Phase 19: Learning, Memory & System Intelligence)")
     logger.info("SAFETY: Production deployment requires DUAL APPROVAL (different users).")

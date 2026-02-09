@@ -272,6 +272,7 @@ class TestExecutionGateIntegration:
     def test_deploy_test_sets_deep_e2e_required(self, tmp_path):
         """DEPLOY_TEST action should set deep_e2e_required=True."""
         import os
+        from unittest.mock import patch
         os.environ["EXECUTION_AUDIT_LOG"] = str(tmp_path / "audit.log")
 
         from controller.execution_gate import (
@@ -298,7 +299,11 @@ class TestExecutionGateIntegration:
             task_description="Deploy to testing",
         )
 
-        decision = gate.evaluate(request)
+        with patch(
+            "controller.runtime_enforcement.RuntimeIntegrityEnforcer._get_status_fail_closed",
+            return_value="HEALTHY",
+        ):
+            decision = gate.evaluate(request)
         assert decision.allowed is True
         assert decision.deep_e2e_required is True
 

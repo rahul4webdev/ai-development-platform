@@ -166,6 +166,35 @@ async def safe_edit_text(query, text: str, **kwargs):
         raise
 
 
+async def check_runtime_integrity_or_block(update: Update, action_name: str = "action") -> bool:
+    """
+    Phase 26.6: Check runtime integrity enforcement before allowing a command.
+
+    Returns True if the action is BLOCKED (caller should return early).
+    Returns False if the action is ALLOWED (caller should proceed).
+    """
+    try:
+        from controller.runtime_enforcement import RuntimeIntegrityEnforcer
+        from controller.runtime_integrity_policy import get_policy, RuntimeIntegrityPolicy
+        status = RuntimeIntegrityEnforcer._get_status_fail_closed()
+        policy = get_policy()
+        if status == "FATAL" and policy in (
+            RuntimeIntegrityPolicy.BLOCK_CRITICAL,
+            RuntimeIntegrityPolicy.STRICT,
+        ):
+            await update.message.reply_text(
+                "PLATFORM BLOCKED (FATAL RUNTIME STATE)\n\n"
+                "Automation is paused.\n"
+                "Run: /runtime_check"
+            )
+            return True
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"Runtime integrity check failed for {action_name}: {e}")
+    return False
+
+
 def extract_api_error(result: dict) -> str:
     """
     Extract a human-readable error message from API response.
@@ -2767,6 +2796,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 @role_required(UserRole.OWNER, UserRole.ADMIN, UserRole.TESTER)
 async def new_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /new_project command."""
+    # Phase 26.6: Runtime integrity enforcement
+    if await check_runtime_integrity_or_block(update, "new_project"):
+        return
+
     user_id = update.effective_user.id
     safety.log_action(user_id, "new_project_start", {})
 
@@ -2873,6 +2906,10 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """
     /approve <project> <aspect> - Approve testing (Phase 13.5)
     """
+    # Phase 26.6: Runtime integrity enforcement
+    if await check_runtime_integrity_or_block(update, "approve"):
+        return
+
     if not context.args:
         # Show interactive project selection for approval
         projects = await get_projects_for_selection("approval")
@@ -3274,6 +3311,10 @@ async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
       /rescue <project> reset   - Reset rescue state and re-validate
       /rescue <project> validate - Manually trigger validation
     """
+    # Phase 26.6: Runtime integrity enforcement
+    if await check_runtime_integrity_or_block(update, "rescue"):
+        return
+
     try:
         from controller.rescue_engine import get_rescue_engine
 

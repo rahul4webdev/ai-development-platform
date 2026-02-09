@@ -121,6 +121,9 @@ class BlockReason(str, Enum):
     # Meta-remediation failures
     UNRESOLVED_META_FAILURE = "unresolved_meta_failure"
 
+    # Runtime integrity failures
+    RUNTIME_INTEGRITY_FATAL = "runtime_integrity_fatal"
+
     # Chain validation failures
     CHAIN_VALIDATION_FAILED = "chain_validation_failed"
     INPUT_HASH_MISMATCH = "input_hash_mismatch"

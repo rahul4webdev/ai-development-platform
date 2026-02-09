@@ -333,6 +333,9 @@ class GateDecision:
     # Phase 26: Meta-remediation
     meta_remediation_blocks: bool = False
     meta_remediation_status: Optional[str] = None
+    # Phase 26.6: Runtime integrity enforcement
+    runtime_integrity_blocks: bool = False
+    runtime_integrity_status: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -363,6 +366,9 @@ class GateDecision:
             # Phase 26: Meta-remediation
             "meta_remediation_blocks": self.meta_remediation_blocks,
             "meta_remediation_status": self.meta_remediation_status,
+            # Phase 26.6: Runtime integrity
+            "runtime_integrity_blocks": self.runtime_integrity_blocks,
+            "runtime_integrity_status": self.runtime_integrity_status,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -801,6 +807,48 @@ class ExecutionGate:
             except Exception as e:
                 logger.warning(f"Meta-remediation check failed (proceeding): {e}")
 
+        # Step 17: Phase 26.6 - Runtime integrity enforcement
+        # If runtime integrity is FATAL and policy blocks → DENY execution.
+        # Read-only actions (read_code) are allowed even when FATAL.
+        # Fail-closed: if check cannot run, treat as FATAL.
+        ri_blocks = False
+        ri_status = None
+        if requested_action not in ExecutionAction.all_read_actions():
+            try:
+                from controller.runtime_enforcement import RuntimeIntegrityEnforcer, ActionType as RIActionType
+                ri_status = RuntimeIntegrityEnforcer._get_status_fail_closed()
+                if ri_status == "FATAL":
+                    from controller.runtime_integrity_policy import get_policy, RuntimeIntegrityPolicy
+                    policy = get_policy()
+                    if policy in (RuntimeIntegrityPolicy.BLOCK_CRITICAL, RuntimeIntegrityPolicy.STRICT):
+                        ri_blocks = True
+                        decision = GateDecision(
+                            allowed=False,
+                            request=request,
+                            allowed_actions=allowed_actions,
+                            denied_reason=f"RUNTIME_INTEGRITY_FATAL: status={ri_status}, policy={policy.value}",
+                            hard_fail=False,
+                            workspace_validated=True,
+                            governance_docs_present=True,
+                            drift_checked=drift_checked,
+                            drift_evaluation=drift_evaluation,
+                            deep_e2e_required=deep_e2e_required,
+                            micro_remediation_blocks=micro_remediation_blocks,
+                            micro_remediation_status=micro_remediation_status,
+                            test_governance_blocks=test_governance_blocks,
+                            test_governance_violations=test_governance_violations,
+                            meta_remediation_blocks=meta_rem_blocks,
+                            meta_remediation_status=meta_rem_status,
+                            runtime_integrity_blocks=True,
+                            runtime_integrity_status=ri_status,
+                        )
+                        self._log_audit(request, decision, "DENIED")
+                        return decision
+            except ImportError:
+                pass  # runtime_enforcement not available, fail-open
+            except Exception as e:
+                logger.warning(f"Runtime integrity check failed in gate (proceeding): {e}")
+
         # All checks passed - execution is ALLOWED
         decision = GateDecision(
             allowed=True,
@@ -819,6 +867,8 @@ class ExecutionGate:
             test_governance_violations=test_governance_violations,
             meta_remediation_blocks=meta_rem_blocks,
             meta_remediation_status=meta_rem_status,
+            runtime_integrity_blocks=ri_blocks,
+            runtime_integrity_status=ri_status,
         )
         self._log_audit(request, decision, "ALLOWED")
 
